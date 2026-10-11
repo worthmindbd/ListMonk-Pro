@@ -1,0 +1,21 @@
+services:
+  dashboard:
+    build: .
+    container_name: listmonk-dashboard
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DATA_DIR=/data
+    volumes:
+      - dashboard-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/auth/login')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  dashboard-data:

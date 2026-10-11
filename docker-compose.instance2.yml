@@ -1,0 +1,12 @@
+# Override for second dashboard instance (dash2).
+# Usage: docker compose -f docker-compose.yml -f docker-compose.instance2.yml up -d --build
+services:
+  dashboard:
+    container_name: listmonk-dashboard-2
+    ports: !override
+      - "127.0.0.1:8001:8000"
+    volumes: !override
+      - dashboard-data-2:/data
+
+volumes:
+  dashboard-data-2:

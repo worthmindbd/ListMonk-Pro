@@ -1,0 +1,46 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd /root/Listmonk-Dashboard
+            git fetch origin main
+            git reset --hard origin/main
+            docker compose up -d --build
+            for i in $(seq 1 15); do
+              if curl -fs http://localhost:8000/auth/login > /dev/null; then
+                echo "Instance 1 is healthy!"
+                break
+              fi
+              echo "Waiting for Instance 1 to respond ($i/15)..."
+              sleep 2
+            done
+            curl -fs http://localhost:8000/auth/login > /dev/null || (echo "Instance 1 deploy failed!" && exit 1)
+
+            cd /root/Listmonk-Dashboard-2
+            git fetch origin main
+            git reset --hard origin/main
+            docker compose -f docker-compose.yml -f docker-compose.instance2.yml up -d --build
+            for i in $(seq 1 15); do
+              if curl -fs http://localhost:8001/auth/login > /dev/null; then
+                echo "Instance 2 is healthy!"
+                break
+              fi
+              echo "Waiting for Instance 2 to respond ($i/15)..."
+              sleep 2
+            done
+            curl -fs http://localhost:8001/auth/login > /dev/null || (echo "Instance 2 deploy failed!" && exit 1)
+
