@@ -79,7 +79,7 @@ ListMonk-Pro/
 │   └── test_regressions.py        # Route order, IMAP seen-marking, prune, timestamp regressions
 ├── .github/
 │   └── workflows/
-│       └── deploy.yml             # SSH automated deploy for multi-instance VPS
+│       └── deploy.yml             # SSH automated deploy for VPS
 ├── docs/
 │   └── superpowers/               # Design specs and execution plans
 ├── .dockerignore
@@ -87,8 +87,7 @@ ListMonk-Pro/
 ├── .gitignore
 ├── DESIGN.md                      # UI design system and token specification
 ├── Dockerfile                     # Production non-root container definition
-├── docker-compose.yml             # Primary instance Docker compose
-├── docker-compose.instance2.yml   # Second instance override compose (port 8001, data-2)
+├── docker-compose.yml             # Production Docker compose
 ├── pytest.ini                     # Pytest configuration
 ├── requirements.txt               # Production Python dependencies
 ├── requirements-dev.txt           # Development and testing dependencies
@@ -282,6 +281,6 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 6. **Never chain `.get(k, {}).get(...)`** on ListMonk response fields that can be explicitly null (notably `bounce["campaign"]`). Use the helpers in `bounce_filters.py` (`bounce_campaign_id` / `bounce_campaign_name`).
 7. **Failed actions return a status code** — raise `HTTPException` rather than returning `200 {"error": ...}`, so monitoring and the frontend can distinguish success from failure. The one exception is `/api/auto-unblock/status`, which degrades to a `200` with an `error` field because the Settings page loads it via `Promise.all`.
 8. **Thread/Async Safety** — always use `asyncio.Lock` when modifying shared mutable resources (`_INGEST_LOCK`, `_scan_lock`, `_log_lock`).
-9. **Multi-Instance Support** — respect `DATA_DIR` so changes remain compatible with multi-instance deployments (`docker-compose.instance2.yml`).
+9. **Persistent Storage** — respect `DATA_DIR` for mounted volumes and file storage (`session_secret.key`, `reply_log.json`, etc.).
 10. **Frontend error contract** — `API.request` toasts server errors once and marks the rejection `err.handled = true`. Callers must not toast again; wrap mutating handlers in `try/catch` or the promise rejection is unhandled.
 11. **Module-level caches** — any service cache in a module global needs an invalidation hook and must be reset by `tests/conftest.py`, or tests leak state into each other.

@@ -179,12 +179,6 @@ nano .env  # Set your credentials and secure passwords
 docker compose up -d --build
 ```
 
-### 3. Multi-Instance Setup (Optional)
-To run a secondary dashboard instance (e.g. for a second ListMonk installation) on port `8001`:
-```bash
-docker compose -f docker-compose.yml -f docker-compose.instance2.yml up -d --build
-```
-
 ### 4. Nginx Reverse Proxy Configuration
 ```nginx
 server {
@@ -293,8 +287,7 @@ ListMonk-Pro/
     test_regressions.py        # Route order, IMAP seen-marking, prune, timestamp regressions
   .github/workflows/
     deploy.yml                 # Automated SSH deploy on push to main
-  docker-compose.yml           # Primary instance compose definition
-  docker-compose.instance2.yml # Secondary instance compose override
+  docker-compose.yml           # Compose definition
   Dockerfile
   pytest.ini
   requirements.txt
