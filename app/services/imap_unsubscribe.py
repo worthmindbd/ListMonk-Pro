@@ -19,7 +19,7 @@ from typing import Optional
 from app.config import settings
 from app.services.listmonk_client import ListMonkClient
 from app.services.unsubscribe_log import (
-    load_log, save_log, append_log, load_settings, save_settings,
+    load_log, save_log, append_log, load_settings,
     load_processed_emails, mark_processed,
     _log_lock,
 )
@@ -31,6 +31,11 @@ logger = logging.getLogger("imap_unsubscribe")
 MAX_CAMPAIGN_PAGES = 20  # 2000 campaigns
 CAMPAIGN_PAGE_SIZE = 100
 
+# Always scan at least this far back for unseen unsubscribe replies. An
+# unsubscribe for a campaign sent last month can arrive after this month's
+# campaign has already moved the "campaign month" window forward.
+MIN_LOOKBACK_DAYS = 30
+
 UNSUBSCRIBE_KEYWORDS = [
     "remove me",
     "unsubscribe me",
@@ -40,6 +45,14 @@ UNSUBSCRIBE_KEYWORDS = [
 KEYWORD_PATTERN = re.compile(
     "|".join(re.escape(kw) for kw in UNSUBSCRIBE_KEYWORDS),
     re.IGNORECASE,
+)
+
+# "On <date>,\n<person> wrote:" quote headers wrapped over up to a few lines,
+# which a line-by-line scan cannot see. The inner part rejects blank lines so
+# the match cannot jump across a paragraph break into unrelated text.
+_MULTILINE_QUOTE_RE = re.compile(
+    r"^On\s+[^\n]*(?:\n(?![ \t]*\n)[^\n]*){0,3}?wrote:\s*$",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 
@@ -57,13 +70,20 @@ def _extract_reply_only(full_body: str) -> str:
 
     Handles common quote patterns:
     - Lines starting with ">" (standard quoting)
-    - "On <date> <someone> wrote:" markers
+    - "On <date> <someone> wrote:" markers, including headers wrapped over
+      several lines (Gmail)
     - "From: <address>" forwarding headers
     - "-----Original Message-----" (Outlook)
     - "Sent: " / "To: " / "Subject: " header blocks in quoted replies
     """
     lines = full_body.splitlines()
     reply_lines = []
+
+    # Multi-line "On <date>,\n  <person> wrote:" headers cannot be detected
+    # line-by-line, so cut the body at the first one before the scan below.
+    multiline_quote = _MULTILINE_QUOTE_RE.search(full_body)
+    if multiline_quote:
+        lines = full_body[:multiline_quote.start()].splitlines()
 
     # Patterns that indicate the start of quoted/forwarded content
     quote_start_patterns = [
@@ -495,25 +515,30 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
 
             await asyncio.to_thread(conn.select, "INBOX")
 
-            # Only fetch UNSEEN emails from the campaign month. Processed
-            # messages are marked \Seen, so clearing/resetting the log no
-            # longer causes old unsubscribe replies to be handled again.
+            # Only fetch UNSEEN emails, but never look back less than
+            # MIN_LOOKBACK_DAYS: anchoring on the newest campaign *month* alone
+            # means a late reply to an older campaign becomes invisible as soon
+            # as a newer campaign starts. Processed messages are marked \Seen,
+            # so clearing/resetting the log does not cause re-processing.
+            min_since = datetime.now(timezone.utc) - timedelta(days=MIN_LOOKBACK_DAYS)
             if latest_campaign_date:
-                # Search from the 1st of the campaign month
-                since_date = latest_campaign_date.replace(day=1)
-                since_str = imap_date(since_date)
-                status, msg_ids = await asyncio.to_thread(
-                    conn.search, None, f'(UNSEEN SINCE {since_str})'
+                since_date = min(latest_campaign_date.replace(day=1), min_since)
+                logger.info(
+                    f"[IMAP] Searching unseen emails SINCE {imap_date(since_date)} "
+                    f"(campaign month, {MIN_LOOKBACK_DAYS}-day floor)"
                 )
-                logger.info(f"[IMAP] Searching unseen emails SINCE {since_str} (campaign month)")
             else:
-                # Fallback: scan last 30 days if no campaigns found
-                since_date = datetime.now(timezone.utc) - timedelta(days=30)
-                since_str = imap_date(since_date)
-                status, msg_ids = await asyncio.to_thread(
-                    conn.search, None, f'(UNSEEN SINCE {since_str})'
+                # Fallback: no campaigns found at all
+                since_date = min_since
+                logger.warning(
+                    f"[IMAP] No campaigns found, searching unseen emails "
+                    f"SINCE {imap_date(since_date)}"
                 )
-                logger.warning(f"[IMAP] No campaigns found, searching unseen emails SINCE {since_str}")
+
+            since_str = imap_date(since_date)
+            status, msg_ids = await asyncio.to_thread(
+                conn.search, None, f'(UNSEEN SINCE {since_str})'
+            )
 
             if status != "OK" or not msg_ids[0]:
                 return {"scanned": 0, "matched": 0, "processed": 0, "errors": 0,

@@ -273,8 +273,11 @@ class ListMonkClient:
             params["campaign_id"] = campaign_id
         if source:
             params["source"] = source
-        if bounce_type:
-            params["bounce_type"] = bounce_type
+        # ListMonk's filter parameter is `type` (hard|soft|complaint). Sending
+        # bounce_type would be silently ignored and force the caller to page
+        # through the entire bounce table to filter client-side.
+        if bounce_type and bounce_type.lower() not in ("all",):
+            params["type"] = bounce_type
         return await self._request("GET", "/api/bounces", params=params)
 
     async def delete_bounce(self, bounce_id: int) -> dict:

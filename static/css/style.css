@@ -1146,6 +1146,23 @@ code {
     border-color: rgba(83, 58, 253, 0.25);
 }
 
+.badge-secondary {
+    background: rgba(148, 163, 184, 0.14);
+    color: var(--text-secondary);
+    border-color: rgba(148, 163, 184, 0.32);
+}
+
+.badge-accent {
+    background: rgba(83, 58, 253, 0.14);
+    color: var(--primary-soft);
+    border-color: rgba(83, 58, 253, 0.3);
+}
+
+[data-theme="light"] .badge-accent {
+    color: var(--primary);
+    background: rgba(83, 58, 253, 0.1);
+}
+
 .badge-default {
     background: var(--bg-surface-hover);
     color: var(--text-secondary);
@@ -1732,6 +1749,19 @@ td .action-btns {
 
 @keyframes spin {
     to { transform: rotate(360deg); }
+}
+
+/* Inline spinner for small buttons (e.g. "Scanning Mailbox...") */
+.spinner-sm {
+    display: inline-block;
+    width: 13px;
+    height: 13px;
+    border: 2px solid rgba(255, 255, 255, 0.35);
+    border-top-color: #ffffff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: -2px;
+    margin-right: 6px;
 }
 
 .empty-state {

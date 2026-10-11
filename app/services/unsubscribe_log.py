@@ -7,7 +7,6 @@ imap_unsubscribe.py and link_unsubscribe.py.
 import asyncio
 import json
 import os
-import re
 import tempfile
 from pathlib import Path
 from typing import Any

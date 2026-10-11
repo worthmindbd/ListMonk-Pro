@@ -27,7 +27,9 @@ from app.services.listmonk_client import ListMonkClient
 
 logger = logging.getLogger("bounce_ingest")
 
-from app.services.imap_helpers import safe_email_for_query, imap_date, extract_email_body
+from app.services.imap_helpers import (
+    safe_email_for_query, imap_date, extract_email_body, render_container_text,
+)
 
 
 # ─── Classification ──────────────────────────────────────────────────────────
@@ -53,7 +55,6 @@ HARD_KEYWORD_PATTERNS = [
     r"unknown recipient",
     r"does not have an? account",
     r"email account that you tried to reach does not exist",
-    r"relay access denied",
     r"no such (?:recipient|mailbox|address)",
 ]
 
@@ -103,6 +104,10 @@ def classify_bounce(body: str, subject: str = "") -> dict:
         reason_tag = "soft: quota_exceeded"
     elif any(kw in lowered for kw in ("spamhaus", "blacklist", "blocklist", "rbl", "dnsbl")):
         reason_tag = "soft: blacklist"
+    elif "relay access denied" in lowered or "access denied" in lowered:
+        # 5.7.x policy/relay rejection: the mailbox may be perfectly valid, the
+        # receiving server just refuses to relay for us. Never blocklist on it.
+        reason_tag = "soft: relay_denied"
     elif any(kw in lowered for kw in ("reputation", "5.7.1")):
         reason_tag = "soft: reputation_policy"
     elif any(kw in lowered for kw in ("greylist", "try again", "try later", "temporary")):
@@ -144,8 +149,10 @@ def _extract_bounced_recipient(msg: email.message.EmailMessage, body: str) -> Op
     if msg.is_multipart():
         for part in msg.walk():
             if part.get_content_type() == "message/delivery-status":
-                payload = part.get_payload(decode=True)
-                dsn_text = payload.decode("utf-8", errors="replace") if payload else str(part.get_payload())
+                # The delivery-status part is a container: its fields live in
+                # child messages, so get_payload(decode=True) is None and the
+                # recipients would be invisible without expanding it.
+                dsn_text = render_container_text(part)
                 for line in dsn_text.splitlines():
                     if line.lower().startswith(("final-recipient:", "original-recipient:")):
                         match = re.search(r"[\w.+-]+@[\w.-]+\.\w+", line)
@@ -194,6 +201,63 @@ def _extract_campaign_hint(msg: email.message.EmailMessage) -> Optional[str]:
 
 
 # ─── Core ingestion ──────────────────────────────────────────────────────────
+
+# Only unseen DSNs from the last BOUNCE_SCAN_DAYS days are scanned, so campaign
+# attribution must be able to cover the same window. A single page of the 50
+# newest campaigns silently dropped bounces for anything older.
+BOUNCE_SCAN_DAYS = 30
+MAX_CAMPAIGN_PAGES = 20
+CAMPAIGN_PAGE_SIZE = 100
+
+
+def _parse_campaign_dt(created: str) -> Optional[datetime]:
+    """Parse a ListMonk ``created_at`` string into an aware UTC datetime."""
+    if not created:
+        return None
+    try:
+        dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        try:
+            dt = datetime.fromisoformat(created[:10])
+        except (ValueError, TypeError):
+            return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+async def _fetch_campaigns_covering(
+    client: ListMonkClient, cutoff: datetime,
+) -> tuple[list[dict], bool]:
+    """Fetch campaigns newest-first until ``cutoff`` is covered.
+
+    Returns ``(campaigns, complete)``. ``complete`` is False when the page cap
+    was reached before walking back to ``cutoff``, which means very old
+    campaigns are missing from the list and attribution may skip their bounces.
+    """
+    campaigns: list[dict] = []
+    oldest: Optional[datetime] = None
+    page = 1
+
+    while True:
+        res = await client.get_campaigns(
+            page=page, per_page=CAMPAIGN_PAGE_SIZE,
+            order_by="created_at", order="DESC",
+        )
+        results = (res.get("data") or {}).get("results") or []
+        if not results:
+            return campaigns, True
+
+        campaigns.extend(results)
+        for c in results:
+            dt = _parse_campaign_dt(c.get("created_at", ""))
+            if dt is not None and (oldest is None or dt < oldest):
+                oldest = dt
+
+        if oldest is not None and oldest <= cutoff:
+            return campaigns, True
+        if page >= MAX_CAMPAIGN_PAGES:
+            return campaigns, False
+        page += 1
+
 
 def connect_bounce_imap_rw() -> Optional[imaplib.IMAP4_SSL]:
     """Connect to the bounce IMAP mailbox in read-write mode (needed to mark seen)."""
@@ -245,19 +309,26 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
         errors = 0
         skipped_reasons: dict = {}
 
-        # Cache recent campaigns once for the fallback attribution.
+        # Campaign history covering the whole DSN scan window, fetched once for
+        # the fallback attribution.
+        scan_since = datetime.now(timezone.utc) - timedelta(days=BOUNCE_SCAN_DAYS)
         try:
-            camp_res = await client.get_campaigns(
-                page=1, per_page=50, order_by="created_at", order="DESC",
+            recent_campaigns, campaigns_complete = await _fetch_campaigns_covering(
+                client, scan_since,
             )
-            recent_campaigns = camp_res.get("data", {}).get("results", [])
+            if not campaigns_complete:
+                logger.warning(
+                    "[BounceIngest] Campaign history truncated after %d pages; "
+                    "bounces for campaigns older than %s will be skipped",
+                    MAX_CAMPAIGN_PAGES, scan_since.date(),
+                )
         except Exception as e:
             logger.warning(f"Could not fetch recent campaigns: {e}")
             recent_campaigns = []
 
         try:
             await asyncio.to_thread(conn.select, "INBOX", readonly=False)
-            since = imap_date(datetime.now(timezone.utc) - timedelta(days=30))
+            since = imap_date(scan_since)
             status, msg_ids = await asyncio.to_thread(
                 conn.search, None, f"(UNSEEN SINCE {since})"
             )
@@ -430,20 +501,8 @@ def _pick_campaign(
             continue
         if not any(lid in subscriber_list_ids for lid in camp_list_ids):
             continue
-        created = camp.get("created_at", "")
-        if not created:
-            continue
-        try:
-            clean_iso = created.replace("Z", "+00:00")
-            camp_date = datetime.fromisoformat(clean_iso)
-            if camp_date.tzinfo is None:
-                camp_date = camp_date.replace(tzinfo=timezone.utc)
-        except (ValueError, TypeError):
-            try:
-                camp_date = datetime.fromisoformat(created[:10]).replace(tzinfo=timezone.utc)
-            except (ValueError, TypeError):
-                continue
-        if camp_date <= cutoff:
+        camp_date = _parse_campaign_dt(camp.get("created_at", ""))
+        if camp_date is not None and camp_date <= cutoff:
             return camp
 
     return None

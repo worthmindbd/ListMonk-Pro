@@ -160,7 +160,8 @@ const Deliverability = {
             await this.render();
         } catch (err) {
             App.closeModal();
-            App.toast(`Failed to apply preset: ${err?.message}`, 'danger');
+            // API.request already surfaced the server message.
+            console.error('Apply preset failed:', err);
         }
     }
 };

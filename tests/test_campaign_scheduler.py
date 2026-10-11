@@ -1,4 +1,4 @@
-from datetime import datetime, time
+from datetime import datetime
 from zoneinfo import ZoneInfo
 import pytest
 from unittest.mock import patch

@@ -32,7 +32,7 @@ from app.auth import (
     is_login_rate_limited, record_login_failure, clear_login_failures,
     client_ip_from_request,
 )
-from app.services.task_utils import spawn, shutdown as shutdown_tasks
+from app.services.task_utils import shutdown as shutdown_tasks
 from app.services.imap_reply_tracker import scan_and_track_replies
 from app.routers import (
     subscribers, lists, campaigns, templates, bounces, converter, unsubscribes,
@@ -214,10 +214,45 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 @app.exception_handler(httpx.HTTPStatusError)
 async def httpx_error_handler(request: Request, exc: httpx.HTTPStatusError):
-    return JSONResponse(status_code=exc.response.status_code, content={"detail": str(exc)})
+    # ListMonk API errors are forwarded to the SPA. Upstream *auth* failures
+    # are reported as 502: the frontend treats every 401 as its own session
+    # expiry and redirects to /auth/login, so echoing ListMonk's 401 for a bad
+    # LISTMONK_USER/API key would trap the user in a login loop.
+    upstream_status = exc.response.status_code
+    status = 502 if upstream_status in (401, 403) else upstream_status
+
+    detail = str(exc)
+    try:
+        payload = exc.response.json()
+        if isinstance(payload, dict):
+            detail = payload.get("message") or payload.get("error") or detail
+    except Exception:
+        pass
+    if status == 502:
+        detail = (
+            f"ListMonk rejected the dashboard's API credentials "
+            f"(HTTP {upstream_status}). Check LISTMONK_USER and "
+            f"LISTMONK_API_KEY. Upstream response: {detail}"
+        )
+    return JSONResponse(status_code=status, content={"detail": detail})
+
+
+@app.exception_handler(httpx.TransportError)
+async def httpx_transport_error_handler(request: Request, exc: httpx.TransportError):
+    """Report an unreachable ListMonk as 502 instead of an opaque 500."""
+    logger.error(f"ListMonk connection failed: {exc}")
+    return JSONResponse(
+        status_code=502,
+        content={"detail": f"Cannot reach the ListMonk API: {exc}"},
+    )
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
-jinja_env = Environment(loader=FileSystemLoader(BASE_DIR / "templates"))
+# autoescape is ON: no template interpolates user data today, but leaving it
+# off makes any future {{ value }} an XSS by default.
+jinja_env = Environment(
+    loader=FileSystemLoader(BASE_DIR / "templates"),
+    autoescape=True,
+)
 
 # Include routers
 app.include_router(subscribers.router, prefix="/api/subscribers", tags=["Subscribers"])

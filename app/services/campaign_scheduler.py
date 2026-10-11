@@ -12,7 +12,6 @@ import asyncio
 import json
 import logging
 from datetime import datetime, time
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from app.config import settings
@@ -63,6 +62,8 @@ def save_schedule(schedule: dict):
         )
         with os.fdopen(temp_fd, "w") as f:
             json.dump(schedule, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(temp_path, SCHEDULE_FILE)
     except OSError as e:
         logger.error(f"Failed to save schedule to {SCHEDULE_FILE}: {e}")

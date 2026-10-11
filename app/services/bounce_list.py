@@ -2,18 +2,20 @@
 Paginated bounce listing with opener exclusion — fast path for UI pages.
 """
 
-from typing import Optional
+import logging
+from typing import AsyncIterator, Optional
 
 from app.services.bounce_filters import (
     bounce_campaign_id,
     build_opener_emails_by_campaign,
     email_opened_campaign,
     exclude_openers_from_bounces,
-    filter_bounces_excluding_openers,
 )
 from app.services.hard_bounce_cache import get_all_hard_bounce_counts, get_hard_bounce_count
 from app.services.listmonk_client import ListMonkClient
 from app.services.opener_cache import get_cached_opener_emails, is_cached
+
+logger = logging.getLogger("bounce_list")
 
 LM_FETCH_SIZE = 100
 MAX_LM_PAGES = 300
@@ -24,6 +26,58 @@ CHECK_CONCURRENCY = 25
 # holds more than a handful of bounces — and it warms opener_cache, which makes
 # every later page an in-memory lookup instead of another round of queries.
 COLD_CACHE_EMAIL_THRESHOLD = 20
+
+
+async def _filter_bounce_batch(
+    client: ListMonkClient, batch: list[dict], bounce_type: str = "",
+) -> list[dict]:
+    """Apply type + opener filtering to one ListMonk page of bounces."""
+    if bounce_type and bounce_type.lower() != "all":
+        batch = [b for b in batch if b.get("type") == bounce_type]
+    if bounce_type == "soft":
+        return batch
+
+    hard_bounces = [b for b in batch if b.get("type") == "hard"]
+    other_bounces = [b for b in batch if b.get("type") != "hard"]
+    if not hard_bounces:
+        return other_bounces
+    filtered_hard = await filter_bounces_excluding_openers_fast(client, hard_bounces)
+    return filtered_hard + other_bounces
+
+
+async def iter_filtered_bounces(
+    client: ListMonkClient,
+    bounce_type: str = "",
+    campaign_id: Optional[int] = None,
+    source: str = "",
+    fetch_size: int = LM_FETCH_SIZE,
+) -> AsyncIterator[dict]:
+    """Yield opener-filtered bounces one ListMonk page at a time.
+
+    Unlike ``fetch_all_filtered_bounces`` this never holds more than one page
+    plus the (already cached) opener sets, which is what makes CSV export and
+    full-history deletion safe when the bounce table is large.
+    """
+    page = 1
+    while page <= MAX_LM_PAGES:
+        res = await client.get_bounces(page, fetch_size, campaign_id, source, bounce_type)
+        data = res.get("data") or {}
+        results = data.get("results") or []
+        if not results:
+            return
+
+        for bounce in await _filter_bounce_batch(client, results, bounce_type):
+            yield bounce
+
+        total = data.get("total")
+        if isinstance(total, (int, float)) and page * fetch_size >= total:
+            return
+        page += 1
+
+    logger.warning(
+        "Bounce pagination stopped at %d pages; remaining bounces were not listed",
+        MAX_LM_PAGES,
+    )
 
 
 async def filter_bounces_excluding_openers_fast(
@@ -107,23 +161,9 @@ async def fetch_filtered_bounces_page(
             break
 
         # If bounce_type is specified (e.g. "hard" or "soft"), filter by it; otherwise keep all
-        if bounce_type and bounce_type.lower() != "all":
-            batch = [b for b in raw_results if b.get("type") == bounce_type]
-        else:
-            batch = list(raw_results)
-
+        batch = await _filter_bounce_batch(client, raw_results, bounce_type)
         if batch:
-            # Opener exclusion is only relevant for hard bounces (false positives)
-            if bounce_type == "soft":
-                collected.extend(batch)
-            else:
-                hard_bounces = [b for b in batch if b.get("type") == "hard"]
-                other_bounces = [b for b in batch if b.get("type") != "hard"]
-                if hard_bounces:
-                    filtered_hard = await filter_bounces_excluding_openers_fast(client, hard_bounces)
-                    collected.extend(filtered_hard + other_bounces)
-                else:
-                    collected.extend(other_bounces)
+            collected.extend(batch)
 
         if lm_page * LM_FETCH_SIZE >= lm_total:
             break
@@ -155,28 +195,15 @@ async def fetch_all_filtered_bounces(
     campaign_id: Optional[int] = None,
     source: str = "",
 ) -> list[dict]:
-    """Full filtered list for export/delete — uses bulk path when openers are cached."""
-    all_bounces = await client.paginate_all(
-        client.get_bounces, per_page=500,
-        campaign_id=campaign_id, source=source,
-        bounce_type=bounce_type,
-    )
-    if bounce_type and bounce_type.lower() != "all":
-        all_bounces = [b for b in all_bounces if b.get("type") == bounce_type]
-    if not all_bounces:
-        return []
+    """Full filtered list for callers that genuinely need the dataset in memory.
 
-    # Soft bounces do not need opener exclusion
-    if bounce_type == "soft":
-        return all_bounces
-
-    hard_bounces = [b for b in all_bounces if b.get("type") == "hard"]
-    other_bounces = [b for b in all_bounces if b.get("type") != "hard"]
-    if not hard_bounces:
-        return other_bounces
-
-    if len(hard_bounces) <= 500:
-        filtered_hard = await filter_bounces_excluding_openers_fast(client, hard_bounces)
-    else:
-        filtered_hard = await filter_bounces_excluding_openers(client, hard_bounces)
-    return filtered_hard + other_bounces
+    Filtering is applied one page at a time (via ``iter_filtered_bounces``) so
+    the intermediate work stays bounded. For CSV export and history-wide
+    deletion, prefer streaming with ``iter_filtered_bounces`` directly.
+    """
+    return [
+        bounce async for bounce in iter_filtered_bounces(
+            client, bounce_type=bounce_type,
+            campaign_id=campaign_id, source=source,
+        )
+    ]

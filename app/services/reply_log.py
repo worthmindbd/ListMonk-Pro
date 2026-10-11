@@ -95,12 +95,27 @@ def load_processed_message_ids() -> set[str]:
     return {str(r.get("message_id")) for r in records if r.get("message_id")}
 
 
-def mark_processed_message_id(message_id: str) -> None:
-    if not message_id:
+def mark_processed_message_ids(message_ids) -> None:
+    """Persist several handled message IDs with a single read + write.
+
+    The reply scanner processes up to 200 messages per run; writing the whole
+    file once per message made each scan O(n²) on disk I/O.
+    """
+    fresh = {str(m) for m in message_ids if m}
+    if not fresh:
         return
     current = load_processed_message_ids()
-    current.add(message_id)
-    _atomic_write_json(PROCESSED_FILE, sorted(list(current)))
+    if fresh <= current:
+        return
+    current.update(fresh)
+    _atomic_write_json(PROCESSED_FILE, sorted(current))
+
+
+def mark_processed_message_id(message_id: str) -> None:
+    """Backwards-compatible single-ID wrapper."""
+    if not message_id:
+        return
+    mark_processed_message_ids([message_id])
 
 
 def load_settings() -> dict:

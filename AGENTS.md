@@ -74,6 +74,7 @@ ListMonk-Pro/
 │   ├── test_bounce_list.py        # Bounce pagination + type filtering
 │   ├── test_campaign_scheduler.py # Send-window logic
 │   ├── test_csv_converter.py      # Encoding/delimiter/column detection
+│   ├── test_replies_deliverability.py # Reply sentiment, reply API & deliverability preset tests
 │   ├── test_review_fixes.py       # Regression tests for the full-codebase review
 │   ├── conftest.py                # Resets module-level caches between tests
 │   └── test_regressions.py        # Route order, IMAP seen-marking, prune, timestamp regressions
@@ -172,6 +173,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | `scheduler_loop` | 60 seconds | Enforces daily send windows, auto-pauses/resumes campaigns |
 | `imap_scan_loop` | 1 hour | Scans IMAP inbox for replies + polls ListMonk for link unsubscribes |
 | `bounce_ingest_loop` | 1 hour | Scans bounce mailbox for unseen DSNs, classifies & records bounces |
+| `reply_scan_loop` | 15 minutes | Scans IMAP for cold-outreach prospect replies, strips quotes, classifies sentiment |
 | `start_cache_updater` | 5 minutes | Refreshes in-memory hard bounce counts per campaign |
 
 ### 6. CSV Converter (`app/services/csv_converter.py`)
@@ -180,7 +182,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 - Supports direct import into ListMonk with list selection and subscription mode (`subscribe`, `unsubscribed`).
 
 ### 7. Persistent Runtime State (`DATA_DIR`)
-- `app/config.py` provides `settings.data_path(filename)` to store mutable JSON state files (`schedule.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`).
+- `app/config.py` provides `settings.data_path(filename)` to store mutable JSON state files (`schedule.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`, `reply_log.json`, `reply_processed.json`, `reply_settings.json`).
 - In Docker, `DATA_DIR` defaults to `/data` (backed by a named volume).
 - Automatically migrates legacy root JSON files into `DATA_DIR` on first run.
 
@@ -250,6 +252,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/replies/status` | GET | Check IMAP connection status |
 | | `/api/replies/settings` | GET / PUT | Get / update reply tracker settings (auto-tagging) |
 | | `/api/replies/{id}/status` | PUT | Update reply status (unread, lead, replied, archived) |
+| | `/api/replies/{id}/blocklist` | POST | Blocklist the ListMonk subscriber behind a reply (resolved server-side) |
 | | `/api/replies/{id}` | DELETE | Delete / dismiss single reply record |
 | **Deliverability** | `/api/deliverability/checklist` | GET | Audit Listmonk settings against deliverability rules |
 | | `/api/deliverability/apply-preset` | POST | 1-click apply 'cold_email' or 'newsletter' preset |

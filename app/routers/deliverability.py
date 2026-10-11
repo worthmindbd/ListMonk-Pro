@@ -39,7 +39,7 @@ async def apply_preset(request: Request):
         raise HTTPException(status_code=400, detail="mode must be 'cold_email' or 'newsletter'")
 
     try:
-        result = await apply_deliverability_preset(listmonk, mode)
+        await apply_deliverability_preset(listmonk, mode)
         checklist = await get_deliverability_checklist(listmonk)
         return {
             "status": "ok",

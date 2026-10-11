@@ -10,8 +10,6 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from app.services.listmonk_client import ListMonkClient, listmonk as listmonk_singleton
-from app.config import settings
-from app.services.task_utils import spawn
 
 logger = logging.getLogger("auto_unblock")
 
@@ -23,6 +21,13 @@ QUERY_BLOCKLISTED_ENGAGED = (
 
 # Backward-compatible alias
 QUERY_BLOCKLISTED_CLICKERS = QUERY_BLOCKLISTED_ENGAGED
+
+
+# Bounded concurrency: unblocking a subscriber is a status update plus one
+# bounce fetch and a delete per record, so serial processing made a large
+# engaged-blocklisted set take minutes (and hold the manual-run request open).
+UNBLOCK_CONCURRENCY = 10
+BOUNCE_DELETE_CONCURRENCY = 10
 
 
 async def find_blocklisted_engaged(client: ListMonkClient) -> list[dict]:
@@ -38,22 +43,30 @@ async def find_blocklisted_clickers(client: ListMonkClient) -> list[dict]:
 
 
 async def delete_bounce_records_for_subscribers(client: ListMonkClient, subscriber_ids: list[int]) -> int:
-    """Delete all bounce records for the given subscriber IDs."""
+    """Delete all bounce records for the given subscriber IDs (bounded concurrency)."""
     deleted = 0
-    for sid in subscriber_ids:
-        try:
-            res = await client.get_subscriber_bounces(sid)
-            bounces = res.get("data", [])
-            for b in bounces:
+    sem = asyncio.Semaphore(BOUNCE_DELETE_CONCURRENCY)
+
+    async def _delete_for_subscriber(sid: int) -> None:
+        nonlocal deleted
+        async with sem:
+            try:
+                res = await client.get_subscriber_bounces(sid)
+            except Exception as e:
+                logger.error(f"Failed to fetch bounces for subscriber {sid}: {e}")
+                return
+
+            for b in res.get("data") or []:
                 bid = b.get("id")
-                if bid:
-                    try:
-                        await client.delete_bounce(bid)
-                        deleted += 1
-                    except Exception as e:
-                        logger.error(f"Failed to delete bounce {bid}: {e}")
-        except Exception as e:
-            logger.error(f"Failed to fetch bounces for subscriber {sid}: {e}")
+                if not bid:
+                    continue
+                try:
+                    await client.delete_bounce(bid)
+                    deleted += 1
+                except Exception as e:
+                    logger.error(f"Failed to delete bounce {bid}: {e}")
+
+    await asyncio.gather(*(_delete_for_subscriber(sid) for sid in subscriber_ids))
     return deleted
 
 
@@ -61,15 +74,23 @@ async def delete_bounce_records(client: ListMonkClient, emails: set[str]) -> int
     """Delete all bounce records for the given email addresses (fallback)."""
     deleted = 0
     all_bounces = await client.paginate_all(client.get_bounces, per_page=500)
-    bounce_ids_to_delete = [b["id"] for b in all_bounces if b.get("email") in emails]
+    bounce_ids_to_delete = [
+        b["id"] for b in all_bounces
+        if b.get("email") in emails and b.get("id")
+    ]
 
-    for bid in bounce_ids_to_delete:
-        try:
-            await client.delete_bounce(bid)
-            deleted += 1
-        except Exception as e:
-            logger.error(f"Failed to delete bounce {bid}: {e}")
+    sem = asyncio.Semaphore(BOUNCE_DELETE_CONCURRENCY)
 
+    async def _delete(bid: int) -> None:
+        nonlocal deleted
+        async with sem:
+            try:
+                await client.delete_bounce(bid)
+                deleted += 1
+            except Exception as e:
+                logger.error(f"Failed to delete bounce {bid}: {e}")
+
+    await asyncio.gather(*(_delete(bid) for bid in bounce_ids_to_delete))
     return deleted
 
 
@@ -79,24 +100,29 @@ async def unblock_subscribers(client: ListMonkClient, subscribers: list[dict]) -
     failed = 0
     unblocked = []
     unblocked_ids = []
+    sem = asyncio.Semaphore(UNBLOCK_CONCURRENCY)
 
     # Step 1: Re-enable all subscribers
-    for s in subscribers:
-        try:
-            await client.update_subscriber(s["id"], {
-                "email": s["email"],
-                "name": s.get("name", ""),
-                "status": "enabled",
-                "lists": [l["id"] for l in s.get("lists", [])],
-                "attribs": s.get("attribs", {}),
-            })
-            success += 1
-            unblocked.append(s["email"])
-            unblocked_ids.append(s["id"])
-            logger.info(f"Unblocked: {s['email']}")
-        except Exception as e:
-            failed += 1
-            logger.error(f"Failed to unblock {s['email']}: {e}")
+    async def _unblock(s: dict) -> None:
+        nonlocal success, failed
+        async with sem:
+            try:
+                await client.update_subscriber(s["id"], {
+                    "email": s["email"],
+                    "name": s.get("name", ""),
+                    "status": "enabled",
+                    "lists": [l["id"] for l in (s.get("lists") or [])],
+                    "attribs": s.get("attribs", {}),
+                })
+                success += 1
+                unblocked.append(s["email"])
+                unblocked_ids.append(s["id"])
+                logger.info(f"Unblocked: {s['email']}")
+            except Exception as e:
+                failed += 1
+                logger.error(f"Failed to unblock {s['email']}: {e}")
+
+    await asyncio.gather(*(_unblock(s) for s in subscribers))
 
     # Step 2: Delete bounce records for unblocked subscribers
     if unblocked_ids:

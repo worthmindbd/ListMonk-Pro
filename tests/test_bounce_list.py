@@ -2,7 +2,7 @@
 
 import pytest
 from unittest.mock import AsyncMock
-from app.services.bounce_list import fetch_filtered_bounces_page, fetch_all_filtered_bounces
+from app.services.bounce_list import fetch_filtered_bounces_page
 
 
 @pytest.mark.asyncio

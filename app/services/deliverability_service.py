@@ -6,7 +6,6 @@ between Newsletter Mode and Cold Email Mode.
 """
 
 import logging
-from typing import Any
 from app.services.listmonk_client import ListMonkClient
 
 logger = logging.getLogger("deliverability_service")

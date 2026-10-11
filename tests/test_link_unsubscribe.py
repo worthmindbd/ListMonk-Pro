@@ -126,7 +126,6 @@ async def test_scan_processes_new_link_unsubscribe(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_scan_blocklists_when_enabled(tmp_path, monkeypatch):
     """When blocklist_enabled=True, blocklist API is called."""
-    import json
     from app.services import link_unsubscribe as svc
 
     log_file = tmp_path / "unsubscribe_log.json"
@@ -165,7 +164,6 @@ async def test_scan_blocklists_when_enabled(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_scan_pagination_fetches_second_page(tmp_path, monkeypatch):
     """When first page has exactly per_page results, a second page must be fetched."""
-    import json
     from app.services import link_unsubscribe as svc
 
     log_file = tmp_path / "unsubscribe_log.json"
@@ -242,7 +240,6 @@ async def test_scan_attributes_to_newest_campaign_across_lists(tmp_path, monkeyp
     }
 
     async def mock_request(method, path, **kwargs):
-        params = kwargs.get("params", {})
         if method == "GET" and path == "/api/lists":
             return {"data": {"results": [
                 {"id": 1, "name": "Old List"},

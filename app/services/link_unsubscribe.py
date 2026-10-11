@@ -19,6 +19,8 @@ logger = logging.getLogger("link_unsubscribe")
 
 PER_PAGE = 100  # Patchable in tests
 MAX_PAGES_PER_LIST = 500  # Safety cap: 50k subscribers per list
+LIST_PAGE_SIZE = 100
+MAX_LIST_PAGES = 50  # Safety cap: 5000 lists
 CAMPAIGN_PAGE_SIZE = 100
 MAX_CAMPAIGN_PAGES = 20  # Safety cap: 2000 campaigns
 CAMPAIGN_HISTORY_TTL = 900  # 15 minutes; campaign creation is rare
@@ -28,6 +30,39 @@ _link_scan_lock = asyncio.Lock()
 # Full campaign history (newest first) used for attribution, plus its load time.
 _campaign_history: list[dict] = []
 _campaign_history_at: float = 0.0
+
+
+async def _fetch_all_lists(client: ListMonkClient) -> list[dict]:
+    """Fetch every list, tolerating ListMonk's ``minimal`` shortcut.
+
+    With ``minimal=true`` current ListMonk ignores pagination and returns the
+    whole set on page 1, while older versions paginate. De-duplicating by list
+    ID and stopping as soon as a page adds nothing new handles both shapes, so
+    an instance with more lists than one page never silently drops the extras.
+    """
+    seen: set = set()
+    lists: list[dict] = []
+
+    for page in range(1, MAX_LIST_PAGES + 1):
+        res = await client.get_lists(page=page, per_page=LIST_PAGE_SIZE, minimal=True)
+        results = (res.get("data") or {}).get("results") or []
+        if not results:
+            break
+
+        fresh = [lst for lst in results if lst.get("id") and lst["id"] not in seen]
+        if not fresh:
+            break
+
+        for lst in fresh:
+            seen.add(lst["id"])
+        lists.extend(fresh)
+    else:
+        logger.warning(
+            f"[LINK] List pagination stopped at {MAX_LIST_PAGES} pages; "
+            "unsubscribes in the remaining lists will be missed"
+        )
+
+    return lists
 
 
 def _pick_campaign_for_list_ids(campaigns: list, list_ids: set[int]) -> dict:
@@ -186,8 +221,7 @@ async def _scan_link_unsubscribes_impl(client: ListMonkClient) -> dict:
     blocklist_enabled = scan_settings.get("blocklist_enabled", False)
 
     try:
-        lists_result = await client.get_lists(page=1, per_page=200, minimal=True)
-        all_lists = lists_result.get("data", {}).get("results", [])
+        all_lists = await _fetch_all_lists(client)
     except Exception as e:
         logger.error(f"Failed to fetch lists: {e}")
         return {"scanned_lists": 0, "new_found": 0, "processed": 0, "errors": 1,

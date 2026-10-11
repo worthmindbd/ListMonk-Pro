@@ -1,6 +1,5 @@
 import csv
 import json
-import pytest
 
 from app.services.csv_converter import detect_columns, convert_csv
 

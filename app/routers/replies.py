@@ -11,6 +11,7 @@ from app.services.reply_log import (
     _log_lock
 )
 from app.services.imap_reply_tracker import scan_and_track_replies
+from app.services.imap_helpers import safe_email_for_query
 from app.services.listmonk_client import listmonk
 from app.config import settings
 
@@ -60,14 +61,17 @@ async def get_reply_stats():
     auto_reply = sum(1 for r in records if r.get("sentiment") == "auto_reply")
     negative = sum(1 for r in records if r.get("sentiment") == "negative")
 
-    # Fetch total sent across campaigns to calculate accurate reply rate
+    # Total sent must cover *all* campaigns, not just the newest page, or the
+    # reply rate is inflated. The campaign summary endpoint caches the full
+    # walk for a minute, so reuse it instead of re-paginating here.
     total_sent = 0
     try:
-        camp_res = await listmonk.get_campaigns(page=1, per_page=100)
-        camps = camp_res.get("data", {}).get("results", [])
-        total_sent = sum(c.get("sent", 0) for c in camps)
-    except Exception:
-        pass
+        from app.routers.campaigns import get_campaigns_summary
+
+        summary = await get_campaigns_summary()
+        total_sent = summary.get("sent", 0) or 0
+    except Exception as e:
+        logger.warning(f"Could not compute total sent for reply rate: {e}")
 
     reply_rate = round((total / total_sent * 100), 2) if total_sent > 0 else 0.0
 
@@ -158,6 +162,43 @@ async def update_status(reply_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Reply not found")
 
     return {"status": "ok", "id": reply_id, "new_status": new_status}
+
+
+@router.post("/{reply_id}/blocklist")
+async def blocklist_reply_sender(reply_id: str):
+    """Blocklist the ListMonk subscriber behind a prospect reply.
+
+    Resolving the email server-side keeps the address out of the client-built
+    ListMonk query string and validates it with the same helper the scanners
+    use, so a crafted Reply-To address cannot inject query syntax.
+    """
+    records = load_log()
+    record = next((r for r in records if str(r.get("id")) == str(reply_id)), None)
+    if not record:
+        raise HTTPException(status_code=404, detail="Reply not found")
+
+    email = (record.get("from_email") or "").strip()
+    safe_email = safe_email_for_query(email)
+    if not safe_email:
+        raise HTTPException(status_code=400, detail="Reply has no valid sender email")
+
+    try:
+        result = await listmonk.get_subscribers(1, 1, f"subscribers.email = '{safe_email}'")
+    except Exception as e:
+        logger.error(f"Subscriber lookup failed for {email}: {e}")
+        raise HTTPException(status_code=502, detail=f"Subscriber lookup failed: {e}")
+    subscribers = (result.get("data") or {}).get("results") or []
+    if not subscribers:
+        raise HTTPException(status_code=404, detail=f"No ListMonk subscriber found for {email}")
+
+    subscriber_id = subscribers[0]["id"]
+    try:
+        await listmonk.blocklist_subscriber(subscriber_id)
+    except Exception as e:
+        logger.error(f"Blocklist failed for {email}: {e}")
+        raise HTTPException(status_code=502, detail=f"Blocklist failed: {e}")
+
+    return {"status": "ok", "subscriber_id": subscriber_id, "email": email}
 
 
 @router.delete("/{reply_id}")

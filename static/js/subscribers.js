@@ -120,6 +120,9 @@ const Subscribers = {
         try {
             const result = await API.get(`/api/subscribers/${id}`);
             const s = result?.data || {};
+            // Keep the full record: ListMonk's PUT is a full replace, so the
+            // update must echo the subscriber's existing list memberships.
+            this._editing = s;
 
             App.setContent(`
                 <div class="inline-form">
@@ -158,7 +161,18 @@ const Subscribers = {
         try { attribs = JSON.parse(document.getElementById('editAttribs').value); } catch {}
 
         try {
-            await API.put(`/api/subscribers/${id}`, { email, name, status, attribs });
+            // ListMonk's PUT /api/subscribers/{id} replaces the whole record:
+            // omitting `lists` removes the subscriber from every list. Echo the
+            // current memberships so an edit cannot silently unsubscribe them.
+            let lists = [];
+            if (this._editing && this._editing.id === id) {
+                lists = (this._editing.lists || []).map(l => l.id);
+            } else {
+                const res = await API.get(`/api/subscribers/${id}`);
+                lists = ((res?.data?.lists) || []).map(l => l.id);
+            }
+
+            await API.put(`/api/subscribers/${id}`, { email, name, status, attribs, lists });
             App.toast('Subscriber updated', 'success');
             this.render();
         } catch {

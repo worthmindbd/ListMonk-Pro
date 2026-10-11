@@ -215,9 +215,7 @@ async def test_history_reaching_the_end_reports_complete():
 @pytest.mark.asyncio
 async def test_history_page_cap_stops_the_walk():
     """A huge history must not make the hourly scan unbounded."""
-    from app.services.imap_unsubscribe import (
-        _fetch_campaign_history, MAX_CAMPAIGN_PAGES, CAMPAIGN_PAGE_SIZE,
-    )
+    from app.services.imap_unsubscribe import _fetch_campaign_history
 
     now = datetime.now(timezone.utc)
     client = _HistoryClient(5000)
@@ -230,9 +228,7 @@ async def test_history_page_cap_stops_the_walk():
 @pytest.mark.asyncio
 async def test_history_unreachable_cutoff_blocks_reattribution():
     """The corruption bug: a truncated list silently reassigned old records."""
-    from app.services.imap_unsubscribe import (
-        _fetch_campaign_history, MAX_CAMPAIGN_PAGES,
-    )
+    from app.services.imap_unsubscribe import _fetch_campaign_history
 
     now = datetime.now(timezone.utc)
     client = _HistoryClient(5000)

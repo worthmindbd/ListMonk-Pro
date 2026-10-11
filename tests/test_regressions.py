@@ -1,7 +1,7 @@
 """Regression tests for bugs found during the project review."""
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest

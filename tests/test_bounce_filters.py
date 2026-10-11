@@ -1,7 +1,5 @@
 """Tests for bounce opener exclusion logic."""
 
-import pytest
-
 
 def _bounce(email: str, campaign_id: int, bounce_type: str = "hard") -> dict:
     return {

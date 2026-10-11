@@ -1,7 +1,7 @@
 import csv
 import io
 import json
-from typing import Any, AsyncIterator, Iterator
+from typing import AsyncIterator, Iterator
 
 
 def _flatten_row(row: dict, columns: list[str]) -> dict:

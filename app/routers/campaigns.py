@@ -6,7 +6,7 @@ from typing import Optional
 from app.services.listmonk_client import listmonk
 from app.services.export_service import dict_list_to_csv, aiter_dicts_to_csv
 from app.services.bounce_filters import campaign_views_query
-from app.services.bounce_list import fetch_all_filtered_bounces, fetch_filtered_bounces_page
+from app.services.bounce_list import fetch_filtered_bounces_page, iter_filtered_bounces
 from app.services.hard_bounce_cache import (
     get_all_hard_bounce_counts, get_last_updated,
 )
@@ -189,17 +189,30 @@ async def get_campaign_subscribers(campaign_id: int, engagement_type: str,
 
 @router.get("/{campaign_id}/subscribers/{engagement_type}/export")
 async def export_campaign_subscribers(campaign_id: int, engagement_type: str):
-    """Export subscribers who viewed/clicked/bounced a campaign as CSV."""
+    """Export subscribers who viewed/clicked/bounced a campaign as CSV.
+
+    Every branch streams one page at a time, so a campaign with a huge
+    audience does not have to be buffered in memory to be exported.
+    """
     if engagement_type == "bounces":
-        hard_records = await fetch_all_filtered_bounces(
-            listmonk, "hard", campaign_id,
-        )
-        if not hard_records:
+        async def bounce_rows():
+            async for b in iter_filtered_bounces(listmonk, "hard", campaign_id):
+                yield b
+
+        stream = bounce_rows()
+        try:
+            first = await anext(stream)
+        except StopAsyncIteration:
             raise HTTPException(status_code=404, detail="No hard bounce records found")
+
+        async def with_first_bounce():
+            yield first
+            async for b in stream:
+                yield b
 
         columns = ["email", "type", "source", "created_at"]
         return StreamingResponse(
-            dict_list_to_csv(hard_records, columns),
+            aiter_dicts_to_csv(with_first_bounce(), columns),
             media_type="text/csv",
             headers={"Content-Disposition": f"attachment; filename=campaign_{campaign_id}_hard_bounces.csv"},
         )
@@ -208,21 +221,31 @@ async def export_campaign_subscribers(campaign_id: int, engagement_type: str):
     if not query:
         raise HTTPException(status_code=400, detail=f"Invalid type: {engagement_type}. Use views, clicks, or bounces")
 
-    all_subscribers = await listmonk.paginate_all(
-        listmonk.get_subscribers, per_page=500, query=query,
-    )
-    if not all_subscribers:
+    async def subscriber_rows():
+        async for sub in listmonk.iter_pages(
+            listmonk.get_subscribers, per_page=100, query=query,
+        ):
+            sub["lists"] = ", ".join(l.get("name", "") for l in (sub.get("lists") or []))
+            attribs = sub.get("attribs", {})
+            if isinstance(attribs, dict):
+                sub["attribs"] = json.dumps(attribs, ensure_ascii=False) if attribs else ""
+            yield sub
+
+    # Peek one row so an empty result is still a 404 rather than a 0-byte file.
+    stream = subscriber_rows()
+    try:
+        first = await anext(stream)
+    except StopAsyncIteration:
         raise HTTPException(status_code=404, detail=f"No {engagement_type} subscribers found")
 
-    for sub in all_subscribers:
-        sub["lists"] = ", ".join(l.get("name", "") for l in sub.get("lists", []))
-        attribs = sub.get("attribs", {})
-        if isinstance(attribs, dict):
-            sub["attribs"] = json.dumps(attribs, ensure_ascii=False) if attribs else ""
+    async def with_first_subscriber():
+        yield first
+        async for sub in stream:
+            yield sub
 
     columns = ["id", "email", "name", "status", "lists", "attribs", "created_at"]
     return StreamingResponse(
-        dict_list_to_csv(all_subscribers, columns),
+        aiter_dicts_to_csv(with_first_subscriber(), columns),
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename=campaign_{campaign_id}_{engagement_type}.csv"},
     )

@@ -33,7 +33,7 @@ ListMonk Pro adapts instantly between two distinct marketing disciplines with a 
 
 ### Core Outreach & Management
 - **Replies & Prospect Feed** — Real-time monitoring of prospect responses, sentiment filtering, search, and one-click lead tagging.
-- **Deliverability & Safety** — Pre-flight audit checking batch sizes, worker concurrency, HELO hostname, and tracking status.
+- **Deliverability & Safety** — Pre-flight audit checking tracking pixels, the List-Unsubscribe header, batch size, worker concurrency, and public archive/subscription exposure.
 - **Subscribers & Leads** — Search, filter by list, create, edit, delete, blocklist, bulk blocklist, and bulk delete.
 - **Lists & Lead Lists** — Create and manage mailing and lead lists with tags and single/double opt-in controls.
 - **Campaigns** — Full campaign lifecycle management: create, edit, start, pause, resume, cancel, archive, delete, HTML/text preview, and test sends.
@@ -86,8 +86,8 @@ ListMonk requires a specific CSV format (`email`, `name`, `attributes` as JSON).
 ### Option 1: Docker (Recommended)
 
 ```bash
-git clone https://github.com/worthmindbd/Listmonk-Dashboard.git
-cd Listmonk-Dashboard
+git clone https://github.com/worthmindbd/ListMonk-Pro.git
+cd ListMonk-Pro
 cp .env.example .env
 nano .env  # Configure your credentials
 docker compose up -d --build
@@ -98,8 +98,8 @@ Open **http://localhost:8000** and log in.
 ### Option 2: Manual / Local Development
 
 ```bash
-git clone https://github.com/worthmindbd/Listmonk-Dashboard.git
-cd Listmonk-Dashboard
+git clone https://github.com/worthmindbd/ListMonk-Pro.git
+cd ListMonk-Pro
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -168,8 +168,8 @@ python3 -c "import secrets; print(secrets.token_hex(32))"
 ### 1. Clone & Configure
 ```bash
 cd /opt
-git clone https://github.com/worthmindbd/Listmonk-Dashboard.git
-cd Listmonk-Dashboard
+git clone https://github.com/worthmindbd/ListMonk-Pro.git
+cd ListMonk-Pro
 cp .env.example .env
 nano .env  # Set your credentials and secure passwords
 ```
@@ -179,7 +179,7 @@ nano .env  # Set your credentials and secure passwords
 docker compose up -d --build
 ```
 
-### 4. Nginx Reverse Proxy Configuration
+### 3. Nginx Reverse Proxy Configuration
 ```nginx
 server {
     listen 80;
@@ -195,7 +195,7 @@ server {
 }
 ```
 
-### 5. SSL with Let's Encrypt / Certbot
+### 4. SSL with Let's Encrypt / Certbot
 ```bash
 sudo ln -s /etc/nginx/sites-available/listmonk-dashboard /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx

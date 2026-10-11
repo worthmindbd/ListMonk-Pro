@@ -214,7 +214,7 @@ const Replies = {
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
                         Full Details
                     </button>
-                    <button class="btn btn-sm btn-danger-outline" onclick="Replies.unsubscribeLead('${App.escapeHtml(r.from_email)}')">
+                    <button class="btn btn-sm btn-danger-outline" onclick="Replies.unsubscribeLead('${r.id}')">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
                         Blocklist / Unsubscribe
                     </button>
@@ -241,7 +241,7 @@ const Replies = {
             this.renderPage();
         } catch (err) {
             console.error('Scan error:', err);
-            App.toast(`Scan failed: ${err?.message || 'Check IMAP settings in .env'}`, 'danger');
+            // API.request already surfaced the server message.
         } finally {
             this.isScanning = false;
         }
@@ -255,8 +255,10 @@ const Replies = {
             if (card) {
                 card.classList.toggle('lead-highlight', newStatus === 'lead');
             }
-        } catch (err) {
-            App.toast(`Failed to update status: ${err?.message}`, 'danger');
+        } catch {
+            // API.request already surfaced the server message; re-render so the
+            // dropdown reflects the state the server actually stored.
+            await this.render();
         }
     },
 
@@ -270,7 +272,7 @@ const Replies = {
         navigator.clipboard.writeText(email).then(() => {
             App.toast(`Copied ${email} to clipboard`, 'success');
         }).catch(() => {
-            App.toast(`Could not copy email`, 'warning');
+            App.toast(`Could not copy email`, 'error');
         });
     },
 
@@ -293,7 +295,9 @@ ${App.escapeHtml(reply.full_body || reply.body_preview || '')}
         `);
     },
 
-    async unsubscribeLead(email) {
+    async unsubscribeLead(id) {
+        const reply = (this.repliesData?.results || []).find(r => r.id === id);
+        const email = reply?.from_email || 'this sender';
         const ok = await App.confirm(
             'Blocklist & Unsubscribe',
             `Are you sure you want to blocklist and unsubscribe ${email}? They will never receive any further outreach.`
@@ -301,16 +305,12 @@ ${App.escapeHtml(reply.full_body || reply.body_preview || '')}
         if (!ok) return;
 
         try {
-            // Unsubscribe from listmonk via existing subscriber search or blocklist
-            const subsRes = await API.get(`/api/subscribers?query=${encodeURIComponent("subscribers.email = '" + email + "'")}`);
-            const subs = subsRes?.data?.results || [];
-            if (subs.length > 0) {
-                const subId = subs[0].id;
-                await API.put(`/api/subscribers/${subId}/blocklist`, {});
-            }
-            App.toast(`${email} successfully blocklisted.`, 'success');
-        } catch (err) {
-            App.toast(`Failed to blocklist: ${err?.message}`, 'danger');
+            // Resolved server-side so the sender address never reaches a
+            // client-built ListMonk query.
+            const result = await API.post(`/api/replies/${id}/blocklist`, {});
+            App.toast(`${result?.email || email} successfully blocklisted.`, 'success');
+        } catch {
+            // API.request already surfaced the server message.
         }
     },
 
