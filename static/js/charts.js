@@ -74,7 +74,11 @@ const Dashboard = {
                     <!-- Deliverability Status Strip -->
                     <div class="card deliverability-status-strip ${delivScore === 100 ? 'status-optimal' : 'status-tuning'}" style="margin-bottom:20px;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
                         <div style="display:flex;align-items:center;gap:14px;">
-                            <span style="font-size:1.6rem">${delivScore === 100 ? '🛡️' : '⚠️'}</span>
+                            <span class="deliverability-icon-badge" style="display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:10px;background:${delivScore === 100 ? 'rgba(16,185,129,0.15)' : 'rgba(245,158,11,0.15)'};color:${delivScore === 100 ? 'var(--emerald)' : 'var(--amber)'}">
+                                ${delivScore === 100 
+                                    ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>'
+                                    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>'}
+                            </span>
                             <div>
                                 <strong style="color:var(--text-primary);font-size:1rem">Deliverability Health: ${delivScore}% ${delivScore === 100 ? '(Optimal for Cold Outreach)' : '(Action Recommended)'}</strong>
                                 <div style="font-size:0.82rem;color:var(--text-secondary);margin-top:2px">Zero tracking pixels • RFC List-Unsubscribe header omitted • Humanized drip batching</div>
@@ -101,7 +105,7 @@ const Dashboard = {
                             <div style="font-size:0.82rem;color:var(--text-muted)"><strong style="color:var(--emerald)">${replyRate}%</strong> reply rate</div>
                         </div>
                         <div class="stat-card warning">
-                            <div class="stat-label">🟢 Hot Leads / Interested</div>
+                            <div class="stat-label"><span class="badge-dot badge-dot-positive"></span> Hot Leads / Interested</div>
                             <div class="stat-value" style="color:var(--amber)">${App.formatNumber(positiveLeads)}</div>
                             <div style="font-size:0.82rem;color:var(--text-muted)">Positive meeting & call intent</div>
                         </div>
@@ -140,7 +144,13 @@ const Dashboard = {
                     html += `<div style="text-align:center;padding:32px 16px;color:var(--text-muted);font-size:0.9rem">No replies recorded yet. Click <a href="#/replies" style="color:var(--primary)">Scan Mailbox</a> to sync incoming replies.</div>`;
                 } else {
                     recentReplies.slice(0, 4).forEach(r => {
-                        const dot = r.sentiment === 'positive' ? '🟢' : (r.sentiment === 'question' ? '🟡' : (r.sentiment === 'auto_reply' ? '⚪' : '🔴'));
+                        const sentMap = {
+                            positive: { label: 'Interested', cls: 'badge-success', dotCls: 'badge-dot-positive' },
+                            question: { label: 'Question', cls: 'badge-warning', dotCls: 'badge-dot-question' },
+                            auto_reply: { label: 'Auto-Reply', cls: 'badge-secondary', dotCls: 'badge-dot-auto-reply' },
+                            negative: { label: 'Not Interested', cls: 'badge-danger', dotCls: 'badge-dot-negative' },
+                        };
+                        const sent = sentMap[r.sentiment] || { label: r.sentiment || 'Reply', cls: 'badge-secondary', dotCls: 'badge-dot-auto-reply' };
                         html += `
                             <div style="padding:10px 16px;border-bottom:1px solid var(--border-color);display:flex;align-items:center;justify-content:space-between;gap:12px;">
                                 <div style="overflow:hidden;">
@@ -151,7 +161,7 @@ const Dashboard = {
                                         ${App.escapeHtml(r.subject || '(No subject)')}
                                     </div>
                                 </div>
-                                <span class="badge" style="font-size:0.75rem;flex-shrink:0;">${dot} ${App.escapeHtml(r.sentiment)}</span>
+                                <span class="badge ${sent.cls}" style="font-size:0.75rem;flex-shrink:0;"><span class="badge-dot ${sent.dotCls}"></span>${sent.label}</span>
                             </div>
                         `;
                     });
@@ -401,6 +411,9 @@ const Dashboard = {
                     },
                 },
             },
+        });
+    },
+
     renderColdSentimentChart(repStats) {
         const ctx = document.getElementById('statusChart');
         if (!ctx) return;
@@ -411,7 +424,7 @@ const Dashboard = {
         const autoReply = repStats?.auto_reply || 0;
         const negative = repStats?.negative || 0;
 
-        const labels = ['🟢 Positive / Interested', '🟡 Questions', '⚪ Out of Office', '🔴 Not Interested'];
+        const labels = ['Positive / Interested', 'Questions', 'Out of Office', 'Not Interested'];
         let data = [positive, question, autoReply, negative];
 
         // If no data, show placeholder empty chart

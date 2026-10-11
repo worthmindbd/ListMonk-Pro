@@ -33,7 +33,9 @@ const Deliverability = {
                 </div>
 
                 <div class="deliverability-banner-info">
-                    <h2>${isOptimal ? '🛡️ Optimal Cold Outreach Configuration' : '⚠️ Deliverability Recommendations'}</h2>
+                    <h2>${isOptimal 
+                        ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="22" height="22" style="vertical-align:-3px;margin-right:8px;color:var(--emerald)"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>Optimal Cold Outreach Configuration' 
+                        : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="22" height="22" style="vertical-align:-3px;margin-right:8px;color:var(--amber)"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Deliverability Recommendations'}</h2>
                     <p style="color:var(--text-secondary);margin:6px 0 16px 0;line-height:1.5;">
                         ${isOptimal 
                             ? 'Your Listmonk instance is fully optimized for B2B cold email deliverability. Tracking pixels are disabled, RFC unsubscribe headers are omitted, and batch concurrency is safely throttled for primary inbox placement.'
@@ -42,10 +44,10 @@ const Deliverability = {
 
                     <div class="preset-action-bar">
                         <button class="btn btn-success" onclick="Deliverability.applyPreset('cold_email')">
-                            🎯 Apply Cold Email Deliverability Preset
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="vertical-align:-2px;margin-right:6px;"><polygon points="22 2 15 22 11 13 2 9 22 2"/><line x1="22" y1="2" x2="11" y2="13"/></svg>Apply Cold Email Deliverability Preset
                         </button>
                         <button class="btn btn-secondary" onclick="Deliverability.applyPreset('newsletter')">
-                            📰 Switch to Newsletter Marketing Preset
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="vertical-align:-2px;margin-right:6px;"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>Switch to Newsletter Marketing Preset
                         </button>
                     </div>
                 </div>
@@ -80,10 +82,10 @@ const Deliverability = {
 
         checks.forEach(c => {
             const statusBadge = c.status === 'pass'
-                ? '<span class="badge badge-success">✓ PASS</span>'
+                ? '<span class="badge badge-success">PASS</span>'
                 : (c.status === 'warn'
-                    ? '<span class="badge badge-warning">! WARN</span>'
-                    : '<span class="badge badge-danger">✕ FAIL</span>');
+                    ? '<span class="badge badge-warning">WARN</span>'
+                    : '<span class="badge badge-danger">FAIL</span>');
 
             html += `
                 <tr>
@@ -108,21 +110,30 @@ const Deliverability = {
             <!-- Best Practice Guidelines -->
             <div class="best-practices-grid" style="margin-top:24px;display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:20px;">
                 <div class="card">
-                    <h3 style="font-size:1.1rem;margin-bottom:8px">📬 Why Tracking Pixels Hurt Cold Email</h3>
+                    <h3 style="font-size:1.1rem;margin-bottom:8px;display:flex;align-items:center;gap:8px;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" style="color:var(--primary)"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                        Why Tracking Pixels Hurt Cold Email
+                    </h3>
                     <p style="font-size:0.88rem;color:var(--text-secondary);line-height:1.6">
                         Spam filters (Google Workspace, Microsoft 365) detect 1x1 invisible GIF pixels and link redirect wrappers. In cold email, removing tracking pixels dramatically improves inbox placement by making the email indistinguishable from a personal 1-to-1 message.
                     </p>
                 </div>
 
                 <div class="card">
-                    <h3 style="font-size:1.1rem;margin-bottom:8px">🚫 Why Remove List-Unsubscribe Header</h3>
+                    <h3 style="font-size:1.1rem;margin-bottom:8px;display:flex;align-items:center;gap:8px;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" style="color:var(--rose)"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+                        Why Remove List-Unsubscribe Header
+                    </h3>
                     <p style="font-size:0.88rem;color:var(--text-secondary);line-height:1.6">
                         The RFC <code>List-Unsubscribe</code> header explicitly identifies an email as a bulk marketing broadcast. In B2B sales outreach, use a soft plain-text opt-out (e.g. <em>"Reply 'stop' to opt out"</em>) to avoid automated Promotions tab sorting.
                     </p>
                 </div>
 
                 <div class="card">
-                    <h3 style="font-size:1.1rem;margin-bottom:8px">⏱️ Safe Sending Cadence & Batching</h3>
+                    <h3 style="font-size:1.1rem;margin-bottom:8px;display:flex;align-items:center;gap:8px;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" style="color:var(--amber)"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                        Safe Sending Cadence & Batching
+                    </h3>
                     <p style="font-size:0.88rem;color:var(--text-secondary);line-height:1.6">
                         Keep batch size <= 100 with concurrency of 1 worker. Spreading emails evenly prevents sudden IP/domain spikes and maintains a natural sending rhythm that matches human behavior.
                     </p>

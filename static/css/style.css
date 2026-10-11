@@ -2000,9 +2000,42 @@ td .action-btns {
 }
 
 .mode-card-icon {
-    font-size: 2.4rem;
-    margin-bottom: 12px;
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(99, 102, 241, 0.12);
+    color: var(--primary);
+    margin-bottom: 14px;
 }
+
+.mode-choice-card.highlight .mode-card-icon {
+    background: rgba(16, 185, 129, 0.12);
+    color: var(--emerald);
+}
+
+.mode-icon-svg {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2.2px;
+    flex-shrink: 0;
+}
+
+.badge-dot {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    margin-right: 5px;
+    vertical-align: middle;
+}
+
+.badge-dot-positive { background-color: #10b981; box-shadow: 0 0 6px rgba(16, 185, 129, 0.5); }
+.badge-dot-question { background-color: #f59e0b; box-shadow: 0 0 6px rgba(245, 158, 11, 0.5); }
+.badge-dot-auto-reply { background-color: #94a3b8; }
+.badge-dot-negative { background-color: #f43f5e; box-shadow: 0 0 6px rgba(244, 63, 94, 0.5); }
 
 .mode-card-header h4 {
     margin: 0 0 6px 0;
@@ -2017,6 +2050,13 @@ td .action-btns {
     font-size: 0.85rem;
     color: var(--text-secondary);
     line-height: 1.9;
+}
+
+.mode-features-list li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 0;
 }
 
 .mode-select-action {

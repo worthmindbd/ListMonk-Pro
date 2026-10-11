@@ -112,11 +112,11 @@
                 <!-- Mode Segmented Switcher -->
                 <div class="mode-segmented" id="modeSegmented" role="radiogroup" aria-label="Dashboard Mode">
                     <button type="button" class="mode-pill-btn active" data-mode="newsletter" id="btnModeNewsletter" onclick="App.setMode('newsletter')">
-                        <span class="mode-icon">📰</span>
+                        <svg class="mode-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
                         <span class="mode-label">Newsletter</span>
                     </button>
                     <button type="button" class="mode-pill-btn" data-mode="cold_email" id="btnModeColdEmail" onclick="App.setMode('cold_email')">
-                        <span class="mode-icon">🎯</span>
+                        <svg class="mode-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polygon points="22 2 15 22 11 13 2 9 22 2"/><line x1="22" y1="2" x2="11" y2="13"/></svg>
                         <span class="mode-label">Cold Email</span>
                     </button>
                 </div>
@@ -151,33 +151,37 @@
             </div>
             <div class="modal-body mode-choice-grid">
                 <div class="mode-choice-card" onclick="App.selectInitialMode('newsletter')">
-                    <div class="mode-card-icon">📰</div>
+                    <div class="mode-card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="26" height="26"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                    </div>
                     <div class="mode-card-header">
                         <h4>Newsletter Mode</h4>
                         <span class="badge badge-accent">Marketing & Broadcasts</span>
                     </div>
                     <p>Designed for content creators, publishers, and marketing campaigns. Full support for open tracking, click analytics, beautiful HTML templates, and opt-in lists.</p>
                     <ul class="mode-features-list">
-                        <li>✓ Open & Click analytics with visual graphs</li>
-                        <li>✓ HTML rich templates and previews</li>
-                        <li>✓ Audience lists and opt-in forms</li>
-                        <li>✓ Link unsubscribe automation</li>
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14" style="color:var(--accent-success)"><polyline points="20 6 9 17 4 12"/></svg> Open & Click analytics with visual graphs</li>
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14" style="color:var(--accent-success)"><polyline points="20 6 9 17 4 12"/></svg> HTML rich templates and previews</li>
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14" style="color:var(--accent-success)"><polyline points="20 6 9 17 4 12"/></svg> Audience lists and opt-in forms</li>
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14" style="color:var(--accent-success)"><polyline points="20 6 9 17 4 12"/></svg> Link unsubscribe automation</li>
                     </ul>
                     <button type="button" class="btn btn-primary mode-select-action">Launch Newsletter Mode</button>
                 </div>
 
                 <div class="mode-choice-card highlight" onclick="App.selectInitialMode('cold_email')">
-                    <div class="mode-card-icon">🎯</div>
+                    <div class="mode-card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="26" height="26"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+                    </div>
                     <div class="mode-card-header">
                         <h4>Cold Email Mode</h4>
                         <span class="badge badge-success">B2B Outbound Outreach</span>
                     </div>
                     <p>Engineered for high-deliverability sales prospecting. IMAP reply tracking, sentiment categorization, deliverability pre-flight safeguards, and zero tracking pixels for primary inboxing.</p>
                     <ul class="mode-features-list">
-                        <li>✓ Live IMAP Reply Tracking & Sentiment detection</li>
-                        <li>✓ Zero tracking pixels & no link rewrites (Primary Inbox)</li>
-                        <li>✓ RFC List-Unsubscribe removal to bypass Promotions tab</li>
-                        <li>✓ Safe drip sending & batch size throttling</li>
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14" style="color:var(--accent-success)"><polyline points="20 6 9 17 4 12"/></svg> Live IMAP Reply Tracking & Sentiment detection</li>
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14" style="color:var(--accent-success)"><polyline points="20 6 9 17 4 12"/></svg> Zero tracking pixels & no link rewrites (Primary Inbox)</li>
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14" style="color:var(--accent-success)"><polyline points="20 6 9 17 4 12"/></svg> RFC List-Unsubscribe removal to bypass Promotions tab</li>
+                        <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14" style="color:var(--accent-success)"><polyline points="20 6 9 17 4 12"/></svg> Safe drip sending & batch size throttling</li>
                     </ul>
                     <button type="button" class="btn btn-success mode-select-action">Launch Cold Email Mode</button>
                 </div>

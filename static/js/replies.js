@@ -61,22 +61,22 @@ const Replies = {
                     <div style="font-size:0.82rem;color:var(--text-muted)">Overall Reply Rate: <strong style="color:var(--accent)">${s.reply_rate || 0}%</strong></div>
                 </div>
                 <div class="stat-card success">
-                    <div class="stat-label">🟢 Positive / Hot Leads</div>
+                    <div class="stat-label"><span class="badge-dot badge-dot-positive"></span> Positive / Hot Leads</div>
                     <div class="stat-value" style="color:var(--emerald)">${App.formatNumber(s.positive || 0)}</div>
                     <div style="font-size:0.82rem;color:var(--text-muted)">Interested & call requests</div>
                 </div>
                 <div class="stat-card warning">
-                    <div class="stat-label">🟡 Questions & Inquiries</div>
+                    <div class="stat-label"><span class="badge-dot badge-dot-question"></span> Questions & Inquiries</div>
                     <div class="stat-value" style="color:var(--amber)">${App.formatNumber(s.question || 0)}</div>
                     <div style="font-size:0.82rem;color:var(--text-muted)">Clarifications & pricing</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">⚪ Out of Office / Auto-Reply</div>
+                    <div class="stat-label"><span class="badge-dot badge-dot-auto-reply"></span> Out of Office / Auto-Reply</div>
                     <div class="stat-value">${App.formatNumber(s.auto_reply || 0)}</div>
                     <div style="font-size:0.82rem;color:var(--text-muted)">Automated OOO notices</div>
                 </div>
                 <div class="stat-card danger">
-                    <div class="stat-label">🔴 Not Interested</div>
+                    <div class="stat-label"><span class="badge-dot badge-dot-negative"></span> Not Interested</div>
                     <div class="stat-value" style="color:var(--rose)">${App.formatNumber(s.negative || 0)}</div>
                     <div style="font-size:0.82rem;color:var(--text-muted)">Unsubscribe / rejections</div>
                 </div>
@@ -93,10 +93,10 @@ const Replies = {
                     <div class="replies-filters">
                         <select class="form-control filter-select" id="sentimentFilter" onchange="Replies.filterSentiment(this.value)">
                             <option value="" ${!this.sentiment ? 'selected' : ''}>All Sentiments</option>
-                            <option value="positive" ${this.sentiment === 'positive' ? 'selected' : ''}>🟢 Positive / Interested</option>
-                            <option value="question" ${this.sentiment === 'question' ? 'selected' : ''}>🟡 Question</option>
-                            <option value="auto_reply" ${this.sentiment === 'auto_reply' ? 'selected' : ''}>⚪ Out of Office</option>
-                            <option value="negative" ${this.sentiment === 'negative' ? 'selected' : ''}>🔴 Not Interested</option>
+                            <option value="positive" ${this.sentiment === 'positive' ? 'selected' : ''}>Positive / Interested</option>
+                            <option value="question" ${this.sentiment === 'question' ? 'selected' : ''}>Question</option>
+                            <option value="auto_reply" ${this.sentiment === 'auto_reply' ? 'selected' : ''}>Out of Office</option>
+                            <option value="negative" ${this.sentiment === 'negative' ? 'selected' : ''}>Not Interested</option>
                         </select>
 
                         <select class="form-control filter-select" id="statusFilter" onchange="Replies.filterStatus(this.value)">
@@ -122,7 +122,9 @@ const Replies = {
         if (!replies.length) {
             html += `
                 <div class="empty-state card" style="padding:48px 24px;text-align:center;">
-                    <div style="font-size:2.8rem;margin-bottom:12px">📬</div>
+                    <div style="display:inline-flex;align-items:center;justify-content:center;width:64px;height:64px;border-radius:16px;background:rgba(99,102,241,0.12);color:var(--primary);margin-bottom:16px">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="32" height="32"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                    </div>
                     <h3>No Prospect Replies Found</h3>
                     <p style="color:var(--text-secondary);max-width:500px;margin:0 auto 16px auto;">
                         ${this.query || this.sentiment || this.status ? 'No replies match your current filters. Try resetting the filters.' : 'Your prospect replies will appear here once leads respond to your cold outreach. Click "Scan Mailbox Now" to check IMAP for new incoming messages.'}
@@ -148,13 +150,13 @@ const Replies = {
 
     renderReplyCard(r) {
         const sentimentConfig = {
-            'positive': { label: 'Interested / Lead', colorClass: 'badge-positive', dot: '🟢' },
-            'question': { label: 'Question', colorClass: 'badge-question', dot: '🟡' },
-            'auto_reply': { label: 'Out of Office', colorClass: 'badge-auto-reply', dot: '⚪' },
-            'negative': { label: 'Not Interested', colorClass: 'badge-negative', dot: '🔴' },
+            'positive': { label: 'Interested / Lead', colorClass: 'badge-positive', dotClass: 'badge-dot-positive' },
+            'question': { label: 'Question', colorClass: 'badge-question', dotClass: 'badge-dot-question' },
+            'auto_reply': { label: 'Out of Office', colorClass: 'badge-auto-reply', dotClass: 'badge-dot-auto-reply' },
+            'negative': { label: 'Not Interested', colorClass: 'badge-negative', dotClass: 'badge-dot-negative' },
         };
 
-        const sent = sentimentConfig[r.sentiment] || { label: r.sentiment || 'Reply', colorClass: 'badge-default', dot: '✉️' };
+        const sent = sentimentConfig[r.sentiment] || { label: r.sentiment || 'Reply', colorClass: 'badge-default', dotClass: 'badge-dot-auto-reply' };
         const initial = (r.from_name || r.from_email || '?').charAt(0).toUpperCase();
 
         return `
@@ -176,12 +178,12 @@ const Replies = {
 
                     <div class="reply-header-actions">
                         <span class="sentiment-badge ${sent.colorClass}">
-                            ${sent.dot} ${sent.label}
+                            <span class="badge-dot ${sent.dotClass}"></span>${sent.label}
                         </span>
                         <div class="status-select-wrap">
                             <select class="form-control form-control-sm" onchange="Replies.updateStatus('${r.id}', this.value)">
                                 <option value="unread" ${r.status === 'unread' ? 'selected' : ''}>Unread</option>
-                                <option value="lead" ${r.status === 'lead' ? 'selected' : ''}>⭐ Hot Lead</option>
+                                <option value="lead" ${r.status === 'lead' ? 'selected' : ''}>Hot Lead</option>
                                 <option value="replied" ${r.status === 'replied' ? 'selected' : ''}>Replied</option>
                                 <option value="archived" ${r.status === 'archived' ? 'selected' : ''}>Archived</option>
                             </select>
@@ -201,16 +203,20 @@ const Replies = {
 
                 <div class="reply-actions">
                     <button class="btn btn-sm ${r.status === 'lead' ? 'btn-success' : 'btn-secondary'}" onclick="Replies.toggleLead('${r.id}', '${r.status}')">
-                        ${r.status === 'lead' ? '★ Hot Lead Flagged' : '☆ Mark as Hot Lead'}
+                        <svg viewBox="0 0 24 24" fill="${r.status === 'lead' ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                        ${r.status === 'lead' ? 'Hot Lead Flagged' : 'Mark as Hot Lead'}
                     </button>
                     <button class="btn btn-sm btn-secondary" onclick="Replies.copyEmail('${App.escapeHtml(r.from_email)}')">
-                        📋 Copy Email
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                        Copy Email
                     </button>
                     <button class="btn btn-sm btn-secondary" onclick="Replies.viewFullThread('${r.id}')">
-                        🔍 Full Details
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                        Full Details
                     </button>
                     <button class="btn btn-sm btn-danger-outline" onclick="Replies.unsubscribeLead('${App.escapeHtml(r.from_email)}')">
-                        🚫 Blocklist / Unsubscribe
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+                        Blocklist / Unsubscribe
                     </button>
                 </div>
             </div>
