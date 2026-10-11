@@ -135,6 +135,29 @@ async def match_campaign_for_reply(
     return None, None
 
 
+def extract_clean_reply(full_body: str) -> str:
+    """Extract clean prospect reply text, stripping quoted threads including multi-line 'On ... wrote:'."""
+    if not full_body:
+        return ""
+    # Cut off at multi-line quote headers
+    cleaned = re.split(r'\n\s*On\s+[\s\S]+?wrote:\s*\n?', full_body, flags=re.IGNORECASE)[0]
+    cleaned = re.split(r'\n\s*-{2,}\s*Original Message\s*-{2,}', cleaned, flags=re.IGNORECASE)[0]
+    cleaned = re.split(r'\n\s*From:\s+.+@.+\n\s*Sent:\s+', cleaned, flags=re.IGNORECASE)[0]
+
+    lines = cleaned.splitlines()
+    res = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(">"):
+            break
+        if re.match(r'^On\s+.+wrote:\s*$', stripped, re.IGNORECASE):
+            break
+        res.append(line)
+
+    final_text = "\n".join(res).strip()
+    return final_text if final_text else full_body[:500].strip()
+
+
 def _connect_imap() -> imaplib.IMAP4:
     if settings.imap_use_ssl:
         client = imaplib.IMAP4_SSL(settings.imap_host, settings.imap_port)
@@ -235,9 +258,7 @@ async def scan_and_track_replies(
 
         # Extract stripped reply content
         full_body = extract_email_body(msg)
-        reply_only = _extract_reply_only(full_body).strip()
-        if not reply_only:
-            reply_only = full_body[:500].strip()
+        reply_only = extract_clean_reply(full_body)
 
         sentiment = classify_sentiment(subject, reply_only)
 
