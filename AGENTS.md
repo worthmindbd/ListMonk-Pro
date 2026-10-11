@@ -1,13 +1,13 @@
-# ListMonk Dashboard — Agent & Developer Guide
+# ListMonk Pro — Agent & Developer Guide
 
-A modern, dark-themed management dashboard and automation suite for self-hosted [ListMonk](https://listmonk.app/) instances. Built with FastAPI (Python 3.12+) and vanilla JavaScript.
+A modern, high-performance management dashboard and automation suite for self-hosted [ListMonk](https://listmonk.app/) instances with dual operating modes: **Newsletter** and **Cold Email**. Built with FastAPI (Python 3.12+) and vanilla JavaScript.
 
 ---
 
 ## Project Structure
 
 ```
-Listmonk-Dashboard/
+ListMonk-Pro/
 ├── app/
 │   ├── __init__.py
 │   ├── auth.py                    # Session auth, HMAC-SHA256 cookie signing & verification
@@ -18,8 +18,10 @@ Listmonk-Dashboard/
 │   │   ├── bounces.py             # Bounce management, manual ingest, filtered exports, deletions
 │   │   ├── campaigns.py           # Campaign CRUD, stats, analytics, viewer/clicker/bounce exports
 │   │   ├── converter.py           # CSV column detection, conversion & direct ListMonk import
+│   │   ├── deliverability.py      # Deliverability audit checklist & 1-click preset switching
 │   │   ├── lists.py               # List CRUD endpoints
-│   │   ├── subscribers.py         # Subscriber CRUD, memberships, blocklisting, exports
+│   │   ├── replies.py             # Prospect reply monitoring, sentiment filters, status updates
+│   │   ├── subscribers.py         # Subscriber/Lead CRUD, memberships, blocklisting, exports
 │   │   ├── templates.py           # Template CRUD & default template selection
 │   │   └── unsubscribes.py        # Unsubscribe log, campaign groupings, scan trigger, reset/undo
 │   └── services/                  # Core business logic & integrations
@@ -30,33 +32,38 @@ Listmonk-Dashboard/
 │       ├── bounce_list.py         # Paginated bounce listing with opener exclusion & cache integration
 │       ├── campaign_scheduler.py  # Timezone-aware send window scheduler (auto-pause/auto-resume)
 │       ├── csv_converter.py       # Converts arbitrary CSV to ListMonk schema (JSON attributes)
+│       ├── deliverability_service.py # Audit rules, score computation, and preset application
 │       ├── export_service.py      # CSV generators (sync list + async streamed)
 │       ├── hard_bounce_cache.py   # In-memory hard bounce counts per campaign with background refresh
 │       ├── imap_helpers.py        # Shared IMAP utilities (body extraction, date formatting, query escaping)
+│       ├── imap_reply_tracker.py  # IMAP reply monitor, sentiment analysis, quote-thread stripping
 │       ├── imap_unsubscribe.py    # IMAP reply monitor for unsubscribe keywords with quote stripping
 │       ├── link_unsubscribe.py    # ListMonk direct link unsubscribe scanner & campaign attributor
 │       ├── listmonk_client.py     # Async HTTP client for ListMonk REST API (with paginate_all helper)
 │       ├── opener_cache.py        # In-memory campaign opener email cache with TTL & inflight deduplication
+│       ├── reply_log.py           # Persistent JSON storage for prospect replies and sentiments
 │       ├── task_utils.py          # Strong references for fire-and-forget tasks & shutdown drain
 │       └── unsubscribe_log.py     # Persistent JSON state management for unsubscribe log/settings/processed
 ├── static/
 │   ├── css/
-│   │   └── style.css              # Dark theme CSS with custom variables & responsive design
+│   │   └── style.css              # Dark theme CSS, segmented mode switcher, reply feed & cards
 │   ├── js/
 │   │   ├── analytics.js           # Campaign analytics charts, date filtering, link tracking
 │   │   ├── api.js                 # Centralized fetch wrapper with 401 redirect & error handling
-│   │   ├── app.js                 # SPA router, notifications, navigation, bounces view & shared UI
+│   │   ├── app.js                 # SPA router, mode switcher, onboarding modal & shared UI
 │   │   ├── campaigns.js           # Campaign management, status transitions, test email sending
-│   │   ├── charts.js              # Dashboard overview charts & stat summary cards
+│   │   ├── charts.js              # Mode-aware dashboard overview charts & stat summary cards
 │   │   ├── converter.js           # CSV converter UI, column mapping, live preview & import modal
+│   │   ├── deliverability.js      # Deliverability pre-flight audit checklist & 1-click presets
 │   │   ├── lists.js               # List management, modal forms, tag pills
+│   │   ├── replies.js             # Prospect reply feed, sentiment badges, hot lead flagging
 │   │   ├── settings.js            # Settings UI: send window scheduler, auto-unblock, unsubscribe settings
 │   │   ├── subscribers.js         # Subscriber table, search, edit modal, bulk blocklist/delete
 │   │   └── unsubscribes.js        # Campaign-grouped unsubscribe dashboard, source badges, undo reset
 │   ├── favicon.png
 │   └── favicon.svg
 ├── templates/
-│   ├── index.html                 # Main authenticated SPA shell
+│   ├── index.html                 # Main authenticated SPA shell with mode switcher & onboarding
 │   └── login.html                 # Login page with dark theme
 ├── tests/
 │   ├── __init__.py
@@ -238,6 +245,15 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/unsubscribes/imap-status` | GET | Check IMAP connection health |
 | | `/api/unsubscribes/clear` | DELETE | Clear all unsubscribe log records |
 | | `/api/unsubscribes/reset` | POST | Undo all unsubscribes & restore list memberships |
+| **Replies** | `/api/replies` | GET | Paginated prospect replies with sentiment/status filtering |
+| | `/api/replies/stats` | GET | Aggregate reply counts, reply rate %, and sentiment breakdown |
+| | `/api/replies/scan` | POST | Manually trigger IMAP prospect reply scan |
+| | `/api/replies/status` | GET | Check IMAP connection status |
+| | `/api/replies/settings` | GET / PUT | Get / update reply tracker settings (auto-tagging) |
+| | `/api/replies/{id}/status` | PUT | Update reply status (unread, lead, replied, archived) |
+| | `/api/replies/{id}` | DELETE | Delete / dismiss single reply record |
+| **Deliverability** | `/api/deliverability/checklist` | GET | Audit Listmonk settings against deliverability rules |
+| | `/api/deliverability/apply-preset` | POST | 1-click apply 'cold_email' or 'newsletter' preset |
 
 ---
 

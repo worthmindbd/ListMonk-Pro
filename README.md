@@ -212,12 +212,15 @@ sudo certbot --nginx -d dash.yourdomain.com
 
 ## Background Tasks
 
-The dashboard runs five background loops started during application lifecycle:
+## Background Tasks
+
+The dashboard runs six background loops started during application lifecycle:
 
 | Background Task | Frequency | Description |
 |-----------------|-----------|-------------|
 | **Campaign Scheduler** | Every 60s | Checks running campaigns and pauses/resumes them based on the send window |
 | **Hard Bounce Cache** | On startup + every 5 min | Computes true hard bounce counts per campaign, excluding openers |
+| **Prospect Reply Tracker** | Every 15 min | Scans IMAP inbox for cold email prospect replies and sentiment classification |
 | **IMAP & Link Unsubscribe Scan** | Every 1 hour | Scans inbox for reply keywords and polls ListMonk for link unsubscribes |
 | **Bounce Ingestion** | Every 1 hour | Ingests and classifies unseen DSNs from the bounce IMAP mailbox |
 | **Auto-Unblock Protection** | Every 6 hours | Scans for engaged blocklisted contacts, re-enables them, and purges bounce records |
@@ -227,45 +230,52 @@ The dashboard runs five background loops started during application lifecycle:
 ## Project Structure
 
 ```
-ListMonk-Dashboard/
+ListMonk-Pro/
   app/
     main.py                    # FastAPI application, auth middleware, background task lifespan
     auth.py                    # Session cookie creation, signing, and verification
     config.py                  # Settings loader and DATA_DIR path resolver
     routers/
-      subscribers.py           # Subscriber CRUD, import status, bulk blocklist/delete, exports
-      lists.py                 # List CRUD
-      campaigns.py             # Campaign CRUD, running stats, analytics, viewer/clicker/bounce exports
+      subscribers.py           # Subscriber & Lead CRUD, import status, bulk actions, exports
+      lists.py                 # List & Lead List CRUD
+      campaigns.py             # Campaign & Cold Outreach CRUD, running stats, analytics, exports
       templates.py             # Template CRUD & default template selection
       bounces.py               # Bounce management, ingestion, filtered CSV exports, bulk deletions
       converter.py             # CSV detection, conversion, and direct ListMonk import
       unsubscribes.py          # Unsubscribe dashboard, campaign groups, manual scans, undo/reset
+      replies.py               # Prospect reply feed, sentiment filters, hot lead status updates
+      deliverability.py        # Deliverability pre-flight audit checklist & 1-click presets
     services/
       listmonk_client.py       # Async HTTP client for ListMonk REST API (with paginate_all helper)
       csv_converter.py         # CSV converter transforming arbitrary columns to ListMonk schema
       export_service.py        # Memory-efficient streaming CSV generator
       auto_unblock.py          # Auto-unblock engaged contacts (clickers/openers) from blocklist
       campaign_scheduler.py    # Timezone-aware send window scheduler
+      deliverability_service.py# Deliverability audit engine and 1-click preset sync
       bounce_ingest.py         # RFC 3463 DSN classifier & IMAP bounce mailbox scanner
       bounce_filters.py        # Opener false-positive bounce filtering
       bounce_list.py           # Fast-path paginated bounce listing with opener exclusion
       hard_bounce_cache.py     # In-memory hard bounce counts cache per campaign
       opener_cache.py          # In-memory cache of campaign opener email sets with TTL
+      imap_reply_tracker.py    # IMAP reply monitor, sentiment analysis & quote-thread stripping
+      reply_log.py             # Thread-safe persistent JSON storage for prospect replies
       imap_unsubscribe.py      # IMAP reply scanner for unsubscribe keywords with quote stripping
       link_unsubscribe.py      # ListMonk direct link unsubscribe scanner
       imap_helpers.py          # Shared IMAP & string escaping utilities
       unsubscribe_log.py       # Thread-safe persistent JSON state manager
       task_utils.py            # Fire-and-forget task references & shutdown drain
   static/
-    css/style.css              # Dark theme stylesheet
+    css/style.css              # Dark theme stylesheet with mode toggle & reply feed cards
     js/
       api.js                   # Fetch API wrapper with 401 handling
-      app.js                   # Single-Page Application router, bounces view, notifications
+      app.js                   # Single-Page Application router, mode switcher & onboarding
       analytics.js             # Campaign analytics charts and link click tracking
       campaigns.js             # Campaign management, status transitions, test sends
-      charts.js                # Dashboard overview charts & summary cards
+      charts.js                # Mode-aware dashboard overview charts & summary cards
       converter.js             # CSV converter UI, column mapping, and import modal
+      deliverability.js        # Deliverability pre-flight audit checklist & 1-click presets
       lists.js                 # Mailing list management
+      replies.js               # Prospect reply feed, sentiment badges, hot lead flagging
       settings.js              # Settings UI (scheduler, auto-unblock, unsubscribe toggles)
       subscribers.js           # Subscriber management, search, edit modal, bulk actions
       unsubscribes.js          # Campaign-grouped unsubscribe view, source badges, undo/reset
