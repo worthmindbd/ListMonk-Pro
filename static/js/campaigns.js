@@ -18,12 +18,6 @@ const Campaigns = {
             const campaigns = data.results || [];
             const total = data.total || 0;
 
-            App.setActions(`
-                <button class="btn btn-sm" onclick="Campaigns.exportAll()">Export CSV</button>
-                <a href="#/analytics" class="btn btn-sm">Analytics</a>
-                <button class="btn btn-sm btn-primary" onclick="Campaigns.showCreate()">+ New Campaign</button>
-            `);
-
             let html = `
                 <div class="search-bar">
                     <div class="search-input">
@@ -42,6 +36,11 @@ const Campaigns = {
                         <option value="scheduled" ${this.statusFilter === 'scheduled' ? 'selected' : ''}>Scheduled</option>
                     </select>
                     <button class="btn" onclick="Campaigns.search()">Search</button>
+                    <div class="page-actions">
+                        <button class="btn" onclick="Campaigns.exportAll()">Export CSV</button>
+                        <a href="#/analytics" class="btn">Analytics</a>
+                        <button class="btn btn-primary" onclick="Campaigns.showCreate()">+ New Campaign</button>
+                    </div>
                 </div>
                 <div class="table-wrapper"><table>
                     <thead><tr>

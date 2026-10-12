@@ -141,7 +141,6 @@ const App = {
 
         // Update title
         document.getElementById('pageTitle').textContent = page.title;
-        document.getElementById('topBarActions').innerHTML = '';
 
         // Render page
         const content = document.getElementById('contentArea');
@@ -364,10 +363,6 @@ const App = {
     setContent(html) {
         document.getElementById('contentArea').innerHTML = html;
     },
-
-    setActions(html) {
-        document.getElementById('topBarActions').innerHTML = html;
-    },
 };
 
 // ── Templates Page (simple) ──────────────────────────────
@@ -383,8 +378,9 @@ const Templates = {
             let html = `
                 <div class="search-bar">
                     <span style="color:var(--text-secondary);font-size:0.9rem">${templates.length} template(s)</span>
-                    <div style="flex:1"></div>
-                    <button class="btn btn-primary" onclick="Templates.showCreate()">+ New Template</button>
+                    <div class="page-actions">
+                        <button class="btn btn-primary" onclick="Templates.showCreate()">+ New Template</button>
+                    </div>
                 </div>
                 <div class="table-wrapper"><table>
                     <thead><tr>
@@ -564,12 +560,9 @@ const Bounces = {
                 ? `Delete ${this._typeLabel()}`
                 : `Delete All ${this.typeFilter ? (this.typeFilter === 'hard' ? 'Hard ' : 'Soft ') : ''}Bounces`;
 
-            App.setActions(`
-                <button class="btn btn-sm btn-primary" onclick="Bounces.ingestBounces()">Ingest New Bounces</button>
-                <button class="btn btn-sm" onclick="Bounces.exportBounces()">Export CSV</button>
-                <button class="btn btn-sm btn-danger" onclick="Bounces.deleteAll()">${deleteActionLabel}</button>
-            `);
-
+            // The page's actions belong in the filter row, next to the filters
+            // they act on - the shared top bar keeps only the page title and
+            // the global mode/theme controls.
             let html = `
                 <div class="search-bar">
                     <select id="bounceCampFilter" onchange="Bounces.filterCampaign(this.value)" style="width:auto;min-width:240px">
@@ -585,7 +578,11 @@ const Bounces = {
                         ${App.formatNumber(total)} ${this._typeLabel()}
                         ${this.campaignFilter ? ' for ' + filterLabel : ''}
                     </span>
-                    <div style="flex:1"></div>
+                    <div class="page-actions">
+                        <button class="btn btn-primary" onclick="Bounces.ingestBounces()">Ingest New Bounces</button>
+                        <button class="btn" onclick="Bounces.exportBounces()">Export CSV</button>
+                        <button class="btn btn-danger" onclick="Bounces.deleteAll()">${deleteActionLabel}</button>
+                    </div>
                 </div>
                 <div class="table-wrapper"><table>
                     <thead><tr>

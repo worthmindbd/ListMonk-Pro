@@ -13,10 +13,6 @@ const Lists = {
             const lists = data.results || [];
             const total = data.total || 0;
 
-            App.setActions(`
-                <button class="btn btn-sm btn-primary" onclick="Lists.showCreate()">+ New List</button>
-            `);
-
             let html = `
                 <div class="search-bar">
                     <div class="search-input">
@@ -26,6 +22,9 @@ const Lists = {
                             value="${App.escapeHtml(this.query)}" onkeydown="if(event.key==='Enter')Lists.search()">
                     </div>
                     <button class="btn" onclick="Lists.search()">Search</button>
+                    <div class="page-actions">
+                        <button class="btn btn-primary" onclick="Lists.showCreate()">+ New List</button>
+                    </div>
                 </div>
                 <div class="table-wrapper"><table>
                     <thead><tr>

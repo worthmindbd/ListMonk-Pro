@@ -94,28 +94,26 @@ const Unsubscribes = {
             imapBadge = `<span class="badge badge-danger" style="font-size:0.85rem;padding:6px 14px">IMAP Error: ${App.escapeHtml(imap.error || 'Unknown')}</span>`;
         }
 
-        // Top bar actions
-        App.setActions(`
-            <button class="btn btn-sm" onclick="Unsubscribes.exportAllCSV()">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="margin-right:4px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                Export All
-            </button>
-            <button class="btn btn-sm" onclick="Unsubscribes.resetAll()" title="Undo all unsubscribes and restore list memberships">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="margin-right:4px"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><polyline points="3 3 3 8 8 8"/></svg>
-                Undo All
-            </button>
-            <button class="btn btn-sm btn-primary" onclick="Unsubscribes.triggerScan()">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="margin-right:4px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-                Scan Now
-            </button>
-        `);
-
         let html = `
             <!-- IMAP Status -->
             <div class="card" style="margin-bottom:20px">
                 <div class="card-header">
                     <h3 class="card-title">IMAP Unsubscribe Monitor</h3>
-                    <div class="action-btns">${imapBadge}</div>
+                    <div class="page-actions">
+                        ${imapBadge}
+                        <button class="btn" onclick="Unsubscribes.exportAllCSV()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                            Export All
+                        </button>
+                        <button class="btn" onclick="Unsubscribes.resetAll()" title="Undo all unsubscribes and restore list memberships">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><polyline points="3 3 3 8 8 8"/></svg>
+                            Undo All
+                        </button>
+                        <button class="btn btn-primary" onclick="Unsubscribes.triggerScan()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                            Scan Now
+                        </button>
+                    </div>
                 </div>
                 <div class="unsub-monitor-info">
                     <div>
@@ -238,21 +236,6 @@ const Unsubscribes = {
         const readableDate = this.formatCampaignDate(camp.campaign_key);
         const cleanName = App.escapeHtml(this.cleanCampaignName(camp.campaign_name));
 
-        // Top bar actions
-        App.setActions(`
-            <button class="btn btn-sm ${hasSelected ? 'btn-danger' : ''}" onclick="Unsubscribes.bulkDeleteSelected()" ${!hasSelected ? 'disabled' : ''}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="margin-right:4px"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                Delete Selected${hasSelected ? ` (${this.selectedEmails.size})` : ''}
-            </button>
-            <button class="btn btn-sm" onclick="Unsubscribes.exportCampaignCSV(${camp.campaign_id})">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="margin-right:4px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                Export CSV
-            </button>
-            <button class="btn btn-sm btn-danger" onclick="Unsubscribes.removeCampaign(${camp.campaign_id})">
-                Remove List
-            </button>
-        `);
-
         let html = `
             <!-- Back button + header -->
             <div style="margin-bottom:20px">
@@ -265,6 +248,19 @@ const Unsubscribes = {
                         <div style="display:flex;align-items:center;gap:10px">
                             <span class="badge badge-primary" style="font-size:0.9rem;padding:6px 14px">${readableDate}</span>
                             <h3 class="card-title" style="margin:0">${cleanName}</h3>
+                        </div>
+                        <div class="page-actions">
+                            <button class="btn ${hasSelected ? 'btn-danger' : ''}" onclick="Unsubscribes.bulkDeleteSelected()" ${!hasSelected ? 'disabled' : ''}>
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                                Delete Selected${hasSelected ? ` (${this.selectedEmails.size})` : ''}
+                            </button>
+                            <button class="btn" onclick="Unsubscribes.exportCampaignCSV(${camp.campaign_id})">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                Export CSV
+                            </button>
+                            <button class="btn btn-danger" onclick="Unsubscribes.removeCampaign(${camp.campaign_id})">
+                                Remove List
+                            </button>
                         </div>
                     </div>
                 </div>

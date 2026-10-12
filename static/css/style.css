@@ -543,13 +543,6 @@ td strong,
     font-family: var(--font-display);
 }
 
-.top-bar-actions {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    flex-wrap: wrap;
-}
-
 /* ── Theme Switcher ────────────────────────────────────────── */
 .theme-toggle {
     display: flex;
@@ -1256,6 +1249,23 @@ code {
     margin-bottom: 20px;
     align-items: center;
     flex-wrap: wrap;
+}
+
+/* Right-aligned cluster holding a page's own buttons: inside a filter row
+   (.search-bar) or a card header. Keeps them on the far end of the row and
+   wrapping onto their own line instead of overflowing on narrow screens. */
+.page-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-left: auto;
+}
+
+/* A filter row is one control line, so its buttons match the select/input
+   height (38px: 10px padding, 0.9rem text, 1px border). */
+.search-bar .btn {
+    min-height: 38px;
 }
 
 .search-input {
@@ -1984,16 +1994,11 @@ td .action-btns {
         flex-wrap: wrap;
     }
 
-    /* Buttons are the priority on mobile; the title wraps onto its own row
-       underneath instead of being crushed to zero width. */
+    /* The bar holds only the title plus the global mode/theme controls now.
+       A min-width keeps the title from being squeezed to zero by the mode
+       switcher; the controls wrap onto a second row instead. */
     .top-bar-title-wrap {
-        flex: 1 0 100%;
-        order: 2;
-    }
-
-    .top-bar-actions {
-        order: 1;
-        width: 100%;
+        min-width: 140px;
     }
 
     .page-title {

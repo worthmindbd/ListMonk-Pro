@@ -13,11 +13,6 @@ const Subscribers = {
             const subscribers = data.results || [];
             const total = data.total || 0;
 
-            App.setActions(`
-                <button class="btn btn-sm" onclick="Subscribers.exportAll()">Export CSV</button>
-                <button class="btn btn-sm btn-primary" onclick="Subscribers.showCreate()">+ Add Subscriber</button>
-            `);
-
             let html = `
                 <div class="search-bar">
                     <div class="search-input">
@@ -27,6 +22,10 @@ const Subscribers = {
                             value="${App.escapeHtml(this.query)}" onkeydown="if(event.key==='Enter')Subscribers.search()">
                     </div>
                     <button class="btn" onclick="Subscribers.search()">Search</button>
+                    <div class="page-actions">
+                        <button class="btn" onclick="Subscribers.exportAll()">Export CSV</button>
+                        <button class="btn btn-primary" onclick="Subscribers.showCreate()">+ Add Subscriber</button>
+                    </div>
                 </div>
                 <div class="table-wrapper"><table>
                     <thead><tr>
