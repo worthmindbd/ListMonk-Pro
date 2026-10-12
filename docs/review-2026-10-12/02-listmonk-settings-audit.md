@@ -57,7 +57,7 @@
 | A3 | SMTP auth | `auth_protocol: plain`, user `kawsar@getaevoramedia.com` | ✅ |
 | A4 | Connection behaviour | `max_conns: 2`, `max_msg_retries: 2`, `msg_retry_delay: 5s`, `idle_timeout: 15s`, `wait_timeout: 5s` | ✅ conservative/healthy |
 | A5 | Sender identity | `app.from_email = Kawsar Mahmud <kawsar@getaevoramedia.com>` — same domain as the SMTP server | ✅ |
-| A6 | **Sending throughput** :warning: **ACTION** | `app.message_rate = 1` (= 1 msg/sec, not the binding limit) **plus** `app.message_sliding_window = true` with `rate = 1` per `duration = 2m` | 🟡 ListMonk's `pipe.pushBatch` sleeps for the remainder of the window every time `slidingCount >= SlidingWindowRate`, so **rate 1 per 2 m = 1 message every 2 minutes ≈ 720/day**. The observed numbers agree: 935 sends ≈ 31 h, 916 sends ≈ 30.5 h — matching the ~32 h between campaign #3's start (Oct 7, 16:21) and #4's start (Oct 9, 11:51). Not covered by the app's presets or its audit; confirm whether this throttle is intentional. |
+| A6 | **Sending throughput** | `app.message_rate = 1` (= 1 msg/sec, not the binding limit) **plus** `app.message_sliding_window = true` with `rate = 1` per `duration = 2m` | 🟡 ListMonk's `pipe.pushBatch` sleeps for the remainder of the window every time `slidingCount >= SlidingWindowRate`, so **rate 1 per 2 m = 1 message every 2 minutes ≈ 720/day**. Confirmed on the VPS: ListMonk's log is full of `pipe.go:126: messages exceeded (1) for the window (2m0s) … Sleeping for 2m0s`, i.e. exactly one message every two minutes. |
 | A7 | Batch / workers | `app.batch_size = 100`, `app.concurrency = 1` | ✅ matches the cold-email preset |
 | A8 | Error tolerance | `app.max_send_errors = 10` | ✅ |
 | A9 | From-address restriction :warning: **ACTION** | `smtp[0].from_addresses = []` (any From allowed), `smtp[0].name = ""` | 🟡 restrict to `@getaevoramedia.com` and name the server |
@@ -126,7 +126,7 @@
 |---|--------|-------|---------|
 | F1 | MX | `mail.getaevoramedia.com` | ✅ |
 | F2 | SPF | `v=spf1 a mx ip4:173.249.56.172 -all` | ✅ hard fail, sending IP covered (`lm.` resolves to the same IP) |
-| F3 | DKIM | `mail._domainkey` published, 2048-bit RSA (`v=DKIM1; k=rsa; p=MIIBIjAN…`) | ✅ record present · 🟡 **signing is MTA-side and cannot be verified from the API** — send one message to a Gmail address and confirm “signed-by: getaevoramedia.com” |
+| F3 | DKIM | ✅ **verified on the VPS (was "unverified")** — exim signs with `dkim_selector = mail`, `dkim_canon = relaxed`, `dkim_strict = 0` (`/etc/exim4/exim4.conf.template:404`) using the per-domain key `/etc/exim4/domains/getaevoramedia.com/dkim.pem`. The public key derived from that **signing key** has the same SHA-256 fingerprint as the published `mail._domainkey` record (`6e6eaef16526340827c2ffd4ba4eecff53cf804bed50ba57c41d81d2bc587d07`), so signing and DNS are aligned |
 | F4 | DMARC :warning: **ACTION** | `v=DMARC1; p=quarantine; pct=100` | 🟡 no `rua=`/`ruf=` — you get no failure reports. Add `rua` and plan the move to `p=reject` |
 | F5 | TLS on the ListMonk UI | nginx, HTTPS | ✅ |
 | F6 | TLS on SMTP submission | STARTTLS, valid cert, TLS 1.3 | ✅ (probed directly) |
@@ -151,7 +151,7 @@
 | H4 | `IMAP_*` (reply tracker + unsubscribes) | ✅ `IMAP CONNECTED`; mailbox `info@getaevoramedia.com` reachable |
 | H5 | `BOUNCE_IMAP_*` | ✅ reachable (2 messages) but see B6 |
 | H6 | `TRUST_PROXY` | unset — fine for the same-host/private-peer Nginx setup described in `.env.example` |
-| H7 | **File permissions** | ✅ **fixed** — `.env` is now `-rw-------` (600); it holds the API key, dashboard password and both IMAP passwords, and `.env.example` now says so |
+| H7 | **File permissions** | ✅ **fixed locally and on the VPS** — `/root/ListMonk-Pro/.env` was `644` root:root and is now `600`. `bounce_processed.json` (created by the new scanner) was the one state file that came out `644`; the writer now uses an atomic 0600 write like its siblings, and the deployed file was corrected |
 
 ---
 
@@ -161,7 +161,23 @@
 2. ✅ **Done — hidden-text block** (project review item 3): removed from `sequence_1_template`; every email had been carrying ~1,609 words of invisible text.
 3. ✅ **Done — `SENT` mislabel** (items 1–2) and the settings-write bug that broke the 1-click preset (item 7).
 4. ✅ **Done — hardening:** `upload.extensions` wildcard removed, `.env` set to `600`.
-5. **ACTION — read the ListMonk log** for the 1,078 unsent messages (item 5). A6 itself needs no change: 720/day is a defensible pace for 1,931 leads, and the 2-minute window bounds how long a pause takes to take effect.
+5. ✅ **Answered — the 1,078 unsent messages.** Read from the VPS:
+   `docker logs listmonk_app` (ListMonk **v6.2.0**) contains **zero** `error sending message in
+   campaign` lines and **zero** `stop processing campaign` lines, but each campaign logs
+   `start processing campaign` **twice** (Oct 7 16:21→16:23 and Oct 9 17:51→18:51) — a pipe
+   restart mid-queue. The DB shows `sent < to_send` with `last_subscriber_id = max_subscriber_id
+   = 5801` for both campaigns, so ListMonk believed the subscriber range was exhausted and
+   closed them as `finished`. The MTA agrees with ListMonk, not with `to_send`: exim accepted
+   737 messages in campaign #3's window and 798 in campaign #4's (from `kawsar@`), i.e. the
+   remainder was never handed over — nothing is stuck (queue is empty today). Root cause is the
+   combination of a ~31-hour queue drain with an interruption: when the pipe restarted, the
+   progress marker had already advanced to the end of the last processed batch, so the rest of
+   the audience was silently skipped.
+   **Recommendation:** keep the 720/day pace (a sound single-domain volume) but stop running a
+   single campaign for days — either raise the effective rate so a send completes in one
+   window, or split the audience into daily batches (which is effectively what the
+   `Remaining Leads` list did). Keep an eye on `sent` vs `to_send` after every send: the
+   dashboard now reports the real number, and the audit surfaces the cadence.
 6. ✅ **Done — newsletter readiness:** public subscription page, opt-in page, double opt-in and ALTCHA captcha enabled; public double opt-in list `Aevora Newsletter` created. Remember the newsletter preset still turns `privacy.unsubscribe_header` back on globally, and add a `rua=` DMARC address when convenient (DNS-side).
 7. **ACTION — optional:** restrict `smtp[0].from_addresses` to `@getaevoramedia.com`, and add a plain-text alt body / per-lead subject to the next campaign.
 8. **Verify with one test send** (to a Gmail address): DKIM signature present, unsubscribe link resolves, and placement is Primary rather than Spam — the only remaining checks that cannot be done through the API.

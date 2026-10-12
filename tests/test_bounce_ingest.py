@@ -9,6 +9,7 @@ bounce" rule.
 import email.message
 import email.policy
 import email.utils
+import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -161,6 +162,25 @@ def test_processed_ids_are_capped(monkeypatch, tmp_path):
     bi.mark_processed_ids([f"<{i}>" for i in range(5)])
     # Keeps the newest entries, so a bounded file cannot resurrect old DSNs.
     assert bi.load_processed_ids() == ["<2>", "<3>", "<4>"]
+
+
+def test_state_file_is_not_world_readable(tmp_path, monkeypatch):
+    """The state file must match its 0600 siblings in DATA_DIR."""
+    import stat
+
+    # NamedTemporaryFile honours the umask, so make it permissive to prove the
+    # writer (not the environment) is what keeps the file private.
+    monkeypatch.setattr(bi, "PROCESSED_FILE", tmp_path / "processed.json")
+    old_umask = os.umask(0o022)
+    try:
+        bi.mark_processed_ids(["<secret@mail>"])
+    finally:
+        os.umask(old_umask)
+
+    mode = stat.S_IMODE(bi.PROCESSED_FILE.stat().st_mode)
+    assert mode == 0o600, f"expected 0600, got {oct(mode)}"
+    # No temp files left behind by the atomic write.
+    assert [p.name for p in tmp_path.iterdir()] == ["processed.json"]
 
 
 def test_dsn_action_detection():

@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -84,12 +85,27 @@ def load_processed_ids() -> list[str]:
 def save_processed_ids(ids: list[str]) -> None:
     """Persist handled-DSN identifiers atomically, capped to the newest N."""
     trimmed = ids[-MAX_PROCESSED_IDS:] if len(ids) > MAX_PROCESSED_IDS else ids
+    tmp_path = None
     try:
         PROCESSED_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = PROCESSED_FILE.with_name(PROCESSED_FILE.name + ".tmp")
-        tmp.write_text(json.dumps(trimmed), encoding="utf-8")
-        os.replace(tmp, PROCESSED_FILE)
+        # NamedTemporaryFile creates the file 0600 and os.replace is atomic, so
+        # the state file never appears world-readable or half-written (the other
+        # state files in DATA_DIR are 0600 too).
+        with tempfile.NamedTemporaryFile(
+            "w", dir=PROCESSED_FILE.parent, prefix=PROCESSED_FILE.name, suffix=".tmp",
+            delete=False, encoding="utf-8",
+        ) as f:
+            tmp_path = f.name
+            json.dump(trimmed, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, PROCESSED_FILE)
     except OSError as e:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
         logger.warning(f"Could not persist processed bounce ids: {e}")
 
 
