@@ -64,10 +64,10 @@ ListMonk Pro adapts instantly between two distinct marketing disciplines with a 
 
 ### CSV Converter & Direct Importer
 ListMonk requires a specific CSV format (`email`, `name`, `attributes` as JSON). This built-in tool handles arbitrary CSV files:
-1. **Upload** any CSV file.
-2. **Auto-Detect & Map** columns visually (select email, name, and arbitrary attribute columns).
-3. **Preview** converted rows in real-time.
-4. **Download** the converted CSV or **import directly** into ListMonk with selected target lists and subscription mode.
+1. **Upload** any CSV, TSV, or delimited text file (delimiter and encoding are auto-detected).
+2. **Auto-Detect & Map** columns visually: email and name are pre-selected from the headers or sample values, and every remaining column is preserved automatically as a JSON attribute (or hand-pick specific columns instead).
+3. **Preview** the exact rows ListMonk will receive, including skipped rows with malformed or missing email addresses.
+4. **Download** the converted CSV or **import directly** into ListMonk with selected target lists and subscription mode (`subscribe` or `blocklist`).
 
 ### Settings & Automation
 - **Campaign Scheduler** — Enforces daily sending windows (e.g., 8:00 AM – 8:00 PM EST) and allowed days (Mon–Fri, weekends). Running campaigns outside the window auto-pause, and auto-paused campaigns automatically resume when the window opens.
@@ -355,7 +355,8 @@ Once running, visit **http://localhost:8000/docs** for the interactive Swagger U
 | | `DELETE /api/bounces/{id}` | DELETE | Delete single bounce record |
 | | `DELETE /api/bounces` | DELETE | Delete all bounces or filter-matched bounces |
 | **CSV Converter** | `POST /api/converter/detect-columns` | POST | Upload CSV and detect columns & preview |
-| | `POST /api/converter/convert` | POST | Convert CSV to ListMonk schema |
+| | `POST /api/converter/preview` | POST | Convert and return the first rows as JSON (exact ListMonk output preview) |
+| | `POST /api/converter/convert` | POST | Convert CSV to ListMonk schema (download) |
 | | `POST /api/converter/convert-and-import` | POST | Convert and import directly into ListMonk lists |
 | **Scheduler** | `GET /api/scheduler` | GET | Get send window schedule configuration & status |
 | | `PUT /api/scheduler` | PUT | Update send window schedule settings |

@@ -196,14 +196,32 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | `start_cache_updater` | 5 minutes | Refreshes in-memory hard bounce counts per campaign |
 
 ### 6. CSV Converter (`app/services/csv_converter.py`)
-- Detects column headers and sample data from uploaded CSVs.
+- Detects column headers and sample data from uploaded CSVs. Delimiter detection
+  scores `,` `\t` `;` `|` on how consistently they split the first rows, using
+  `csv.Sniffer` only as a tie-breaker — plain European `a;b;c` exports used to
+  collapse into one column.
 - Suggests the email/name columns (`detect_columns` → `suggested`): header names first
   (`Email Address`, `Full Name`, `E-MAIL`, …), then the sample values themselves (the
   column that actually holds addresses wins over an unrecognised header).
 - Reports rows whose field count differs from the header (`ragged_rows` + `warnings`) so a
   shifted row is visible in the preview instead of silently importing wrong values.
-- Maps custom columns to ListMonk's required structure: `email`, `name`, `attributes` (serialized as JSON).
-- Supports direct import into ListMonk with list selection and subscription mode (`subscribe`, `unsubscribed`).
+- Maps custom columns to ListMonk's required structure: `email`, `name`, `attributes` (JSON).
+  ListMonk's importer only understands those three headers, so with `auto_attributes=True`
+  (the default) every column that is not the email/name column is promoted into the
+  `attributes` JSON — an arbitrary CSV is preserved without manual mapping. Callers can
+  send `attribute_mode=selected` plus an explicit `attribute_columns` list to convert only
+  the checked columns; a bare `attribute_columns` list without a mode is treated as
+  `selected` for backwards compatibility.
+- Cell values that are themselves JSON objects (`{"age": 30}`) are merged into the row's
+  attributes rather than stringified, so nested attribute paths keep working.
+- Rows with a missing or malformed e-mail are skipped and counted
+  (`empty_emails` / `invalid_emails` in stats); ListMonk would drop them at import
+  anyway, so reporting them beats a misleading "converted" count. Addresses are
+  lowercased like ListMonk does, and the accepted shape matches the importer
+  (a dotted domain is required, single-label domains are flagged).
+- Supports direct import into ListMonk with list selection and subscription mode (`subscribe`,
+  `blocklist`). `POST /api/converter/preview` runs the same conversion and returns the
+  first rows as JSON, so the UI previews the exact output ListMonk will receive.
 
 ### 7. Persistent Runtime State (`DATA_DIR`)
 - `app/config.py` provides `settings.data_path(filename)` to store mutable JSON state files (`schedule.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`, `reply_log.json`, `reply_processed.json`, `reply_settings.json`, `bounce_processed.json`).
@@ -253,7 +271,8 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/bounces/export` | GET | Export filtered bounce records as CSV |
 | | `/api/bounces/{id}` | DELETE | Delete single bounce record |
 | **CSV Converter** | `/api/converter/detect-columns` | POST | Detect CSV headers & preview rows |
-| | `/api/converter/convert` | POST | Convert CSV to ListMonk schema |
+| | `/api/converter/preview` | POST | Convert and return the first rows as JSON (exact ListMonk output preview) |
+| | `/api/converter/convert` | POST | Convert CSV to ListMonk schema (download) |
 | | `/api/converter/convert-and-import` | POST | Convert and import directly into ListMonk |
 | **Scheduler** | `/api/scheduler` | GET / PUT | Get / update send window settings |
 | | `/api/scheduler/run` | POST | Manually trigger scheduler tick |

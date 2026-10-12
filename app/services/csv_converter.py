@@ -4,6 +4,13 @@ Refactored from the standalone convert.py script.
 
 ListMonk requires subscribers CSV with columns: email, name, attributes
 where attributes is a JSON string of extra fields.
+
+ListMonk's importer (internal/subimporter) only understands the headers
+``email``, ``name`` and ``attributes``: every other header is ignored, the
+``email`` column is mandatory, and a row with malformed JSON in ``attributes``
+is dropped from the import. The converter therefore maps arbitrary source
+columns onto those three headers, promoting every unclaimed column into the
+``attributes`` JSON object so no source data is lost on the way in.
 """
 
 import csv
@@ -20,7 +27,16 @@ ENCODINGS = ["utf-8-sig", "utf-8", "latin-1", "cp1252"]
 # "E-Mail Address" and "email_address" both normalise to "emailaddress".
 _EMAIL_HEADER_EXACT = {"email", "emailaddress", "emailid", "mail", "email1", "primaryemail"}
 _NAME_HEADER_EXACT = {"name", "fullname", "contactname", "firstname", "lastname", "contactperson", "contact"}
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$", re.IGNORECASE)
+# Matches anything ListMonk's importer would accept as a bare address: one
+# "@", no whitespace on either side, and a dotted domain (no leading/trailing
+# dot). It is intentionally more permissive than :data:`_EMAIL_STRICT_RE`
+# (which decides column *suggestions*), so a valid-but-unusual address
+# (unicode domain, single-character TLD) is never dropped on the way in.
+_EMAIL_RE = re.compile(r"^[^@\s]+@(?:[^@\s.]+\.)+[^@\s.]+$", re.IGNORECASE)
+# Deliberately strict: requires a dotted domain with a 2+ letter TLD. Used to
+# score sample values, so a column full of "bob@company" typos is not picked as
+# the email column.
+_EMAIL_STRICT_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$", re.IGNORECASE)
 
 
 def _normalise_header(header: str) -> str:
@@ -28,10 +44,43 @@ def _normalise_header(header: str) -> str:
     return re.sub(r"[^a-z0-9]", "", header.lower())
 
 
-def _count_csv_rows(text: str, dialect) -> int:
+def _is_valid_email(value: str) -> bool:
+    """Whether a cell looks like a bare, importable e-mail address.
+
+    Mirrors ListMonk's own validation closely enough that the converter never
+    drops an address the importer would accept.
+    """
+    return bool(_EMAIL_RE.match((value or "").strip()))
+
+
+def _normalise_email(value: str) -> str:
+    """Trim and lowercase, matching the canonical form ListMonk stores."""
+    return value.strip().lower()
+
+
+def _merge_json_attr(attribs: dict, value: str) -> None:
+    """Merge a cell containing a JSON object into the attributes dict.
+
+    ListMonk stores nested attributes by querying them as JSON paths, so a
+    source cell such as ``{"age": 30}`` is imported merged into the row's
+    attributes instead of being stringified. Non-JSON cells are ignored.
+    """
+    value = value.strip()
+    if not (value.startswith("{") and value.endswith("}")):
+        return
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return
+    if isinstance(parsed, dict):
+        for key, val in parsed.items():
+            attribs.setdefault(str(key), val)
+
+
+def _count_csv_rows(text: str, delimiter: str) -> int:
     """Count data rows in a CSV string, handling embedded newlines in quoted fields."""
     try:
-        reader = csv.reader(io.StringIO(text), dialect=dialect)
+        reader = csv.reader(io.StringIO(text), delimiter=delimiter)
         # Skip header row if the CSV has column names
         header = next(reader, None)
         if header is None:
@@ -40,29 +89,6 @@ def _count_csv_rows(text: str, dialect) -> int:
     except Exception:
         # Fallback for malformed content
         return max(0, len(text.splitlines()) - 1)
-
-
-def _count_ragged_rows(text: str, dialect, expected: int) -> int:
-    """Count data rows whose field count differs from the header length.
-
-    Such rows are still converted (a trailing/leading empty field is common and
-    usually harmless), but they can shift values into the wrong column, so the
-    caller surfaces the count as a warning instead of failing silently.
-    """
-    if expected <= 0:
-        return 0
-    bad = 0
-    try:
-        reader = csv.reader(io.StringIO(text), dialect=dialect)
-        next(reader, None)
-        for row in reader:
-            if not row or (len(row) == 1 and not row[0].strip()):
-                continue
-            if len(row) != expected:
-                bad += 1
-    except Exception:
-        return bad
-    return bad
 
 
 def suggest_columns(columns: list[str], sample_rows: list[dict]) -> dict:
@@ -93,7 +119,7 @@ def suggest_columns(columns: list[str], sample_rows: list[dict]) -> dict:
             values = [v for v in values if v]
             if not values:
                 continue
-            ratio = sum(1 for v in values if _EMAIL_RE.match(v)) / len(values)
+            ratio = sum(1 for v in values if _EMAIL_STRICT_RE.match(v)) / len(values)
             if ratio >= 0.6 and ratio > best_ratio:
                 best_ratio, best_col = ratio, col
         email = best_col
@@ -122,29 +148,160 @@ def detect_encoding(file_bytes: bytes) -> str:
     return "latin-1"
 
 
-def detect_columns(file_bytes: bytes) -> dict:
+_DELIMITERS = [",", "\t", ";", "|"]
+
+
+def _delimiter_score(text: str, delim: str) -> int:
+    """Score how well a delimiter splits the sample: columns minus inconsistency."""
+    try:
+        rows = [r for r in csv.reader(io.StringIO(text), delimiter=delim) if r]
+    except csv.Error:
+        return 0
+    if not rows:
+        return 0
+    counts = [len(r) for r in rows[:50]]
+    if max(counts) <= 1:
+        return 0
+    # Reward column count, punish rows that break the file's consistency.
+    return max(counts) - (max(counts) - min(counts))
+
+
+def _detect_delimiter(text: str) -> str:
+    """Pick the delimiter that parses the file most consistently.
+
+    ``csv.Sniffer`` gives up on ordinary European "a;b;c" exports and can guess
+    a separator that only appears inside values, so its suggestion is accepted
+    only when it parses as well as the best candidate measured across the first
+    rows. ``,`` is the tie-breaker, which keeps single-column files unchanged.
     """
-    Detect columns in a CSV file.
-    Returns dict with 'columns' list and 'sample_rows' (first 5 rows).
+    sample = text[:65536]
+    try:
+        sniffed = csv.Sniffer().sniff(sample, delimiters="".join(_DELIMITERS)).delimiter
+    except csv.Error:
+        sniffed = ""
+
+    candidates = [(d, _delimiter_score(sample, d)) for d in _DELIMITERS]
+    if sniffed in _DELIMITERS:
+        # Comma is evaluated last, so a sniffer guess wins ties but never a
+        # file that another delimiter splits more reliably.
+        candidates = [c for c in candidates if c[0] != sniffed] + [(sniffed, _delimiter_score(sample, sniffed))]
+    best_delim, best_score = ",", 0
+    for delim, score in candidates:
+        if score >= best_score and score > 0:
+            best_delim, best_score = delim, score
+    return best_delim
+
+
+def _prepare_reader(file_bytes: bytes) -> tuple[str, str, list[str], io.StringIO]:
+    """Decode the upload and detect its delimiter and header row.
+
+    Returns ``(text, delimiter, headers, text_io)`` where ``headers`` are the
+    stripped, non-empty column names and ``text_io`` is positioned at the first
+    data row, ready for a ``csv.DictReader``.
     """
     encoding = detect_encoding(file_bytes)
     text = file_bytes.decode(encoding)
     text_io = io.StringIO(text)
 
-    # Detect delimiter
-    sample = text_io.read(4096)
-    text_io.seek(0)
+    delimiter = _detect_delimiter(text)
+    reader = csv.reader(text_io, delimiter=delimiter)
     try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
+        raw_header = next(reader, None) or []
     except csv.Error:
-        dialect = csv.excel  # fallback to comma-separated
+        raw_header = []
+    headers = [str(h).strip() for h in raw_header if str(h).strip()]
+    return text, delimiter, headers, text_io
 
-    reader = csv.DictReader(text_io, dialect=dialect)
-    if not reader.fieldnames:
+
+def _column_index_map(headers: list[str]) -> dict[str, int]:
+    """Map lowercase header names to their position in the file.
+
+    Duplicate headers keep the first position (readers naturally use the
+    left-most column of a repeated name).
+    """
+    mapping: dict[str, int] = {}
+    for index, header in enumerate(headers):
+        mapping.setdefault(header.lower(), index)
+    return mapping
+
+
+def _resolve_column(user_column: Optional[str], index_map: dict[str, int], headers: list[str]) -> Optional[int]:
+    """Resolve a user-supplied column name to its file position.
+
+    Matches case-insensitively on the stripped name. Must be called *before*
+    row cleaning strips and trims the row dicts, so keys stay as detected.
+    """
+    if not user_column:
+        return None
+    key = str(user_column).strip().lower()
+    if key in index_map:
+        return index_map[key]
+    # Tolerate selections created before headers were normalised.
+    for index, header in enumerate(headers):
+        if header.strip().lower() == key:
+            return index
+    return None
+
+
+def _attribute_plan(
+    headers: list[str],
+    index_map: dict[str, int],
+    email_idx: int,
+    name_idx: Optional[int],
+    attribute_columns: Optional[list[str]],
+    auto_attributes: bool,
+) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
+    """Work out which columns become attributes.
+
+    Returns ``(selected, auto)`` pairs of ``(attribute key, column index)``.
+    ``selected`` holds the user's explicit picks (always applied). ``auto``
+    holds every remaining column, so nothing in the file is dropped. Keys are
+    deduplicated case-insensitively, which also keeps a picked column out of
+    the auto list.
+    """
+    selected: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    for attr in attribute_columns or []:
+        idx = _resolve_column(attr, index_map, headers)
+        if idx is None:
+            continue
+        key = str(attr).strip()
+        if key.lower() in seen:
+            continue
+        seen.add(key.lower())
+        selected.append((key, idx))
+
+    # Columns never promoted: the email and name columns (their values land in
+    # ``email`` / ``name``) and anything already picked explicitly.
+    skip = {email_idx, *(idx for _, idx in selected)}
+    if name_idx is not None:
+        skip.add(name_idx)
+
+    auto: list[tuple[str, int]] = []
+    if auto_attributes:
+        for idx, header in enumerate(headers):
+            if idx in skip or header.lower() in seen:
+                continue
+            seen.add(header.lower())
+            auto.append((header, idx))
+
+    return selected, auto
+
+
+def detect_columns(file_bytes: bytes) -> dict:
+    """
+    Detect columns in a CSV file.
+    Returns dict with 'columns' list and 'sample_rows' (first 5 rows).
+    """
+    text, delimiter, headers, text_io = _prepare_reader(file_bytes)
+    encoding = detect_encoding(file_bytes)
+
+    if not headers:
         return {"columns": [], "sample_rows": [], "encoding": encoding}
 
-    raw_fieldnames = [f for f in reader.fieldnames if f]
-    columns = [f.strip() for f in raw_fieldnames]
+    # _prepare_reader consumed the header row; rewind so DictReader re-reads it.
+    text_io.seek(0)
+    reader = csv.DictReader(text_io, delimiter=delimiter)
 
     # Read first 5 rows as sample
     sample_rows = []
@@ -154,7 +311,20 @@ def detect_columns(file_bytes: bytes) -> dict:
         cleaned = {k.strip(): (v.strip() if isinstance(v, str) else ("" if v is None else str(v))) for k, v in row.items() if k}
         sample_rows.append(cleaned)
 
-    ragged_rows = _count_ragged_rows(text, dialect, len(columns))
+    # Count rows whose field count differs from the header, so a shifted row is
+    # visible in the preview instead of silently importing wrong values.
+    ragged_rows = 0
+    try:
+        counter = csv.reader(io.StringIO(text), delimiter=delimiter)
+        next(counter, None)
+        for row in counter:
+            # Blank lines aren't data rows, so they aren't ragged either.
+            if not any((c or "").strip() for c in row):
+                continue
+            if len(row) != len(headers):
+                ragged_rows += 1
+    except Exception:
+        pass
     warnings = []
     if ragged_rows:
         warnings.append(
@@ -163,14 +333,142 @@ def detect_columns(file_bytes: bytes) -> dict:
         )
 
     return {
-        "columns": columns,
+        "columns": headers,
         "sample_rows": sample_rows,
         "encoding": encoding,
-        "row_count_estimate": _count_csv_rows(text, dialect),
-        "suggested": suggest_columns(columns, sample_rows),
+        "row_count_estimate": _count_csv_rows(text, delimiter),
+        "suggested": suggest_columns(headers, sample_rows),
         "ragged_rows": ragged_rows,
         "warnings": warnings,
     }
+
+
+def _row_cell(row: list, idx: int) -> str:
+    """Stripped cell value, empty when the row is short (ragged input)."""
+    if idx >= len(row):
+        return ""
+    value = row[idx]
+    if value is None:
+        return ""
+    return value.strip() if isinstance(value, str) else str(value).strip()
+
+
+def _delimiter_label(delimiter: str) -> str:
+    """Human-readable name for a delimiter character."""
+    return {",": "comma", "\t": "tab", ";": "semicolon", "|": "pipe"}.get(delimiter, delimiter)
+
+
+def _iter_converted_rows(
+    text: str,
+    delimiter: str,
+    delimiter_label: str,
+    headers: list[str],
+    email_idx: int,
+    name_idx: Optional[int],
+    selected_attribs: list[tuple[str, int]],
+    auto_attribs: list[tuple[str, int]],
+):
+    """Yield converted ListMonk rows ``(email, name, attributes_json, stats)``.
+
+    Every yielded row carries the stats accumulated so far (the same dict object
+    updated in place), and a final stats-only sentinel is emitted once the file
+    is drained. That lets ``convert_csv`` write rows while ``preview_conversion``
+    only keeps the first few, both from one conversion implementation.
+    """
+    counts = {"converted": 0, "empty_emails": 0, "invalid_emails": 0, "ragged_rows": 0}
+    stats = {
+        "converted": 0,
+        "skipped": 0,
+        "total": 0,
+        "empty_emails": 0,
+        "invalid_emails": 0,
+        "ragged_rows": 0,
+        "delimiter": delimiter_label,
+        "attribute_columns": [key for key, _ in selected_attribs + auto_attribs],
+        "auto_attributes": bool(auto_attribs),
+    }
+
+    def flush_stats() -> None:
+        stats.update(
+            converted=counts["converted"],
+            skipped=counts["empty_emails"] + counts["invalid_emails"],
+            total=counts["converted"] + counts["empty_emails"] + counts["invalid_emails"],
+            empty_emails=counts["empty_emails"],
+            invalid_emails=counts["invalid_emails"],
+            ragged_rows=counts["ragged_rows"],
+        )
+
+    row_reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+    next(row_reader, None)
+
+    for raw in row_reader:
+        # Skip fully blank lines.
+        if not raw or (len(raw) == 1 and not raw[0].strip()):
+            continue
+        if len(raw) != len(headers):
+            counts["ragged_rows"] += 1
+
+        email = _row_cell(raw, email_idx)
+        if not email:
+            counts["empty_emails"] += 1
+            continue
+        if not _is_valid_email(email):
+            # ListMonk skips malformed addresses during import, so skip them
+            # here where they can be reported to the user.
+            counts["invalid_emails"] += 1
+            continue
+        # ListMonk lowercases addresses on import; matching that here keeps the
+        # preview honest and makes duplicate handling predictable.
+        email = _normalise_email(email)
+
+        name = _row_cell(raw, name_idx) if name_idx is not None else ""
+
+        attribs: dict = {}
+        for key, idx in selected_attribs + auto_attribs:
+            value = _row_cell(raw, idx)
+            if value:
+                attribs[key] = value
+                _merge_json_attr(attribs, value)
+
+        counts["converted"] += 1
+        flush_stats()
+        yield email, name, (json.dumps(attribs, ensure_ascii=False) if attribs else "{}"), stats
+
+    # Flush once more for skipped rows (which yield nothing) and emit a final
+    # stats-only sentinel so callers receive complete stats even when every row
+    # was skipped. The empty email marks it.
+    flush_stats()
+    yield "", "", "", stats
+
+
+def _conversion_context(
+    file_bytes: bytes,
+    email_column: str,
+    name_column: Optional[str],
+    attribute_columns: Optional[list[str]],
+    auto_attributes: bool,
+) -> tuple[Optional[dict], Optional[tuple]]:
+    """Validate the mapping and prepare the row generator.
+
+    Returns ``(error, context)``: an ``{"error": ...}`` stats dict when the
+    mapping is unusable (or the file has no columns), otherwise ``None`` and
+    the ``(text, delimiter, headers, email_idx, name_idx, selected, auto)``
+    tuple ``_iter_converted_rows`` needs.
+    """
+    text, delimiter, headers, _ = _prepare_reader(file_bytes)
+    if not headers:
+        return {"error": "No columns found in CSV"}, None
+
+    index_map = _column_index_map(headers)
+    email_idx = _resolve_column(email_column, index_map, headers)
+    if email_idx is None:
+        return {"error": f"Email column '{email_column}' not found"}, None
+
+    name_idx = _resolve_column(name_column, index_map, headers)
+    selected, auto = _attribute_plan(
+        headers, index_map, email_idx, name_idx, attribute_columns, auto_attributes,
+    )
+    return None, (text, delimiter, headers, email_idx, name_idx, selected, auto)
 
 
 def convert_csv(
@@ -178,105 +476,92 @@ def convert_csv(
     email_column: str,
     name_column: Optional[str] = None,
     attribute_columns: Optional[list[str]] = None,
+    auto_attributes: bool = True,
 ) -> dict:
     """
     Convert a CSV file to ListMonk-compatible format.
+
+    Output is always the three ListMonk headers: ``email``, ``name`` and
+    ``attributes`` (a JSON string).
 
     Args:
         file_bytes: Raw CSV file content
         email_column: Name of the column containing email addresses
         name_column: Name of the column containing subscriber names (optional)
-        attribute_columns: List of column names to include as JSON attributes (optional)
+        attribute_columns: Explicit column names to include as JSON attributes
+        auto_attributes: When True, every column that is not the email or name
+            column and was not explicitly listed becomes an attribute too, so
+            an arbitrary CSV is fully preserved without manual mapping. When
+            attribute_columns is given, those entries are always included.
 
     Returns:
         dict with 'csv_content' (converted CSV as string), 'stats' (conversion stats)
     """
+    error, context = _conversion_context(
+        file_bytes, email_column, name_column, attribute_columns, auto_attributes,
+    )
+    if error:
+        return {"csv_content": "", "stats": error}
+
+    text, delimiter, headers, email_idx, name_idx, selected, auto = context
     encoding = detect_encoding(file_bytes)
-    text = file_bytes.decode(encoding)
-    text_io = io.StringIO(text)
 
-    # Detect delimiter
-    sample = text_io.read(4096)
-    text_io.seek(0)
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
-    except csv.Error:
-        dialect = csv.excel
-
-    reader = csv.DictReader(text_io, dialect=dialect)
-    if not reader.fieldnames:
-        return {"csv_content": "", "stats": {"error": "No columns found in CSV"}}
-
-    ragged_rows = _count_ragged_rows(text, dialect, len([f for f in reader.fieldnames if f]))
-    reader.fieldnames = [f.strip() for f in reader.fieldnames if f]
-
-    # Build case-insensitive column mapping
-    col_map = {f.strip().lower(): f for f in reader.fieldnames if f}
-
-    # Validate email column
-    actual_email = col_map.get(email_column.strip().lower())
-    if not actual_email:
-        return {
-            "csv_content": "",
-            "stats": {
-                "error": f"Email column '{email_column}' not found",
-                "available_columns": reader.fieldnames,
-            },
-        }
-
-    # Resolve name column
-    actual_name = None
-    if name_column:
-        actual_name = col_map.get(name_column.strip().lower())
-
-    # Resolve attribute columns
-    actual_attribs = {}
-    if attribute_columns:
-        for attr in attribute_columns:
-            actual = col_map.get(attr.strip().lower())
-            if actual:
-                actual_attribs[attr.strip()] = actual
-
-    # Convert
     output = io.StringIO()
     writer = csv.DictWriter(output, fieldnames=["email", "name", "attributes"])
     writer.writeheader()
 
-    success = 0
-    skipped = 0
-
-    for row in reader:
-        row = {k.strip(): (v.strip() if isinstance(v, str) else ("" if v is None else str(v))) for k, v in row.items() if k}
-
-        email = row.get(actual_email, "").strip()
+    stats: dict = {}
+    for email, name, attributes, row_stats in _iter_converted_rows(
+        text, delimiter, _delimiter_label(delimiter), headers,
+        email_idx, name_idx, selected, auto,
+    ):
+        stats = row_stats
+        # The empty email marks the final stats-only sentinel.
         if not email:
-            skipped += 1
             continue
+        writer.writerow({"email": email, "name": name, "attributes": attributes})
 
-        name = ""
-        if actual_name:
-            name = row.get(actual_name, "").strip()
+    stats["encoding_detected"] = encoding
+    return {"csv_content": output.getvalue(), "stats": stats}
 
-        attribs = {}
-        for attr_key, csv_col in actual_attribs.items():
-            val = row.get(csv_col, "").strip()
-            if val:
-                attribs[attr_key] = val
 
-        writer.writerow({
-            "email": email,
-            "name": name,
-            "attributes": json.dumps(attribs, ensure_ascii=False) if attribs else "{}",
-        })
-        success += 1
+def preview_conversion(
+    file_bytes: bytes,
+    email_column: str,
+    name_column: Optional[str] = None,
+    attribute_columns: Optional[list[str]] = None,
+    auto_attributes: bool = True,
+    limit: int = 10,
+) -> dict:
+    """Convert a CSV and return the first ``limit`` output rows as dicts.
 
-    return {
-        "csv_content": output.getvalue(),
-        "stats": {
-            "converted": success,
-            "skipped": skipped,
-            "total": success + skipped,
-            "encoding_detected": encoding,
-            "ragged_rows": ragged_rows,
-        },
-    }
+    Lets the UI show exactly what ListMonk will receive (email, name and the
+    attributes JSON) without downloading the file. ``stats`` describe the full
+    conversion, not just the previewed slice: enough rows are collected for the
+    preview while the rest of the file is still scanned to keep stats honest.
+    """
+    error, context = _conversion_context(
+        file_bytes, email_column, name_column, attribute_columns, auto_attributes,
+    )
+    if error:
+        return {"rows": [], "stats": error}
+
+    text, delimiter, headers, email_idx, name_idx, selected, auto = context
+    encoding = detect_encoding(file_bytes)
+
+    take = max(0, limit)
+    rows: list[dict] = []
+    stats: dict = {}
+    for email, name, attributes, row_stats in _iter_converted_rows(
+        text, delimiter, _delimiter_label(delimiter), headers,
+        email_idx, name_idx, selected, auto,
+    ):
+        stats = row_stats
+        # The empty email marks the final stats-only sentinel.
+        if not email:
+            continue
+        if len(rows) < take:
+            rows.append({"email": email, "name": name, "attributes": attributes})
+
+    stats["encoding_detected"] = encoding
+    return {"rows": rows, "stats": stats}
