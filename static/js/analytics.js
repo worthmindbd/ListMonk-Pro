@@ -250,26 +250,42 @@ const Analytics = {
 
         const theme = this.getThemeColors();
         const sorted = [...this.campaigns].reverse();
-        const labels = sorted.map(c => c.name?.substring(0, 25) || 'Untitled');
+        const labels = sorted.map(c => App.truncateLabel(c.name, 22));
+
+        // All-zero series draw no bars but still occupy a legend entry, which
+        // read as a phantom series ("Views", "Bounces") on every chart.
+        const hasData = (arr) => arr.some(v => Number(v) > 0);
 
         const datasets = [
             { label: 'Sent', data: sorted.map(c => c.sent || 0), backgroundColor: 'rgba(83, 58, 253, 0.82)', borderRadius: 6 },
-            { label: 'Views', data: sorted.map(c => c.views || 0), backgroundColor: 'rgba(16, 185, 129, 0.82)', borderRadius: 6 },
         ];
+        const views = sorted.map(c => c.views || 0);
+        if (hasData(views)) {
+            datasets.push({ label: 'Views', data: views, backgroundColor: 'rgba(16, 185, 129, 0.82)', borderRadius: 6 });
+        }
 
         // Click tracking is off in cold email mode, so the Clicks series is
         // replaced by per-campaign prospect replies.
         if (!this.isColdMode()) {
-            datasets.push({ label: 'Clicks', data: sorted.map(c => c.clicks || 0), backgroundColor: 'rgba(245, 158, 11, 0.82)', borderRadius: 6 });
+            const clicks = sorted.map(c => c.clicks || 0);
+            if (hasData(clicks)) {
+                datasets.push({ label: 'Clicks', data: clicks, backgroundColor: 'rgba(245, 158, 11, 0.82)', borderRadius: 6 });
+            }
         }
-        datasets.push({ label: 'Bounces', data: sorted.map(c => c.bounces || 0), backgroundColor: 'rgba(234, 34, 97, 0.82)', borderRadius: 6 });
+        const bounces = sorted.map(c => c.bounces || 0);
+        if (hasData(bounces)) {
+            datasets.push({ label: 'Bounces', data: bounces, backgroundColor: 'rgba(234, 34, 97, 0.82)', borderRadius: 6 });
+        }
         if (this.isColdMode()) {
-            datasets.push({
-                label: 'Replies',
-                data: sorted.map(c => this.replyByCampaign?.[String(c.id)] || 0),
-                backgroundColor: 'rgba(20, 184, 166, 0.82)',
-                borderRadius: 6,
-            });
+            const replies = sorted.map(c => this.replyByCampaign?.[String(c.id)] || 0);
+            if (hasData(replies)) {
+                datasets.push({
+                    label: 'Replies',
+                    data: replies,
+                    backgroundColor: 'rgba(20, 184, 166, 0.82)',
+                    borderRadius: 6,
+                });
+            }
         }
 
         if (this.charts.comparison) this.charts.comparison.destroy();
@@ -395,10 +411,24 @@ const Analytics = {
         if (this.charts[key]) this.charts[key].destroy();
 
         if (!data.length) {
+            // Previously a bare { data: [0] } with no scales, so Chart.js
+            // auto-scaled the axis to -1..1 and the empty chart displayed
+            // negative tick labels (-0.6, -0.8, -1.0).
             this.charts[key] = new Chart(ctx, {
                 type: 'line',
                 data: { labels: ['No data'], datasets: [{ label: key, data: [0] }] },
-                options: { responsive: true, maintainAspectRatio: false },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: {
+                            ticks: { color: theme.textColor, font: { family: 'Plus Jakarta Sans', size: 11 } },
+                            grid: { display: false },
+                        },
+                        y: { display: false, beginAtZero: true, max: 1 },
+                    },
+                },
             });
             return;
         }
@@ -472,10 +502,24 @@ const Analytics = {
         if (this.charts.links) this.charts.links.destroy();
 
         if (!data.length) {
+            // Same negative-axis issue as renderTimeChart: with no scales the
+            // empty bar chart scaled to 0..1 and drew meaningless gridlines.
             this.charts.links = new Chart(ctx, {
                 type: 'bar',
                 data: { labels: ['No data'], datasets: [{ label: 'Clicks', data: [0] }] },
-                options: { responsive: true, maintainAspectRatio: false },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    indexAxis: 'y',
+                    scales: {
+                        x: { display: false, beginAtZero: true, max: 1 },
+                        y: {
+                            ticks: { color: theme.textColor, font: { family: 'Plus Jakarta Sans', size: 11 } },
+                            grid: { display: false },
+                        },
+                    },
+                },
             });
             return;
         }
@@ -485,9 +529,9 @@ const Analytics = {
         const labels = top.map(d => {
             try {
                 const url = new URL(d.url);
-                return url.pathname.substring(0, 30) || url.hostname;
+                return App.truncateLabel(url.pathname || url.hostname, 30);
             } catch {
-                return d.url?.substring(0, 30) || '?';
+                return App.truncateLabel(d.url || '?', 30);
             }
         });
         const values = top.map(d => d.count || 0);

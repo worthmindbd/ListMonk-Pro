@@ -108,7 +108,7 @@ const Unsubscribes = {
 
         let html = `
             <!-- IMAP Status -->
-            <div class="card" style="margin-bottom:20px">
+            <div class="card unsub-monitor-card" style="margin-bottom:20px">
                 <div class="card-header">
                     <h3 class="card-title">IMAP Unsubscribe Monitor</h3>
                     <div class="page-actions">

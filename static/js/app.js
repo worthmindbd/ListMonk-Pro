@@ -22,13 +22,41 @@ const App = {
 
     init() {
         window.addEventListener('hashchange', () => this.route());
+
+        // The mobile sidebar's nav list scrolls; without a hint the clipped
+        // last entry reads as a rendering bug instead of "scroll for more".
+        // Only the off-canvas drawer needs it - on desktop the full nav is
+        // always visible and masking it would just cut the last entry.
+        const navMenu = document.querySelector('.nav-menu');
+        const navMq = window.matchMedia('(max-width: 768px)');
+        const syncNavHint = () => {
+            if (!navMenu) return;
+            const scrollable = navMq.matches && navMenu.scrollHeight > navMenu.clientHeight + 1;
+            navMenu.classList.toggle('is-scrollable', scrollable);
+            navMenu.classList.toggle(
+                'at-end',
+                !scrollable || navMenu.scrollTop + navMenu.clientHeight >= navMenu.scrollHeight - 2
+            );
+        };
+        if (navMenu) {
+            navMenu.addEventListener('scroll', syncNavHint, { passive: true });
+            window.addEventListener('resize', syncNavHint);
+            navMq.addEventListener?.('change', syncNavHint);
+        }
+
         document.getElementById('menuToggle').addEventListener('click', () => {
-            document.getElementById('sidebar').classList.toggle('open');
+            const sidebar = document.getElementById('sidebar');
+            sidebar.classList.toggle('open');
+            // Drives the scrim behind the open drawer (see .nav-open in CSS).
+            document.body.classList.toggle('nav-open', sidebar.classList.contains('open'));
+            syncNavHint();
         });
+        syncNavHint();
 
         // Close sidebar on content click (mobile)
         document.querySelector('.content-area').addEventListener('click', () => {
             document.getElementById('sidebar').classList.remove('open');
+            document.body.classList.remove('nav-open');
         });
 
         // Modal handlers
@@ -471,7 +499,18 @@ const App = {
     formatDate(dateStr) {
         if (!dateStr) return '-';
         const d = new Date(dateStr);
-        return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+        // Wrapped in .cell-date: without it "Oct 1, 2026" broke across two
+        // lines in the narrow Date/Created table columns, doubling row height.
+        return `<span class="cell-date">${d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}</span>`;
+    },
+
+    /** Shorten a chart axis label without cutting mid-word: the old
+        `substring(0, 20)` turned "1st Campaign (Remaining Leads)" into
+        "1st Campaign (Remain" with no ellipsis. */
+    truncateLabel(text, max = 22) {
+        const s = String(text ?? '').trim();
+        if (!s) return 'Untitled';
+        return s.length > max ? s.slice(0, max - 1).trimEnd() + '…' : s;
     },
 
     formatDateTime(dateStr) {
@@ -785,31 +824,36 @@ const Bounces = {
                         <button class="btn btn-danger" onclick="Bounces.deleteAll()">${deleteActionLabel}</button>
                     </div>
                 </div>
-                ${App.selection.bar('bounces')}
-                <div class="table-wrapper"><table>
+                ${App.selection.bar('bounces')}`;
+
+            // The empty state renders outside the table on purpose: the table
+            // keeps a 600px min-width on phones, which pushed the centred
+            // message off-screen behind the pinned action column.
+            if (!pageBounces.length) {
+                html += `<div class="card"><div class="empty-state"><h3>No ${this._typeLabel()} found</h3></div></div>`;
+            } else {
+                html += `<div class="table-wrapper"><table>
                     <thead><tr>
                         <th class="col-select">${App.selection.headbox('bounces', 'Select all bounces on this page')}</th>
                         <th>ID</th><th>Email</th><th>Campaign</th><th>Source</th><th>Type</th><th>Date</th><th class="cell-actions">Actions</th>
                     </tr></thead><tbody>`;
+                pageBounces.forEach(b => {
+                    const campName = App.escapeHtml(b.campaign?.name || '-');
+                    html += `<tr class="${App.selection.has('bounces', b.id) ? 'row-selected' : ''}">
+                        <td class="col-select">${App.selection.rowbox('bounces', b.id, `Select ${b.email}`)}</td>
+                        <td>${b.id}</td>
+                        <td><strong>${App.escapeHtml(b.email || '-')}</strong></td>
+                        <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis">${campName}</td>
+                        <td>${b.source || '-'}</td>
+                        <td><span class="badge badge-${b.type === 'hard' ? 'danger' : 'warning'}">${b.type || 'unknown'}</span></td>
+                        <td>${App.formatDate(b.created_at)}</td>
+                        <td class="cell-actions"><button class="btn btn-sm btn-danger" onclick="Bounces.remove(${b.id})">Delete</button></td>
+                    </tr>`;
+                });
 
-            if (!pageBounces.length) {
-                html += `<tr><td colspan="8"><div class="empty-state"><h3>No ${this._typeLabel()} found</h3></div></td></tr>`;
+                html += '</tbody></table></div>';
             }
-            pageBounces.forEach(b => {
-                const campName = App.escapeHtml(b.campaign?.name || '-');
-                html += `<tr class="${App.selection.has('bounces', b.id) ? 'row-selected' : ''}">
-                    <td class="col-select">${App.selection.rowbox('bounces', b.id, `Select ${b.email}`)}</td>
-                    <td>${b.id}</td>
-                    <td><strong>${App.escapeHtml(b.email || '-')}</strong></td>
-                    <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis">${campName}</td>
-                    <td>${b.source || '-'}</td>
-                    <td><span class="badge badge-${b.type === 'hard' ? 'danger' : 'warning'}">${b.type || 'unknown'}</span></td>
-                    <td>${App.formatDate(b.created_at)}</td>
-                    <td class="cell-actions"><button class="btn btn-sm btn-danger" onclick="Bounces.remove(${b.id})">Delete</button></td>
-                </tr>`;
-            });
 
-            html += '</tbody></table></div>';
             html += App.renderPagination(this.page, total, this.perPage, 'Bounces.goToPage');
             App.setContent(html);
         } catch (err) {

@@ -67,7 +67,7 @@ const Campaigns = {
             }
 
             campaigns.forEach(c => {
-                const listNames = (c.lists || []).map(l => `<span class="tag">${App.escapeHtml(l.name)}</span>`).join('') || '-';
+                const listNames = (c.lists || []).map(l => `<span class="tag" title="${App.escapeHtml(l.name)}">${App.escapeHtml(l.name)}</span>`).join('') || '-';
                 // "Sent" must be the real dispatched count. ListMonk exposes
                 // `sent` (delivered to the SMTP server) and `to_send` (audience
                 // size); showing `to_send` here reported the whole list as sent.
@@ -77,8 +77,8 @@ const Campaigns = {
                 html += `<tr class="${App.selection.has('campaigns', c.id) ? 'row-selected' : ''}">
                     <td class="col-select">${App.selection.rowbox('campaigns', c.id, `Select ${c.name}`)}</td>
                     <td>${c.id}</td>
-                    <td><strong>${App.escapeHtml(c.name)}</strong></td>
-                    <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis"${Campaigns._subjectTooltip(c.subject)}>${App.escapeHtml(c.subject) || '-'}${Campaigns._subjectBadge(c.subject)}</td>
+                    <td><strong class="cell-clamp cell-clamp-lg" title="${App.escapeHtml(c.name)}">${App.escapeHtml(c.name)}</strong></td>
+                    <td${Campaigns._subjectTooltip(c.subject)}><span class="cell-clamp">${App.escapeHtml(c.subject) || '-'}</span>${Campaigns._subjectBadge(c.subject)}</td>
                     <td>${App.statusBadge(c.status)}</td>
                     <td>${listNames}</td>
                     <td title="${audience ? `Audience: ${App.formatNumber(audience)}` : ''}">${App.formatNumber(sent)}</td>

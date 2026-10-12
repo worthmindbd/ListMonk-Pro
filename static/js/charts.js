@@ -94,7 +94,7 @@ const Dashboard = {
                             <div class="stat-value">${App.formatNumber(totalSubscribers)}</div>
                             <div style="font-size:0.82rem;color:var(--text-muted)">Across ${totalLists} lead lists</div>
                         </div>
-                        <div class="stat-card">
+                        <div class="stat-card info">
                             <div class="stat-label">Outbound Dispatched</div>
                             <div class="stat-value">${App.formatNumber(totalSent)}</div>
                             <div style="font-size:0.82rem;color:var(--text-muted)">${totalCampaigns} total campaigns</div>
@@ -219,7 +219,7 @@ const Dashboard = {
                             <div class="stat-label">Total Campaigns</div>
                             <div class="stat-value">${App.formatNumber(totalCampaigns)}</div>
                         </div>
-                        <div class="stat-card">
+                        <div class="stat-card info">
                             <div class="stat-label">Active Campaigns</div>
                             <div class="stat-value">${App.formatNumber(activeCampaigns ?? campaigns.filter(c => c.status === 'running').length)}</div>
                         </div>
@@ -288,17 +288,24 @@ const Dashboard = {
 
         const theme = this.getThemeColors();
         const recent = (campaigns || this.campaignsData).slice(0, 8).reverse();
-        const labels = recent.map(c => c.name?.substring(0, 20) || 'Untitled');
+        const labels = recent.map(c => App.truncateLabel(c.name, 22));
         const sent = recent.map(c => c.sent || 0);
         const views = recent.map(c => c.views || 0);
         const clicks = recent.map(c => c.clicks || 0);
 
+        // A series whose values are all zero draws no bars but still claims a legend
+        // entry: in cold-email mode (no tracking pixels) "Views" was permanently
+        // empty and just added noise to the legend.
+        const hasData = (arr) => arr.some(v => Number(v) > 0);
+
         const datasets = [
             { label: 'Sent', data: sent, backgroundColor: 'rgba(83, 58, 253, 0.82)', borderRadius: 6 },
-            { label: 'Views', data: views, backgroundColor: 'rgba(16, 185, 129, 0.82)', borderRadius: 6 },
         ];
+        if (hasData(views)) {
+            datasets.push({ label: 'Views', data: views, backgroundColor: 'rgba(16, 185, 129, 0.82)', borderRadius: 6 });
+        }
         // Cold email mode disables tracking, so clicks are not charted there.
-        if (App.currentMode !== 'cold_email') {
+        if (App.currentMode !== 'cold_email' && hasData(clicks)) {
             datasets.push({ label: 'Clicks', data: clicks, backgroundColor: 'rgba(245, 158, 11, 0.82)', borderRadius: 6 });
         }
 
@@ -384,7 +391,10 @@ const Dashboard = {
                 datasets: [{
                     data,
                     backgroundColor: bgColors,
-                    borderWidth: 2,
+                    // A single 100% slice still drew its 2px separator, which
+                    // showed up as a hairline seam splitting the ring. Only
+                    // slices with a value should count as separators.
+                    borderWidth: data.filter(v => Number(v) > 0).length > 1 ? 2 : 0,
                     borderColor: theme.isDark ? '#0f172a' : '#ffffff',
                     hoverOffset: 6,
                 }],
@@ -449,7 +459,8 @@ const Dashboard = {
                 datasets: [{
                     data: total === 0 ? [1] : data,
                     backgroundColor: total === 0 ? ['#334155'] : bgColors,
-                    borderWidth: 2,
+                    // No separator when the ring is a single slice (see above).
+                    borderWidth: (total === 0 ? [1] : data).filter(v => Number(v) > 0).length > 1 ? 2 : 0,
                     borderColor: theme.isDark ? '#0f172a' : '#ffffff',
                     hoverOffset: 6,
                 }],

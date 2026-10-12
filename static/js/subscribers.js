@@ -87,7 +87,7 @@ const Subscribers = {
             }
 
             subscribers.forEach(s => {
-                const lists = (s.lists || []).map(l => `<span class="tag">${App.escapeHtml(l.name)}</span>`).join('') || '-';
+                const lists = (s.lists || []).map(l => `<span class="tag" title="${App.escapeHtml(l.name)}">${App.escapeHtml(l.name)}</span>`).join('') || '-';
                 const isBlocked = s.status === 'blocklisted';
                 html += `<tr class="${App.selection.has('subscribers', s.id) ? 'row-selected' : ''}">
                     <td class="col-select">${App.selection.rowbox('subscribers', s.id, `Select ${s.email}`)}</td>
@@ -201,7 +201,7 @@ const Subscribers = {
 
             const bounceData = bounceRes.status === 'fulfilled' ? (bounceRes.value?.data || {}) : {};
             const bounces = bounceData.results || [];
-            const lists = (s.lists || []).map(l => `<span class="tag">${App.escapeHtml(l.name)}</span>`).join('') || '-';
+            const lists = (s.lists || []).map(l => `<span class="tag" title="${App.escapeHtml(l.name)}">${App.escapeHtml(l.name)}</span>`).join('') || '-';
             const attribs = s.attribs && Object.keys(s.attribs).length
                 ? `<pre style="background:var(--bg-input);padding:12px;border-radius:8px;overflow:auto;max-height:240px;font-size:0.8rem">${App.escapeHtml(JSON.stringify(s.attribs, null, 2))}</pre>`
                 : '<p style="color:var(--text-muted)">No custom attributes</p>';
