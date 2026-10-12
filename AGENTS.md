@@ -142,6 +142,10 @@ ListMonk-Pro/
     Message-IDs, with a `From|Date|Subject` fingerprint fallback). Only the Message-ID
     header is fetched to test that set, so already-handled DSNs cost no body download.
     A failed `create_bounce` is deliberately **not** recorded, so the next scan retries.
+  - A DSN that cannot be attributed is discarded **only when the campaign history was
+    actually available**. If `_fetch_campaigns_covering` failed or was truncated, those
+    DSNs stay unprocessed for the next scan — otherwise a transient ListMonk hiccup at
+    container start would silently lose every bounce in the window forever.
   - Classifies into **hard** vs **soft** bounces using RFC 3463 enhanced status codes (e.g. `5.1.1`, `5.1.2`, `5.2.1`) and failure patterns.
   - Skips `Action: delayed` notices entirely — the message is still in flight and a real
     failure arrives as its own DSN.

@@ -421,10 +421,12 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
         # Campaign history covering the whole DSN scan window, fetched once for
         # the fallback attribution.
         scan_since = datetime.now(timezone.utc) - timedelta(days=BOUNCE_SCAN_DAYS)
+        campaigns_ok = True
         try:
             recent_campaigns, campaigns_complete = await _fetch_campaigns_covering(
                 client, scan_since,
             )
+            campaigns_ok = campaigns_complete
             if not campaigns_complete:
                 logger.warning(
                     "[BounceIngest] Campaign history truncated after %d pages; "
@@ -434,6 +436,7 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
         except Exception as e:
             logger.warning(f"Could not fetch recent campaigns: {e}")
             recent_campaigns = []
+            campaigns_ok = False
 
         try:
             await asyncio.to_thread(conn.select, "INBOX", readonly=False)
@@ -552,7 +555,17 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
                     if not campaign:
                         skipped += 1
                         skipped_reasons["no_campaign"] = skipped_reasons.get("no_campaign", 0) + 1
-                        await _finish(msg_id, state_id)
+                        if campaigns_ok:
+                            await _finish(msg_id, state_id)
+                        else:
+                            # Attribution needs the campaign list: without it we
+                            # cannot tell "old campaign" from "fetch failed", and
+                            # discarding the DSN would lose a real bounce for good.
+                            # Leave it unprocessed so the next scan retries it.
+                            logger.warning(
+                                "[BounceIngest] campaign history unavailable, "
+                                "will retry %s on the next scan", recipient,
+                            )
                         continue
 
                     if await subscriber_opened_campaign(

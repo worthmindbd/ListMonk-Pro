@@ -286,3 +286,48 @@ async def test_create_bounce_failure_is_retried_next_scan(monkeypatch, issuer_st
     assert result["ingested"] == 0
     # Not recorded as processed, so the next scan tries again.
     assert bi.load_processed_ids() == []
+
+
+# ── Unattributable DSNs: discard only when attribution was actually possible ──
+
+class _NoCampaignClient(_FakeClient):
+    """Campaign history unavailable (e.g. ListMonk unreachable at boot)."""
+
+    def __init__(self, subscriber):
+        super().__init__(subscriber, [])
+
+    async def get_campaigns(self, page=1, per_page=100, order_by="created_at", order="DESC"):
+        raise RuntimeError("ListMonk API unavailable")
+
+
+@pytest.mark.asyncio
+async def test_unattributable_dsn_is_retried_when_history_unavailable(monkeypatch, issuer_state):
+    """A transient campaign-fetch failure must not discard the bounce forever."""
+    msg = _dsn("<nohist@mail>", "bounced@example.com")
+    fake_imap = _FakeIMAP({b"1": msg})
+    client = _wire(monkeypatch, fake_imap, _NoCampaignClient(_subscriber()))
+
+    result = await bi.ingest_bounce_mailbox(client)
+
+    assert result["skipped_reasons"].get("no_campaign") == 1
+    assert client.created == []
+    # Left unprocessed so a later scan (with campaign history) can attribute it.
+    assert bi.load_processed_ids() == []
+    assert fake_imap.seen_flags == {}
+
+
+@pytest.mark.asyncio
+async def test_unattributable_dsn_is_discarded_when_history_is_complete(monkeypatch, issuer_state):
+    """With a complete campaign list, 'no campaign' is a real answer -> handle once."""
+    msg = _dsn("<old@mail>", "bounced@example.com")
+    fake_imap = _FakeIMAP({b"1": msg})
+    # Subscriber belongs to a list no campaign ever targeted.
+    subscriber = {"id": 501, "email": "bounced@example.com", "lists": [{"id": 99}]}
+    client = _wire(monkeypatch, fake_imap, _FakeClient(subscriber, _campaign_list()))
+
+    first = await bi.ingest_bounce_mailbox(client)
+    second = await bi.ingest_bounce_mailbox(client)
+
+    assert first["skipped_reasons"].get("no_campaign") == 1
+    assert bi.load_processed_ids() == ["<old@mail>"]
+    assert second["scanned"] == 0
