@@ -52,6 +52,19 @@ const Replies = {
         const replies = this.repliesData?.results || [];
         const total = this.repliesData?.total || 0;
 
+        App.selection.register('replies', {
+            noun: 'reply',
+            pageValues: this.pageIds(),
+            actions: [
+                { label: 'Mark Hot Lead', onclick: 'Replies.bulkStatus(\'lead\')' },
+                { label: 'Mark Replied', onclick: 'Replies.bulkStatus(\'replied\')' },
+                { label: 'Archive', onclick: 'Replies.bulkStatus(\'archived\')' },
+                { label: 'Mark Unread', onclick: 'Replies.bulkStatus(\'unread\')' },
+                { label: 'Blocklist', onclick: 'Replies.bulkBlocklist()' },
+                { label: 'Delete', onclick: 'Replies.bulkDelete()', danger: true },
+            ],
+        });
+
         let html = `
             <!-- Cold Email Reply KPI Cards -->
             <div class="stats-grid replies-stats-grid">
@@ -91,6 +104,11 @@ const Replies = {
                     </div>
 
                     <div class="replies-filters">
+                        <label class="reply-card-select" title="Select every reply on this page">
+                            ${App.selection.headbox('replies', 'Select all replies on this page')}
+                            <span>Select page</span>
+                        </label>
+
                         <select class="form-control filter-select" id="sentimentFilter" onchange="Replies.filterSentiment(this.value)">
                             <option value="" ${!this.sentiment ? 'selected' : ''}>All Sentiments</option>
                             <option value="positive" ${this.sentiment === 'positive' ? 'selected' : ''}>Positive / Interested</option>
@@ -114,6 +132,9 @@ const Replies = {
                     </div>
                 </div>
             </div>
+
+            <!-- Selection bar (appears only with a selection) -->
+            ${App.selection.bar('replies')}
 
             <!-- Prospect Replies Feed -->
             <div class="replies-feed" id="repliesFeed" style="margin-top:20px;">
@@ -160,9 +181,15 @@ const Replies = {
         const initial = (r.from_name || r.from_email || '?').charAt(0).toUpperCase();
 
         return `
-            <div class="card reply-card ${r.status === 'lead' ? 'lead-highlight' : ''}" id="card_${r.id}">
+            <div class="card reply-card ${r.status === 'lead' ? 'lead-highlight' : ''} ${App.selection.has('replies', r.id) ? 'selected' : ''}" id="card_${r.id}">
                 <div class="reply-header">
                     <div class="reply-sender-info">
+                        <label class="reply-card-select" title="Select this reply">
+                            <input type="checkbox" class="row-select" data-key="replies" data-value="${App.escapeHtml(String(r.id))}"
+                                aria-label="Select reply from ${App.escapeHtml(r.from_email || 'sender')}"
+                                ${App.selection.has('replies', r.id) ? 'checked' : ''}
+                                onchange="Replies.toggleSelect(${App.escapeHtml(JSON.stringify(String(r.id)))}, this)"/>
+                        </label>
                         <div class="reply-avatar">${initial}</div>
                         <div>
                             <div class="reply-sender-name">
@@ -218,9 +245,90 @@ const Replies = {
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
                         Blocklist / Unsubscribe
                     </button>
+                    <button class="btn btn-sm btn-danger" onclick="Replies.remove('${r.id}')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                        Delete
+                    </button>
                 </div>
             </div>
         `;
+    },
+
+    /** IDs (as strings) of the reply cards currently on screen. */
+    pageIds() {
+        return (this.repliesData?.results || []).map(r => String(r.id));
+    },
+
+    _selectedIds() {
+        return App.selection.values('replies');
+    },
+
+    /** Card checkbox handler: keeps the card highlight in sync. */
+    toggleSelect(id, checkbox) {
+        App.selection.rowToggle('replies', id, checkbox);
+        document.getElementById(`card_${id}`)?.classList.toggle('selected', checkbox.checked);
+    },
+
+    // ── Bulk actions ─────────────────────────────────────
+    async bulkStatus(newStatus) {
+        const ids = this._selectedIds();
+        if (!ids.length) return;
+        try {
+            const result = await API.put('/api/replies/status', { ids, status: newStatus });
+            App.toast(`${result?.updated ?? ids.length} reply(ies) marked ${newStatus}`, 'success');
+            App.selection.clear('replies');
+            await Promise.all([this.loadStats(), this.loadReplies()]);
+            this.renderPage();
+        } catch {
+            // API.request already surfaced the server message.
+        }
+    },
+
+    async bulkBlocklist() {
+        const ids = this._selectedIds();
+        if (!ids.length) return;
+        if (!await App.confirm('Blocklist Senders',
+                `Blocklist the senders of ${ids.length} selected repl(y/ies)? They will never receive further outreach.`)) return;
+        try {
+            const result = await API.post('/api/replies/blocklist', { ids });
+            const errors = result?.errors || 0;
+            App.toast(`Blocklisted ${result?.blocklisted ?? ids.length} sender(s)${errors ? `, ${errors} failed` : ''}`,
+                errors ? 'info' : 'success');
+            App.selection.clear('replies');
+            this.render();
+        } catch {
+            // API.request already surfaced the server message.
+        }
+    },
+
+    async bulkDelete() {
+        const ids = this._selectedIds();
+        if (!ids.length) return;
+        if (!await App.confirm('Delete Replies',
+                `Delete ${ids.length} selected reply record(s) from the log?`)) return;
+        try {
+            const params = ids.map(id => `ids=${encodeURIComponent(id)}`).join('&');
+            await API.del(`/api/replies?${params}`);
+            App.toast(`${ids.length} reply(ies) deleted`, 'success');
+            App.selection.clear('replies');
+            await Promise.all([this.loadStats(), this.loadReplies()]);
+            this.renderPage();
+        } catch {
+            // API.request already surfaced the server message.
+        }
+    },
+
+    async remove(id) {
+        if (!await App.confirm('Delete Reply', 'Delete this reply record from the log?')) return;
+        try {
+            await API.del(`/api/replies/${encodeURIComponent(id)}`);
+            App.toast('Reply deleted', 'success');
+            App.selection.clear('replies');
+            await Promise.all([this.loadStats(), this.loadReplies()]);
+            this.renderPage();
+        } catch {
+            // API.request already surfaced the server message.
+        }
     },
 
     async scanInbox() {

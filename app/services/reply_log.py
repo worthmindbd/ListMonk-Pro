@@ -82,6 +82,40 @@ def update_reply_status(reply_id: str, new_status: str) -> bool:
     return updated
 
 
+def update_reply_statuses(reply_ids, new_status: str) -> int:
+    """Set the same status on several records with a single write.
+
+    Returns how many records actually changed, so a bulk action over a stale
+    selection reports what really happened.
+    """
+    wanted = {str(r) for r in reply_ids if r}
+    if not wanted:
+        return 0
+    records = load_log()
+    updated = 0
+    for r in records:
+        if str(r.get("id")) in wanted:
+            if r.get("status") != new_status:
+                r["status"] = new_status
+                updated += 1
+    if updated:
+        save_log(records)
+    return updated
+
+
+def delete_replies(reply_ids) -> int:
+    """Remove several records with a single write; returns how many went."""
+    wanted = {str(r) for r in reply_ids if r}
+    if not wanted:
+        return 0
+    records = load_log()
+    remaining = [r for r in records if str(r.get("id")) not in wanted]
+    removed = len(records) - len(remaining)
+    if removed:
+        save_log(remaining)
+    return removed
+
+
 def load_processed_message_ids() -> set[str]:
     """Return set of message IDs already handled by the reply scanner."""
     try:

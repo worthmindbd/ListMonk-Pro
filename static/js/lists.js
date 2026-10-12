@@ -4,14 +4,26 @@
 const Lists = {
     page: 1,
     query: '',
+    perPage: 50,
+    _rows: [],
 
     async render() {
         try {
-            const params = `page=${this.page}&per_page=50${this.query ? '&query=' + encodeURIComponent(this.query) : ''}`;
+            const params = `page=${this.page}&per_page=${this.perPage}${this.query ? '&query=' + encodeURIComponent(this.query) : ''}`;
             const result = await API.get(`/api/lists?${params}`);
             const data = result?.data || {};
             const lists = data.results || [];
             const total = data.total || 0;
+            this._rows = lists;
+
+            App.selection.register('lists', {
+                noun: 'list',
+                pageValues: this.pageIds(),
+                actions: [
+                    { label: 'Export Subscribers', onclick: 'Lists.bulkExport()' },
+                    { label: 'Delete', onclick: 'Lists.bulkDelete()', danger: true },
+                ],
+            });
 
             let html = `
                 <div class="search-bar">
@@ -26,18 +38,21 @@ const Lists = {
                         <button class="btn btn-primary" onclick="Lists.showCreate()">+ New List</button>
                     </div>
                 </div>
+                ${App.selection.bar('lists')}
                 <div class="table-wrapper"><table>
                     <thead><tr>
+                        <th class="col-select">${App.selection.headbox('lists', 'Select all lists on this page')}</th>
                         <th>ID</th><th>Name</th><th>Type</th><th>Optin</th><th>Subscribers</th><th>Status</th><th>Created</th><th class="cell-actions">Actions</th>
                     </tr></thead><tbody>`;
 
             if (!lists.length) {
-                html += '<tr><td colspan="8"><div class="empty-state"><h3>No lists found</h3></div></td></tr>';
+                html += '<tr><td colspan="9"><div class="empty-state"><h3>No lists found</h3></div></td></tr>';
             }
 
             lists.forEach(l => {
                 const tags = (l.tags || []).map(t => `<span class="tag">${App.escapeHtml(t)}</span>`).join('') || '';
-                html += `<tr>
+                html += `<tr class="${App.selection.has('lists', l.id) ? 'row-selected' : ''}">
+                    <td class="col-select">${App.selection.rowbox('lists', l.id, `Select ${l.name}`)}</td>
                     <td>${l.id}</td>
                     <td><strong>${App.escapeHtml(l.name)}</strong> ${tags}</td>
                     <td><span class="badge badge-${l.type === 'public' ? 'info' : 'default'}">${l.type}</span></td>
@@ -47,6 +62,8 @@ const Lists = {
                     <td>${App.formatDate(l.created_at)}</td>
                     <td class="cell-actions">
                         <div class="action-btns">
+                            <button class="btn btn-sm" onclick="Lists.viewSubscribers(${l.id})">View Subscribers</button>
+                            <button class="btn btn-sm" onclick="Lists.exportSubscribers(${l.id})">Export</button>
                             <button class="btn btn-sm" onclick="Lists.showEdit(${l.id})">Edit</button>
                             <button class="btn btn-sm btn-danger" onclick="Lists.remove(${l.id})">Delete</button>
                         </div>
@@ -55,11 +72,20 @@ const Lists = {
             });
 
             html += '</tbody></table></div>';
-            html += App.renderPagination(this.page, total, 50, 'Lists.goToPage');
+            html += App.renderPagination(this.page, total, this.perPage, 'Lists.goToPage');
             App.setContent(html);
         } catch {
             App.setContent('<div class="empty-state"><h3>Failed to load lists</h3></div>');
         }
+    },
+
+    /** IDs (as strings) of the rows currently on screen. */
+    pageIds() {
+        return this._rows.map(l => String(l.id));
+    },
+
+    _selectedIds() {
+        return App.selection.values('lists').map(Number).filter(Boolean);
     },
 
     search() {
@@ -69,6 +95,26 @@ const Lists = {
     },
 
     goToPage(p) { this.page = p; this.render(); },
+
+    /** Jump to the subscriber table pre-filtered to this list. */
+    viewSubscribers(id) {
+        Subscribers.listFilter = id;
+        Subscribers.statusFilter = '';
+        Subscribers.query = '';
+        Subscribers.page = 1;
+        App.selection.clear('subscribers');
+        window.location.hash = '#/subscribers';
+    },
+
+    async exportSubscribers(id) {
+        try {
+            const result = await API.get(`/api/subscribers/export-all?list_id=${id}`);
+            API.downloadBlob(result.blob, `list_${id}_subscribers.csv`);
+            App.toast('List subscribers exported', 'success');
+        } catch {
+            // API.request already surfaced the server message (404 when empty).
+        }
+    },
 
     showCreate() {
         App.setContent(`
@@ -178,10 +224,51 @@ const Lists = {
             try {
                 await API.del(`/api/lists/${id}`);
                 App.toast('List deleted', 'success');
+                App.selection.clear('lists');
                 this.render();
             } catch {
                 // API.request already surfaced the server message.
             }
         }
+    },
+
+    // ── Bulk actions ─────────────────────────────────────
+    async bulkDelete() {
+        const ids = this._selectedIds();
+        if (!ids.length) return;
+        if (!await App.confirm('Delete Lists',
+                `Permanently delete ${ids.length} selected list(s)? Subscriber associations to those lists are removed too.`)) return;
+        try {
+            const params = ids.map(id => `ids=${id}`).join('&');
+            const result = await API.del(`/api/lists?${params}`);
+            const errors = result?.errors || 0;
+            App.toast(`Deleted ${result?.deleted ?? ids.length} list(s)${errors ? `, ${errors} failed` : ''}`,
+                errors ? 'info' : 'success');
+            App.selection.clear('lists');
+            this.render();
+        } catch {
+            // API.request already surfaced the server message.
+        }
+    },
+
+    /** Export the subscribers of every selected list, one CSV per list. */
+    async bulkExport() {
+        // Skip empty lists: /export-all answers 404 for them, which would
+        // toast once per list for no reason.
+        const ids = this._selectedIds().filter(id => {
+            const row = this._rows.find(l => l.id === id);
+            return row && (row.subscriber_count || 0) > 0;
+        });
+        if (!ids.length) { App.toast('Selected list(s) have no subscribers', 'error'); return; }
+
+        for (const id of ids) {
+            try {
+                const result = await API.get(`/api/subscribers/export-all?list_id=${id}`);
+                API.downloadBlob(result.blob, `list_${id}_subscribers.csv`);
+            } catch {
+                // API.request already surfaced the server message.
+            }
+        }
+        App.toast(`Exported ${ids.length} list(s)`, 'success');
     },
 };

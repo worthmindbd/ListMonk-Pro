@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from typing import Optional
 from app.services.listmonk_client import listmonk
+from app.services.bulk_ops import parse_ids, run_bulk
 from app.services.export_service import dict_list_to_csv, aiter_dicts_to_csv
 from app.services.bounce_filters import campaign_views_query
 from app.services.bounce_list import fetch_filtered_bounces_page, iter_filtered_bounces
@@ -283,6 +284,36 @@ async def preview_campaign(campaign_id: int):
 @router.post("")
 async def create_campaign(data: dict):
     return await listmonk.create_campaign(data)
+
+
+# NOTE: the static /archive route must be registered before the parameterized
+# /{campaign_id} routes below, otherwise Starlette int-parses "archive" (422).
+@router.put("/archive")
+async def archive_campaigns(data: dict):
+    """Archive several campaigns in one request.
+
+    ListMonk only archives one campaign per call, so the loop runs here with
+    the shared bounded-concurrency helper.
+    """
+    try:
+        ids = parse_ids(data.get("ids"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not ids:
+        raise HTTPException(status_code=400, detail="No campaign ids provided")
+
+    result = await run_bulk(ids, listmonk.archive_campaign)
+    return {
+        "archived": result["ok"],
+        "errors": result["errors"],
+        "failed": result["failed"],
+    }
+
+
+@router.delete("")
+async def delete_campaigns(ids: list[int] = Query(...)):
+    """Delete several campaigns in one request."""
+    return await listmonk.delete_campaigns(ids)
 
 
 @router.post("/{campaign_id}/test")

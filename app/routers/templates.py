@@ -1,5 +1,6 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from app.services.listmonk_client import listmonk
+from app.services.bulk_ops import run_bulk
 
 router = APIRouter()
 
@@ -27,6 +28,21 @@ async def update_template(template_id: int, data: dict):
 @router.put("/{template_id}/default")
 async def set_default_template(template_id: int):
     return await listmonk.set_default_template(template_id)
+
+
+@router.delete("")
+async def delete_templates(ids: list[int] = Query(...)):
+    """Delete several templates in one request.
+
+    ListMonk deletes one template per call; the bounded loop keeps a page-wide
+    selection from opening every request at once.
+    """
+    result = await run_bulk(ids, listmonk.delete_template)
+    return {
+        "deleted": result["ok"],
+        "errors": result["errors"],
+        "failed": result["failed"],
+    }
 
 
 @router.delete("/{template_id}")

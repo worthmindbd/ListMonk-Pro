@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Query
 from app.services.listmonk_client import listmonk
+from app.services.bulk_ops import run_bulk
 
 router = APIRouter()
 
@@ -31,6 +32,21 @@ async def create_list(data: dict):
 @router.put("/{list_id}")
 async def update_list(list_id: int, data: dict):
     return await listmonk.update_list(list_id, data)
+
+
+@router.delete("")
+async def delete_lists(ids: list[int] = Query(...)):
+    """Delete several lists in one request.
+
+    ListMonk deletes one list per call, so the loop happens here — bounded so
+    selecting a page of lists cannot open one upstream request per row at once.
+    """
+    result = await run_bulk(ids, listmonk.delete_list)
+    return {
+        "deleted": result["ok"],
+        "errors": result["errors"],
+        "failed": result["failed"],
+    }
 
 
 @router.delete("/{list_id}")

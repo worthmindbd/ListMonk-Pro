@@ -79,6 +79,7 @@ const Unsubscribes = {
     renderListView() {
         this.activeCampaign = null;
         this.selectedEmails.clear();
+        App.selection.clear('unsub_campaigns');
 
         const stats = this.stats;
         const imap = this.imapStatus;
@@ -93,6 +94,17 @@ const Unsubscribes = {
         } else {
             imapBadge = `<span class="badge badge-danger" style="font-size:0.85rem;padding:6px 14px">IMAP Error: ${App.escapeHtml(imap.error || 'Unknown')}</span>`;
         }
+
+        // Only campaigns with a real ListMonk id can be deleted as a group
+        // (records without one have no campaign to match on).
+        const selectable = groups.filter(g => Number.isInteger(g.campaign_id));
+        App.selection.register('unsub_campaigns', {
+            noun: 'campaign',
+            pageValues: selectable.map(g => String(g.campaign_id)),
+            actions: [
+                { label: 'Delete Records', onclick: 'Unsubscribes.bulkDeleteCampaigns()', danger: true },
+            ],
+        });
 
         let html = `
             <!-- IMAP Status -->
@@ -169,7 +181,9 @@ const Unsubscribes = {
                 <div class="card-header">
                     <h3 class="card-title">Unsubscribes by Campaign</h3>
                     <span style="color:var(--text-muted);font-size:0.85rem">${groups.length} campaign(s)</span>
-                </div>`;
+                </div>
+
+                ${App.selection.bar('unsub_campaigns')}`;
 
         if (!groups.length) {
             html += `
@@ -183,16 +197,21 @@ const Unsubscribes = {
                 const readableDate = this.formatCampaignDate(g.campaign_key);
                 const cleanName = App.escapeHtml(this.cleanCampaignName(g.campaign_name));
                 const isClickable = Number.isInteger(g.campaign_id);
+                const isSelected = App.selection.has('unsub_campaigns', g.campaign_id);
                 html += `
-                    <div class="unsub-campaign-card" ${isClickable ? `onclick="Unsubscribes.openCampaign(${g.campaign_id})"` : 'style="cursor:default;opacity:0.75"'}>
+                    <div class="unsub-campaign-card ${isSelected ? 'selected' : ''}" ${isClickable ? `onclick="Unsubscribes.openCampaign(${g.campaign_id})"` : 'style="cursor:default;opacity:0.75"'}>
                         <div class="unsub-campaign-header">
                             <div class="unsub-campaign-info">
+                                ${isClickable ? `<span onclick="event.stopPropagation()" style="margin-right:10px">${App.selection.rowbox('unsub_campaigns', g.campaign_id, `Select ${this.cleanCampaignName(g.campaign_name)}`)}</span>` : ''}
                                 <span class="badge badge-primary" style="font-size:0.8rem;padding:4px 10px;margin-right:8px">${readableDate}</span>
                                 <strong>${cleanName}</strong>
                             </div>
                             <div class="unsub-campaign-meta">
                                 <span class="badge badge-default" style="font-size:0.8rem;text-transform:uppercase">${g.count} unsubscribe${g.count !== 1 ? 's' : ''}</span>
-                                ${isClickable ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="margin-left:8px;color:var(--text-muted)"><polyline points="9 18 15 12 9 6"/></svg>` : ''}
+                                ${isClickable ? `
+                                    <button class="btn btn-sm btn-danger" style="margin-left:8px;padding:2px 8px;font-size:0.72rem"
+                                        onclick="event.stopPropagation();Unsubscribes.removeCampaign(${g.campaign_id})">Remove</button>
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="margin-left:8px;color:var(--text-muted)"><polyline points="9 18 15 12 9 6"/></svg>` : ''}
                             </div>
                         </div>
                     </div>`;
@@ -412,6 +431,24 @@ const Unsubscribes = {
             const res = await API.del(`/api/unsubscribes/campaign/${campaignId}`);
             App.toast(res.message || 'Campaign removed', 'success');
             this.activeCampaign = null;
+            App.selection.clear('unsub_campaigns');
+            await this.render();
+        } catch {
+            // API.request already surfaced the server message.
+        }
+    },
+
+    /** Delete the log records of every selected campaign group. */
+    async bulkDeleteCampaigns() {
+        const ids = App.selection.values('unsub_campaigns').map(Number).filter(Boolean);
+        if (!ids.length) return;
+        if (!await App.confirm('Remove Campaign Records',
+                `Remove ALL unsubscribe records for ${ids.length} selected campaign(s)? This cannot be undone.`)) return;
+        try {
+            const params = ids.map(id => `campaign_ids=${id}`).join('&');
+            const res = await API.del(`/api/unsubscribes/campaigns?${params}`);
+            App.toast(res.message || 'Campaign records removed', 'success');
+            App.selection.clear('unsub_campaigns');
             await this.render();
         } catch {
             // API.request already surfaced the server message.

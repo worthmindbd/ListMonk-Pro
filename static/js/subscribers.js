@@ -1,17 +1,56 @@
 /**
- * Subscribers page - CRUD, search, import/export.
+ * Subscribers page - CRUD, search, import/export, bulk actions.
  */
 const Subscribers = {
     page: 1,
     query: '',
+    statusFilter: '',
+    listFilter: 0,
+    perPage: 50,
+    _lists: [],
+    _rows: [],
+    _editing: null,
 
     async render() {
         try {
-            const params = `page=${this.page}&per_page=50${this.query ? '&query=' + encodeURIComponent(this.query) : ''}`;
-            const result = await API.get(`/api/subscribers?${params}`);
+            // The list filter is a convenience: if the lists call fails, the
+            // subscriber table must still render with the other filters.
+            try {
+                const listsRes = await API.get('/api/lists?per_page=200&minimal=true');
+                this._lists = listsRes?.data?.results || [];
+            } catch {
+                this._lists = [];
+            }
+
+            const params = new URLSearchParams({
+                page: String(this.page),
+                per_page: String(this.perPage),
+            });
+            if (this.query) params.set('query', this.query);
+            if (this.statusFilter) params.set('status', this.statusFilter);
+            if (this.listFilter) params.set('list_id', String(this.listFilter));
+
+            const result = await API.get(`/api/subscribers?${params.toString()}`);
             const data = result?.data || {};
             const subscribers = data.results || [];
             const total = data.total || 0;
+            this._rows = subscribers;
+
+            const ids = this.pageIds();
+            App.selection.register('subscribers', {
+                noun: 'subscriber',
+                pageValues: ids,
+                actions: [
+                    { label: 'Add / Remove from list', onclick: 'Subscribers.showBulkLists()' },
+                    { label: 'Blocklist', onclick: 'Subscribers.bulkBlocklist()' },
+                    { label: 'Export Selected', onclick: 'Subscribers.exportSelected()' },
+                    { label: 'Delete', onclick: 'Subscribers.bulkDelete()', danger: true },
+                ],
+            });
+
+            const listOptions = this._lists.map(l =>
+                `<option value="${l.id}" ${l.id === this.listFilter ? 'selected' : ''}>${App.escapeHtml(l.name)}</option>`
+            ).join('');
 
             let html = `
                 <div class="search-bar">
@@ -21,24 +60,37 @@ const Subscribers = {
                             aria-label="Search subscribers by email or name"
                             value="${App.escapeHtml(this.query)}" onkeydown="if(event.key==='Enter')Subscribers.search()">
                     </div>
+                    <select id="subListFilter" style="width:auto;min-width:180px" onchange="Subscribers.filterList(this.value)">
+                        <option value="0" ${!this.listFilter ? 'selected' : ''}>All Lists</option>
+                        ${listOptions}
+                    </select>
+                    <select id="subStatusFilter" style="width:auto" onchange="Subscribers.filterStatus(this.value)">
+                        <option value="" ${!this.statusFilter ? 'selected' : ''}>All Statuses</option>
+                        <option value="enabled" ${this.statusFilter === 'enabled' ? 'selected' : ''}>Enabled</option>
+                        <option value="blocklisted" ${this.statusFilter === 'blocklisted' ? 'selected' : ''}>Blocklisted</option>
+                    </select>
                     <button class="btn" onclick="Subscribers.search()">Search</button>
                     <div class="page-actions">
                         <button class="btn" onclick="Subscribers.exportAll()">Export CSV</button>
                         <button class="btn btn-primary" onclick="Subscribers.showCreate()">+ Add Subscriber</button>
                     </div>
                 </div>
+                ${App.selection.bar('subscribers')}
                 <div class="table-wrapper"><table>
                     <thead><tr>
+                        <th class="col-select">${App.selection.headbox('subscribers', 'Select all subscribers on this page')}</th>
                         <th>ID</th><th>Email</th><th>Name</th><th>Status</th><th>Lists</th><th>Created</th><th class="cell-actions">Actions</th>
                     </tr></thead><tbody>`;
 
             if (!subscribers.length) {
-                html += '<tr><td colspan="7"><div class="empty-state"><h3>No subscribers found</h3></div></td></tr>';
+                html += '<tr><td colspan="8"><div class="empty-state"><h3>No subscribers found</h3></div></td></tr>';
             }
 
             subscribers.forEach(s => {
                 const lists = (s.lists || []).map(l => `<span class="tag">${App.escapeHtml(l.name)}</span>`).join('') || '-';
-                html += `<tr>
+                const isBlocked = s.status === 'blocklisted';
+                html += `<tr class="${App.selection.has('subscribers', s.id) ? 'row-selected' : ''}">
+                    <td class="col-select">${App.selection.rowbox('subscribers', s.id, `Select ${s.email}`)}</td>
                     <td>${s.id}</td>
                     <td><strong>${App.escapeHtml(s.email)}</strong></td>
                     <td>${App.escapeHtml(s.name) || '-'}</td>
@@ -47,7 +99,9 @@ const Subscribers = {
                     <td>${App.formatDate(s.created_at)}</td>
                     <td class="cell-actions">
                         <div class="action-btns">
+                            <button class="btn btn-sm" onclick="Subscribers.showDetail(${s.id})">View</button>
                             <button class="btn btn-sm" onclick="Subscribers.showEdit(${s.id})">Edit</button>
+                            ${isBlocked ? '' : `<button class="btn btn-sm" onclick="Subscribers.blocklist(${s.id})">Blocklist</button>`}
                             <button class="btn btn-sm btn-danger" onclick="Subscribers.remove(${s.id})">Delete</button>
                         </div>
                     </td>
@@ -55,15 +109,36 @@ const Subscribers = {
             });
 
             html += '</tbody></table></div>';
-            html += App.renderPagination(this.page, total, 50, 'Subscribers.goToPage');
+            html += App.renderPagination(this.page, total, this.perPage, 'Subscribers.goToPage');
             App.setContent(html);
         } catch {
             App.setContent('<div class="empty-state"><h3>Failed to load subscribers</h3></div>');
         }
     },
 
+    /** IDs (as strings) of the rows currently on screen. */
+    pageIds() {
+        return this._rows.map(s => String(s.id));
+    },
+
+    _selectedIds() {
+        return App.selection.values('subscribers').map(Number).filter(Boolean);
+    },
+
     search() {
         this.query = document.getElementById('subSearch')?.value || '';
+        this.page = 1;
+        this.render();
+    },
+
+    filterStatus(val) {
+        this.statusFilter = val || '';
+        this.page = 1;
+        this.render();
+    },
+
+    filterList(val) {
+        this.listFilter = parseInt(val) || 0;
         this.page = 1;
         this.render();
     },
@@ -115,6 +190,40 @@ const Subscribers = {
         }
     },
 
+    async showDetail(id) {
+        try {
+            const [subRes, bounceRes] = await Promise.allSettled([
+                API.get(`/api/subscribers/${id}`),
+                API.get(`/api/subscribers/${id}/bounces`),
+            ]);
+            const s = subRes.status === 'fulfilled' ? (subRes.value?.data || {}) : {};
+            if (!s.id) throw new Error('Subscriber not found');
+
+            const bounceData = bounceRes.status === 'fulfilled' ? (bounceRes.value?.data || {}) : {};
+            const bounces = bounceData.results || [];
+            const lists = (s.lists || []).map(l => `<span class="tag">${App.escapeHtml(l.name)}</span>`).join('') || '-';
+            const attribs = s.attribs && Object.keys(s.attribs).length
+                ? `<pre style="background:var(--bg-input);padding:12px;border-radius:8px;overflow:auto;max-height:240px;font-size:0.8rem">${App.escapeHtml(JSON.stringify(s.attribs, null, 2))}</pre>`
+                : '<p style="color:var(--text-muted)">No custom attributes</p>';
+
+            App.showResult(`Subscriber: ${App.escapeHtml(s.email)}`, `
+                <div style="font-size:0.9rem;line-height:1.7">
+                    <p><strong>Name:</strong> ${App.escapeHtml(s.name) || '-'}</p>
+                    <p><strong>Status:</strong> ${App.statusBadge(s.status)}</p>
+                    <p><strong>Lists:</strong> ${lists}</p>
+                    <p><strong>Created:</strong> ${App.formatDateTime(s.created_at)}</p>
+                    <p><strong>Updated:</strong> ${App.formatDateTime(s.updated_at)}</p>
+                    <p style="margin-top:12px"><strong>Attributes</strong></p>
+                    ${attribs}
+                    <p style="margin-top:12px"><strong>Bounces (${bounces.length})</strong></p>
+                    ${bounces.length ? `<ul>${bounces.slice(0, 20).map(b => `<li>${App.escapeHtml(b.type || '?')} · ${App.escapeHtml(b.source || '')} · ${App.formatDate(b.created_at)}</li>`).join('')}</ul>` : '<p style="color:var(--text-muted)">No bounce records</p>'}
+                </div>
+            `);
+        } catch {
+            // API.request already surfaced the server message.
+        }
+    },
+
     async showEdit(id) {
         try {
             const result = await API.get(`/api/subscribers/${id}`);
@@ -122,6 +231,15 @@ const Subscribers = {
             // Keep the full record: ListMonk's PUT is a full replace, so the
             // update must echo the subscriber's existing list memberships.
             this._editing = s;
+
+            const currentLists = (s.lists || []).map(l => l.id);
+            const listBoxes = this._lists.map(l =>
+                `<label class="checkbox-label"><input type="checkbox" name="editSubLists" value="${l.id}" ${currentLists.includes(l.id) ? 'checked' : ''}><span>${App.escapeHtml(l.name)}</span></label>`
+            ).join('');
+            // Whether the form could offer membership checkboxes at all: with
+            // none rendered, the update must echo the stored lists instead of
+            // treating "nothing checked" as "remove from every list".
+            this._editHasListBoxes = listBoxes.length > 0;
 
             App.setContent(`
                 <div class="inline-form">
@@ -136,6 +254,10 @@ const Subscribers = {
                             <option value="enabled" ${s.status === 'enabled' ? 'selected' : ''}>Enabled</option>
                             <option value="blocklisted" ${s.status === 'blocklisted' ? 'selected' : ''}>Blocklisted</option>
                         </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Lists</label>
+                        <div class="checkbox-group">${listBoxes || '<span style="color:var(--text-muted)">No lists available</span>'}</div>
                     </div>
                     <div class="form-group">
                         <label>Attributes (JSON)</label>
@@ -159,16 +281,23 @@ const Subscribers = {
         let attribs = {};
         try { attribs = JSON.parse(document.getElementById('editAttribs').value); } catch {}
 
+        const checked = Array.from(document.querySelectorAll('input[name="editSubLists"]:checked'))
+            .map(cb => parseInt(cb.value));
+
         try {
             // ListMonk's PUT /api/subscribers/{id} replaces the whole record:
-            // omitting `lists` removes the subscriber from every list. Echo the
-            // current memberships so an edit cannot silently unsubscribe them.
-            let lists = [];
-            if (this._editing && this._editing.id === id) {
-                lists = (this._editing.lists || []).map(l => l.id);
-            } else {
-                const res = await API.get(`/api/subscribers/${id}`);
-                lists = ((res?.data?.lists) || []).map(l => l.id);
+            // omitting `lists` removes the subscriber from every list. Honor
+            // the checkboxes the form showed; when it could not show any,
+            // echo the stored memberships so an edit cannot silently
+            // unsubscribe the subscriber.
+            let lists = checked;
+            if (!this._editHasListBoxes) {
+                if (this._editing && this._editing.id === id) {
+                    lists = (this._editing.lists || []).map(l => l.id);
+                } else {
+                    const res = await API.get(`/api/subscribers/${id}`);
+                    lists = ((res?.data?.lists) || []).map(l => l.id);
+                }
             }
 
             await API.put(`/api/subscribers/${id}`, { email, name, status, attribs, lists });
@@ -184,6 +313,7 @@ const Subscribers = {
             try {
                 await API.del(`/api/subscribers/${id}`);
                 App.toast('Subscriber deleted', 'success');
+                App.selection.clear('subscribers');
                 this.render();
             } catch {
                 // API.request already surfaced the server message.
@@ -191,10 +321,116 @@ const Subscribers = {
         }
     },
 
+    async blocklist(id) {
+        try {
+            await API.put(`/api/subscribers/${id}/blocklist`);
+            App.toast('Subscriber blocklisted', 'success');
+            this.render();
+        } catch {
+            // API.request already surfaced the server message.
+        }
+    },
+
+    // ── Bulk actions ─────────────────────────────────────
+    async bulkBlocklist() {
+        const ids = this._selectedIds();
+        if (!ids.length) return;
+        if (!await App.confirm('Blocklist Subscribers',
+                `Blocklist ${ids.length} selected subscriber(s)? They will stop receiving all campaigns.`)) return;
+        try {
+            await API.put('/api/subscribers/blocklist', { ids });
+            App.toast(`${ids.length} subscriber(s) blocklisted`, 'success');
+            App.selection.clear('subscribers');
+            this.render();
+        } catch {
+            // API.request already surfaced the server message.
+        }
+    },
+
+    async bulkDelete() {
+        const ids = this._selectedIds();
+        if (!ids.length) return;
+        if (!await App.confirm('Delete Subscribers',
+                `Permanently delete ${ids.length} selected subscriber(s)? This cannot be undone.`)) return;
+        try {
+            const params = ids.map(id => `ids=${id}`).join('&');
+            await API.del(`/api/subscribers?${params}`);
+            App.toast(`${ids.length} subscriber(s) deleted`, 'success');
+            App.selection.clear('subscribers');
+            this.render();
+        } catch {
+            // API.request already surfaced the server message.
+        }
+    },
+
+    async showBulkLists() {
+        const ids = this._selectedIds();
+        if (!ids.length) return;
+        if (!this._lists.length) { App.toast('No lists available', 'error'); return; }
+
+        const options = this._lists.map(l =>
+            `<option value="${l.id}">${App.escapeHtml(l.name)}</option>`
+        ).join('');
+
+        App.showResult('Add / Remove from List', `
+            <p style="color:var(--text-secondary)">Apply to <strong>${ids.length}</strong> selected subscriber(s):</p>
+            <div class="form-group" style="margin-top:12px"><label>List</label><select id="bulkListSelect">${options}</select></div>
+            <div class="form-actions">
+                <button class="btn btn-primary" onclick="Subscribers.applyBulkLists('add')">Subscribe to list</button>
+                <button class="btn" onclick="Subscribers.applyBulkLists('remove')">Unsubscribe from list</button>
+            </div>
+        `);
+    },
+
+    async applyBulkLists(action) {
+        const ids = this._selectedIds();
+        const listId = parseInt(document.getElementById('bulkListSelect')?.value);
+        if (!ids.length || !listId) return;
+
+        try {
+            const payload = { ids, action, target_list_ids: [listId] };
+            if (action === 'add') payload.status = 'confirmed';
+            await API.put('/api/subscribers/lists', payload);
+            App.toast(`${action === 'add' ? 'Subscribed' : 'Unsubscribed'} ${ids.length} subscriber(s)`, 'success');
+            App.closeModal();
+            App.selection.clear('subscribers');
+            this.render();
+        } catch {
+            // API.request already surfaced the server message.
+        }
+    },
+
+    /** CSV of the selected rows that are loaded on this page. */
+    exportSelected() {
+        const selected = this._selectedIds();
+        const rows = this._rows.filter(s => selected.includes(s.id));
+        if (!rows.length) { App.toast('No selected rows on this page', 'error'); return; }
+
+        const header = ['id', 'email', 'name', 'status', 'lists', 'created_at'];
+        const csvRows = rows.map(s => [
+            s.id,
+            s.email,
+            s.name || '',
+            s.status,
+            (s.lists || []).map(l => l.name).join('; '),
+            s.created_at || '',
+        ]);
+        const csv = [header, ...csvRows]
+            .map(cols => cols.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))
+            .join('\n');
+
+        API.downloadBlob(new Blob([csv], { type: 'text/csv' }), 'selected_subscribers.csv');
+        App.toast(`Exported ${rows.length} row(s)`, 'success');
+    },
+
     async exportAll() {
         try {
-            const queryParam = this.query ? `?query=${encodeURIComponent(this.query)}` : '';
-            const result = await API.get(`/api/subscribers/export-all${queryParam}`);
+            const params = new URLSearchParams();
+            if (this.query) params.set('query', this.query);
+            if (this.statusFilter) params.set('status', this.statusFilter);
+            if (this.listFilter) params.set('list_id', String(this.listFilter));
+            const qs = params.toString();
+            const result = await API.get(`/api/subscribers/export-all${qs ? '?' + qs : ''}`);
             API.downloadBlob(result.blob, 'subscribers_export.csv');
             App.toast('Export downloaded', 'success');
         } catch {

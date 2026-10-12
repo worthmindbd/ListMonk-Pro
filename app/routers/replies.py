@@ -7,9 +7,10 @@ reply feed pagination, and manual IMAP scans.
 import logging
 from fastapi import APIRouter, HTTPException, Query, Request
 from app.services.reply_log import (
-    load_log, save_log, update_reply_status, load_settings, save_settings,
-    _log_lock
+    load_log, save_log, update_reply_status, update_reply_statuses, delete_replies,
+    load_settings, save_settings, _log_lock,
 )
+from app.services.bulk_ops import run_bulk
 from app.services.imap_reply_tracker import scan_and_track_replies
 from app.services.imap_helpers import safe_email_for_query
 from app.services.listmonk_client import listmonk
@@ -20,6 +21,26 @@ router = APIRouter()
 
 MAX_PAGE = 1000
 MAX_PER_PAGE = 100
+
+# Bulk actions fan out to ListMonk (one lookup + one blocklist per sender), so
+# the selection is capped like every other bulk endpoint.
+MAX_BULK_IDS = 500
+
+VALID_REPLY_STATUSES = {"unread", "lead", "replied", "archived"}
+
+
+def _bulk_reply_ids(raw) -> list[str]:
+    """Validate the ``ids`` payload of a bulk reply action."""
+    if not isinstance(raw, (list, tuple, set)):
+        raise ValueError("ids must be a list of reply ids")
+    if len(raw) > MAX_BULK_IDS:
+        raise ValueError(f"Too many ids (max {MAX_BULK_IDS})")
+    return [str(i) for i in raw if str(i or "").strip()]
+
+
+def _records_for(ids: list[str]) -> list[dict]:
+    wanted = {str(i) for i in ids}
+    return [r for r in load_log() if str(r.get("id")) in wanted]
 
 
 @router.get("/status")
@@ -176,6 +197,73 @@ async def scan_replies():
         raise HTTPException(status_code=502, detail=f"IMAP scan failed: {e}")
 
 
+@router.put("/status")
+async def update_statuses(request: Request):
+    """Update the status of several replies in one request.
+
+    The reply feed's bulk bar posts here: marking a page of replies as
+    "replied" or "archived" should not cost one request per card.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    new_status = body.get("status")
+    if new_status not in VALID_REPLY_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Status must be one of {sorted(VALID_REPLY_STATUSES)}"
+        )
+    try:
+        ids = _bulk_reply_ids(body.get("ids"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not ids:
+        raise HTTPException(status_code=400, detail="No reply ids provided")
+
+    async with _log_lock:
+        updated = update_reply_statuses(ids, new_status)
+
+    if not updated:
+        raise HTTPException(status_code=404, detail="No matching replies found")
+    return {"status": "ok", "updated": updated, "new_status": new_status}
+
+
+@router.post("/blocklist")
+async def blocklist_reply_senders(request: Request):
+    """Blocklist the ListMonk subscriber behind each selected reply."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    try:
+        ids = _bulk_reply_ids(body.get("ids"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    records = _records_for(ids)
+    if not records:
+        raise HTTPException(status_code=404, detail="No matching replies found")
+
+    emails = {r["from_email"] for r in records if (r.get("from_email") or "").strip()}
+    if not emails:
+        raise HTTPException(status_code=400, detail="Selected replies have no sender email")
+
+    async def _blocklist(email: str) -> None:
+        await _blocklist_sender(email)
+
+    result = await run_bulk(sorted(emails), _blocklist)
+    return {
+        "status": "ok",
+        "blocklisted": result["ok"],
+        "errors": result["errors"],
+        "failed": result["failed"],
+    }
+
+
 @router.put("/{reply_id}/status")
 async def update_status(reply_id: str, request: Request):
     """Update status of a prospect reply."""
@@ -185,11 +273,10 @@ async def update_status(reply_id: str, request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    valid_statuses = {"unread", "lead", "replied", "archived"}
-    if new_status not in valid_statuses:
+    if new_status not in VALID_REPLY_STATUSES:
         raise HTTPException(
             status_code=400,
-            detail=f"Status must be one of {valid_statuses}"
+            detail=f"Status must be one of {VALID_REPLY_STATUSES}"
         )
 
     updated = update_reply_status(reply_id, new_status)
@@ -199,26 +286,21 @@ async def update_status(reply_id: str, request: Request):
     return {"status": "ok", "id": reply_id, "new_status": new_status}
 
 
-@router.post("/{reply_id}/blocklist")
-async def blocklist_reply_sender(reply_id: str):
-    """Blocklist the ListMonk subscriber behind a prospect reply.
+async def _blocklist_sender(email: str) -> dict:
+    """Blocklist the ListMonk subscriber behind a sender address.
 
     Resolving the email server-side keeps the address out of the client-built
     ListMonk query string and validates it with the same helper the scanners
     use, so a crafted Reply-To address cannot inject query syntax.
     """
-    records = load_log()
-    record = next((r for r in records if str(r.get("id")) == str(reply_id)), None)
-    if not record:
-        raise HTTPException(status_code=404, detail="Reply not found")
-
-    email = (record.get("from_email") or "").strip()
-    safe_email = safe_email_for_query(email)
+    safe_email = safe_email_for_query((email or "").strip())
     if not safe_email:
         raise HTTPException(status_code=400, detail="Reply has no valid sender email")
 
     try:
         result = await listmonk.get_subscribers(1, 1, f"subscribers.email = '{safe_email}'")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Subscriber lookup failed for {email}: {e}")
         raise HTTPException(status_code=502, detail=f"Subscriber lookup failed: {e}")
@@ -234,6 +316,36 @@ async def blocklist_reply_sender(reply_id: str):
         raise HTTPException(status_code=502, detail=f"Blocklist failed: {e}")
 
     return {"status": "ok", "subscriber_id": subscriber_id, "email": email}
+
+
+@router.post("/{reply_id}/blocklist")
+async def blocklist_reply_sender(reply_id: str):
+    """Blocklist the ListMonk subscriber behind a prospect reply."""
+    records = load_log()
+    record = next((r for r in records if str(r.get("id")) == str(reply_id)), None)
+    if not record:
+        raise HTTPException(status_code=404, detail="Reply not found")
+
+    return await _blocklist_sender(record.get("from_email") or "")
+
+
+@router.delete("")
+async def delete_replies_bulk(ids: list[str] = Query(default=[])):
+    """Delete several replies from the log in one request."""
+    try:
+        reply_ids = _bulk_reply_ids(ids)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not reply_ids:
+        raise HTTPException(status_code=400, detail="No reply ids provided")
+
+    async with _log_lock:
+        removed = delete_replies(reply_ids)
+
+    if not removed:
+        raise HTTPException(status_code=404, detail="No matching replies found")
+    return {"status": "ok", "deleted": removed}
 
 
 @router.delete("/{reply_id}")

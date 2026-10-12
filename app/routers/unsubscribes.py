@@ -140,6 +140,28 @@ async def get_campaign_records(campaign_id: int,
     }
 
 
+@router.delete("/campaigns")
+async def delete_campaign_groups(campaign_ids: list[int] = Query(default=[])):
+    """Delete every unsubscribe record belonging to the given campaigns.
+
+    The campaign-grouped list view selects several campaign cards at once; one
+    log rewrite is both faster and safer than issuing a delete per card.
+    """
+    wanted = set(campaign_ids)
+    if not wanted:
+        raise HTTPException(status_code=400, detail="No campaign ids provided")
+    async with _log_lock:
+        records = load_log()
+        remaining = [r for r in records if r.get("campaign_id") not in wanted]
+        removed = len(records) - len(remaining)
+        save_log(remaining)
+    return {
+        "removed": removed,
+        "campaigns": len(wanted),
+        "message": f"Removed {removed} record(s) from {len(wanted)} campaign(s)",
+    }
+
+
 @router.delete("/campaign/{campaign_id}")
 async def delete_campaign_group(campaign_id: int):
     """Delete all unsubscribe records for a specific campaign by its ID."""

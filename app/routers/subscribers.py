@@ -14,22 +14,45 @@ MAX_PER_PAGE = 200
 # the connection open indefinitely. 100 pages x 100 rows = 10k subscribers.
 EXPORT_MAX_PAGES = 100
 
+# ListMonk has no `status` filter parameter on /api/subscribers, but its query
+# language does — this is the same clause auto_unblock uses.
+VALID_STATUSES = {"enabled", "blocklisted"}
+
+
+def _with_status_filter(query: str, status: str) -> str:
+    """Fold a status shortcut the UI offers into a ListMonk query clause."""
+    status = (status or "").strip().lower()
+    if not status:
+        return query
+    if status not in VALID_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid status: {status}. Use enabled or blocklisted",
+        )
+    clause = f"subscribers.status = '{status}'"
+    return f"({query}) AND {clause}" if query else clause
+
 
 @router.get("")
 async def get_subscribers(page: int = Query(1, ge=1, le=MAX_PAGE),
                           per_page: int = Query(50, ge=1, le=MAX_PER_PAGE),
-                          query: str = "", list_id: Optional[int] = None):
-    return await listmonk.get_subscribers(page, per_page, query, list_id)
+                          query: str = "", list_id: Optional[int] = None,
+                          status: str = ""):
+    return await listmonk.get_subscribers(
+        page, per_page, _with_status_filter(query, status), list_id,
+    )
 
 
 @router.get("/export-all")
-async def export_all_subscribers(query: str = "", list_id: Optional[int] = None):
+async def export_all_subscribers(query: str = "", list_id: Optional[int] = None,
+                                 status: str = ""):
     """Stream every subscriber as CSV, page by page.
 
     Rows are pulled from ListMonk lazily so peak memory stays at one page
     regardless of list size. 404 when the filter matches nothing.
     """
     columns = ["id", "email", "name", "status", "created_at", "updated_at"]
+    query = _with_status_filter(query, status)
 
     async def rows():
         async for sub in listmonk.iter_pages(

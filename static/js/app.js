@@ -127,6 +127,13 @@ const App = {
 
         this.currentPage = hash;
 
+        // A selection only makes sense on the page it was made on; the new
+        // page re-registers its own bulk config while rendering.
+        if (!this._renderingPage || this._renderingPage !== hash) {
+            this.selection.clearAll();
+            this._renderingPage = hash;
+        }
+
         // Clear per-page state when navigating away
         if (hash !== 'bounces' && typeof Bounces !== 'undefined') {
             Bounces.campaigns = [];
@@ -326,6 +333,129 @@ const App = {
         return html;
     },
 
+    // ── Multi-select (bulk actions) ──────────────────────
+    /**
+     * Per-table selection state shared by the list pages.
+     *
+     * A page registers what its bulk bar can do on every render
+     * (App.selection.register), renders App.selection.bar(key) above its
+     * table and wires row checkboxes to rowToggle. Values are always held as
+     * strings so a page can rebuild a set across pagination without type
+     * mismatches.
+     */
+    selection: {
+        sets: {},
+        configs: {},
+
+        set(key) {
+            if (!this.sets[key]) this.sets[key] = new Set();
+            return this.sets[key];
+        },
+
+        register(key, config) {
+            this.configs[key] = config || {};
+        },
+
+        count(key) { return this.set(key).size; },
+        values(key) { return [...this.set(key)]; },
+        has(key, value) { return this.set(key).has(String(value)); },
+
+        pageFullySelected(key, values) {
+            return values.length > 0 && values.every(v => this.set(key).has(String(v)));
+        },
+
+        /** Row checkbox handler; trusts the element's own checked state. */
+        rowToggle(key, value, checkbox) {
+            const selected = this.set(key);
+            const val = String(value);
+            const checked = checkbox ? checkbox.checked : !selected.has(val);
+            if (checked) selected.add(val); else selected.delete(val);
+            if (checkbox) checkbox.closest('tr')?.classList.toggle('row-selected', checked);
+            this.sync(key);
+        },
+
+        /** Select-all handler: applies to every value on the current page. */
+        pageToggle(key, values, checkbox) {
+            const selected = this.set(key);
+            const wanted = values.map(String);
+            wanted.forEach(v => checkbox.checked ? selected.add(v) : selected.delete(v));
+            document.querySelectorAll(`.row-select[data-key="${key}"]`).forEach(box => {
+                if (wanted.includes(String(box.dataset.value))) {
+                    box.checked = checkbox.checked;
+                    box.closest('tr')?.classList.toggle('row-selected', checkbox.checked);
+                }
+            });
+            this.sync(key);
+        },
+
+        clear(key) {
+            this.set(key).clear();
+            document.querySelectorAll(`.row-select[data-key="${key}"]`).forEach(box => {
+                box.checked = false;
+                box.closest('tr')?.classList.remove('row-selected');
+            });
+            this.sync(key);
+        },
+
+        /** Drop every page's selection (called when navigating away). */
+        clearAll() {
+            Object.keys(this.sets).forEach(key => this.sets[key].clear());
+            this.configs = {};
+        },
+
+        /** Refresh the bulk bar and header checkbox after a selection change. */
+        sync(key) {
+            const bar = document.getElementById(`bulkBar_${key}`);
+            if (bar) bar.innerHTML = this.barHtml(key);
+            const box = document.getElementById(`selectAll_${key}`);
+            if (box) {
+                const values = (this.configs[key] || {}).pageValues || [];
+                const onPage = values.filter(v => this.set(key).has(String(v))).length;
+                box.checked = values.length > 0 && onPage === values.length;
+                box.indeterminate = onPage > 0 && onPage < values.length;
+            }
+        },
+
+        barHtml(key) {
+            const count = this.count(key);
+            if (!count) return '';
+            const cfg = this.configs[key] || {};
+            const noun = cfg.noun || 'item';
+            const actions = (cfg.actions || []).map(a =>
+                `<button class="btn btn-sm ${a.danger ? 'btn-danger' : ''}" onclick="${a.onclick}">${a.label}</button>`
+            ).join('');
+            return `
+                <span class="bulk-bar-count"><strong>${count}</strong> ${noun}${count === 1 ? '' : 's'} selected</span>
+                <div class="action-btns">
+                    ${actions}
+                    <button class="btn btn-sm" onclick="App.selection.clear('${key}')">Clear</button>
+                </div>`;
+        },
+
+        /** Container for a page's bulk bar; kept mounted so sync() can fill it. */
+        bar(key) {
+            return `<div class="bulk-bar" id="bulkBar_${key}">${this.barHtml(key)}</div>`;
+        },
+
+        /** Table-header "select all on this page" checkbox. */
+        headbox(key, label) {
+            const values = (this.configs[key] || {}).pageValues || [];
+            return `<input type="checkbox" id="selectAll_${key}"
+                aria-label="${App.escapeHtml(label || 'Select all on this page')}"
+                ${this.pageFullySelected(key, values) ? 'checked' : ''}
+                onchange="App.selection.pageToggle('${key}', (App.selection.configs['${key}'] || {}).pageValues || [], this)"/>`;
+        },
+
+        /** Per-row checkbox. `value` is stored as its string form. */
+        rowbox(key, value, label) {
+            const val = String(value);
+            return `<input type="checkbox" class="row-select" data-key="${key}" data-value="${App.escapeHtml(val)}"
+                aria-label="${App.escapeHtml(label || 'Select row')}"
+                ${this.has(key, val) ? 'checked' : ''}
+                onchange="App.selection.rowToggle('${key}', ${App.escapeHtml(JSON.stringify(val))}, this)"/>`;
+        },
+    },
+
     // ── Status Badge ─────────────────────────────────────
     statusBadge(status) {
         const map = {
@@ -368,31 +498,54 @@ const App = {
 // ── Templates Page (simple) ──────────────────────────────
 const Templates = {
     _data: [],
+    _filter: '',
 
     async render() {
         try {
             const result = await API.get('/api/templates');
             this._data = result?.data || [];
-            const templates = this._data;
+
+            const needle = this._filter.trim().toLowerCase();
+            const templates = needle
+                ? this._data.filter(t => (t.name || '').toLowerCase().includes(needle))
+                : this._data;
+
+            App.selection.register('templates', {
+                noun: 'template',
+                pageValues: templates.map(t => String(t.id)),
+                actions: [
+                    { label: 'Delete', onclick: 'Templates.bulkDelete()', danger: true },
+                ],
+            });
 
             let html = `
                 <div class="search-bar">
+                    <div class="search-input">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                        <input type="search" id="tplSearch" placeholder="Search templates by name..."
+                            aria-label="Search templates"
+                            value="${App.escapeHtml(this._filter)}" onkeydown="if(event.key==='Enter')Templates.search()">
+                    </div>
+                    <button class="btn" onclick="Templates.search()">Search</button>
                     <span style="color:var(--text-secondary);font-size:0.9rem">${templates.length} template(s)</span>
                     <div class="page-actions">
                         <button class="btn btn-primary" onclick="Templates.showCreate()">+ New Template</button>
                     </div>
                 </div>
+                ${App.selection.bar('templates')}
                 <div class="table-wrapper"><table>
                     <thead><tr>
+                        <th class="col-select">${App.selection.headbox('templates', 'Select all templates shown')}</th>
                         <th>ID</th><th>Name</th><th>Type</th><th>Default</th><th>Created</th><th>Updated</th><th class="cell-actions">Actions</th>
                     </tr></thead><tbody>`;
 
             if (!templates.length) {
-                html += '<tr><td colspan="7"><div class="empty-state"><h3>No templates found</h3></div></td></tr>';
+                html += '<tr><td colspan="8"><div class="empty-state"><h3>No templates found</h3></div></td></tr>';
             }
             templates.forEach(t => {
                 const name = App.escapeHtml(t.name || '');
-                html += `<tr>
+                html += `<tr class="${App.selection.has('templates', t.id) ? 'row-selected' : ''}">
+                    <td class="col-select">${App.selection.rowbox('templates', t.id, `Select ${t.name}`)}</td>
                     <td>${t.id}</td>
                     <td><strong>${name}</strong></td>
                     <td><span class="badge badge-info">${t.type || '-'}</span></td>
@@ -402,6 +555,7 @@ const Templates = {
                     <td class="cell-actions">
                         <div class="action-btns">
                             <button class="btn btn-sm" onclick="Templates.preview(${t.id})">Preview</button>
+                            <button class="btn btn-sm" onclick="Templates.duplicate(${t.id})">Duplicate</button>
                             <button class="btn btn-sm" onclick="Templates.showEdit(${t.id})">Edit</button>
                             ${!t.is_default ? `<button class="btn btn-sm" onclick="Templates.setDefault(${t.id})">Set Default</button>` : ''}
                             <button class="btn btn-sm btn-danger" onclick="Templates.remove(${t.id})">Delete</button>
@@ -416,6 +570,11 @@ const Templates = {
             console.error('Templates load error:', err);
             App.setContent(`<div class="empty-state"><h3>Failed to load templates</h3><p>${App.escapeHtml(err.message || '')}</p></div>`);
         }
+    },
+
+    search() {
+        this._filter = document.getElementById('tplSearch')?.value || '';
+        this.render();
     },
 
     preview(id) {
@@ -499,9 +658,41 @@ const Templates = {
             try {
                 await API.del(`/api/templates/${id}`);
                 App.toast('Template deleted', 'success');
+                App.selection.clear('templates');
                 this.render();
             } catch { /* API.request already surfaced the server message */ }
         }
+    },
+
+    /** Create a copy of a template so it can be edited without touching the original. */
+    async duplicate(id) {
+        const t = this._data.find(tpl => tpl.id === id);
+        if (!t) { App.toast('Template not found', 'error'); return; }
+        try {
+            await API.post('/api/templates', {
+                name: `${t.name || 'Template'} (copy)`,
+                body: t.body || '',
+                type: t.type || 'campaign',
+            });
+            App.toast('Template duplicated', 'success');
+            this.render();
+        } catch { /* API.request already surfaced the server message */ }
+    },
+
+    async bulkDelete() {
+        const ids = App.selection.values('templates').map(Number).filter(Boolean);
+        if (!ids.length) return;
+        if (!await App.confirm('Delete Templates',
+                `Permanently delete ${ids.length} selected template(s)?`)) return;
+        try {
+            const params = ids.map(id => `ids=${id}`).join('&');
+            const result = await API.del(`/api/templates?${params}`);
+            const errors = result?.errors || 0;
+            App.toast(`Deleted ${result?.deleted ?? ids.length} template(s)${errors ? `, ${errors} failed (default templates cannot be deleted)` : ''}`,
+                errors ? 'info' : 'success');
+            App.selection.clear('templates');
+            this.render();
+        } catch { /* API.request already surfaced the server message */ }
     },
 };
 
@@ -546,6 +737,7 @@ const Bounces = {
             const pageBounces = data.results || [];
             const total = data.total || 0;
             this.total = total;
+            this._rows = pageBounces;
 
             // Build campaign filter options
             const campOptions = this.campaigns.map(c =>
@@ -559,6 +751,15 @@ const Bounces = {
             const deleteActionLabel = this.campaignFilter
                 ? `Delete ${this._typeLabel()}`
                 : `Delete All ${this.typeFilter ? (this.typeFilter === 'hard' ? 'Hard ' : 'Soft ') : ''}Bounces`;
+
+            App.selection.register('bounces', {
+                noun: 'bounce',
+                pageValues: this.pageIds(),
+                actions: [
+                    { label: 'Export Selected', onclick: 'Bounces.exportSelected()' },
+                    { label: 'Delete Selected', onclick: 'Bounces.deleteSelected()', danger: true },
+                ],
+            });
 
             // The page's actions belong in the filter row, next to the filters
             // they act on - the shared top bar keeps only the page title and
@@ -584,17 +785,20 @@ const Bounces = {
                         <button class="btn btn-danger" onclick="Bounces.deleteAll()">${deleteActionLabel}</button>
                     </div>
                 </div>
+                ${App.selection.bar('bounces')}
                 <div class="table-wrapper"><table>
                     <thead><tr>
+                        <th class="col-select">${App.selection.headbox('bounces', 'Select all bounces on this page')}</th>
                         <th>ID</th><th>Email</th><th>Campaign</th><th>Source</th><th>Type</th><th>Date</th><th class="cell-actions">Actions</th>
                     </tr></thead><tbody>`;
 
             if (!pageBounces.length) {
-                html += `<tr><td colspan="7"><div class="empty-state"><h3>No ${this._typeLabel()} found</h3></div></td></tr>`;
+                html += `<tr><td colspan="8"><div class="empty-state"><h3>No ${this._typeLabel()} found</h3></div></td></tr>`;
             }
             pageBounces.forEach(b => {
                 const campName = App.escapeHtml(b.campaign?.name || '-');
-                html += `<tr>
+                html += `<tr class="${App.selection.has('bounces', b.id) ? 'row-selected' : ''}">
+                    <td class="col-select">${App.selection.rowbox('bounces', b.id, `Select ${b.email}`)}</td>
                     <td>${b.id}</td>
                     <td><strong>${App.escapeHtml(b.email || '-')}</strong></td>
                     <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis">${campName}</td>
@@ -627,10 +831,63 @@ const Bounces = {
 
     goToPage(p) { this.page = p; this.render(); },
 
+    /** IDs (as strings) of the bounce rows currently on screen. */
+    pageIds() {
+        return (this._rows || []).map(b => String(b.id));
+    },
+
+    _selectedIds() {
+        return App.selection.values('bounces').map(Number).filter(Boolean);
+    },
+
+    /** Delete only the rows the user checked, not the whole filter. */
+    async deleteSelected() {
+        const ids = this._selectedIds();
+        if (!ids.length) return;
+        if (!await App.confirm('Delete Bounces',
+                `Permanently delete ${ids.length} selected bounce record(s)? Continue?`)) return;
+
+        App.showProgress('Delete Bounces', `Deleting ${ids.length} selected bounce(s). Please wait...`);
+        try {
+            const params = ids.map(id => `ids=${id}`).join('&');
+            const result = await API.del(`/api/bounces?${params}`);
+            App.showResult('Delete Bounces — Done', `
+                <ul style="line-height:1.8">
+                    <li>Deleted: <strong>${result?.deleted ?? 0}</strong></li>
+                    ${result?.errors ? `<li>Errors: <strong>${result.errors}</strong></li>` : ''}
+                </ul>
+            `);
+            App.selection.clear('bounces');
+            this.render();
+        } catch (err) {
+            App.showResult('Delete Bounces — Failed',
+                `<p style="color:#e74c3c">${App.escapeHtml(err.message || 'Unknown error')}</p>`);
+        }
+    },
+
+    /** CSV of the selected rows on this page. */
+    exportSelected() {
+        const selected = this._selectedIds();
+        const rows = (this._rows || []).filter(b => selected.includes(b.id));
+        if (!rows.length) { App.toast('No selected rows on this page', 'error'); return; }
+
+        const header = ['id', 'email', 'campaign', 'source', 'type', 'created_at'];
+        const csvRows = rows.map(b => [
+            b.id, b.email || '', b.campaign?.name || '', b.source || '', b.type || '', b.created_at || '',
+        ]);
+        const csv = [header, ...csvRows]
+            .map(cols => cols.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))
+            .join('\n');
+
+        API.downloadBlob(new Blob([csv], { type: 'text/csv' }), 'selected_bounces.csv');
+        App.toast(`Exported ${rows.length} row(s)`, 'success');
+    },
+
     async remove(id) {
         try {
             await API.del(`/api/bounces/${id}`);
             App.toast('Bounce deleted', 'success');
+            App.selection.clear('bounces');
             this.render();
         } catch {
             // API.request already surfaced the server message.
@@ -671,6 +928,7 @@ const Bounces = {
                     ${errors ? `<li>Errors: <strong>${errors}</strong></li>` : ''}
                 </ul>
             `);
+            App.selection.clear('bounces');
             this.render();
         } catch (err) {
             App.showResult('Delete Bounces — Failed',

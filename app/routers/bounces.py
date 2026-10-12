@@ -8,6 +8,7 @@ from app.services.bounce_ingest import ingest_bounce_mailbox
 from app.services.bounce_list import iter_filtered_bounces, fetch_filtered_bounces_page
 from app.services.bounce_filters import bounce_campaign_id, bounce_campaign_name
 from app.services.export_service import aiter_dicts_to_csv
+from app.services.bulk_ops import run_bulk, MAX_BULK_IDS
 from app.services.hard_bounce_cache import schedule_hard_bounce_update
 
 router = APIRouter()
@@ -114,11 +115,31 @@ async def delete_bounce(bounce_id: int):
 
 @router.delete("")
 async def delete_all_bounces(campaign_id: Optional[int] = None,
-                              bounce_type: str = ""):
+                              bounce_type: str = "",
+                              ids: list[int] = Query(default=[])):
     """Delete bounces. If campaign_id is provided, only delete bounces for
     that campaign (iterating + deleting in parallel). If bounce_type is set
-    without campaign_id, delete all matching bounces. Otherwise delete all."""
+    without campaign_id, delete all matching bounces. Otherwise delete all.
+
+    Supplying ``ids`` narrows the action to an explicit selection, which is
+    what the Bounces page's bulk bar uses — every other mode is a filter-wide
+    sweep.
+    """
     bounce_type = _validate_bounce_type(bounce_type)
+
+    if ids:
+        if len(ids) > MAX_BULK_IDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Too many ids (max {MAX_BULK_IDS})",
+            )
+        result = await run_bulk(ids, listmonk.delete_bounce)
+        schedule_hard_bounce_update()
+        return {
+            "deleted": result["ok"],
+            "errors": result["errors"],
+            "failed": result["failed"],
+        }
 
     if not campaign_id and not bounce_type:
         res = await listmonk.delete_all_bounces()

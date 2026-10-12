@@ -30,6 +30,7 @@ ListMonk-Pro/
 │       ├── bounce_filters.py      # Smart bounce filtering (excludes campaign openers as false positives)
 │       ├── bounce_ingest.py       # RFC 3463 DSN classifier, IMAP scanner & processed-ID state
 │       ├── bounce_list.py         # Paginated bounce listing with opener exclusion & cache integration
+│       ├── bulk_ops.py            # ID validation + bounded-concurrency runner for bulk delete/archive
 │       ├── campaign_scheduler.py  # Timezone-aware send window scheduler (auto-pause/auto-resume)
 │       ├── csv_converter.py       # Converts arbitrary CSV to ListMonk schema (JSON attributes)
 │       ├── deliverability_service.py # Audit rules, score computation, and preset application
@@ -50,16 +51,17 @@ ListMonk-Pro/
 │   ├── js/
 │   │   ├── analytics.js           # Campaign analytics charts, date filtering, link tracking
 │   │   ├── api.js                 # Centralized fetch wrapper with 401 redirect & error handling
-│   │   ├── app.js                 # SPA router, mode switcher (incl. nav-group collapsing), onboarding modal & shared UI
+│   │   ├── app.js                 # SPA router, mode switcher (incl. nav-group collapsing), onboarding modal, shared UI
+│   │   │                          #   + App.selection: per-table multi-select + bulk action bars
 │   │   ├── campaigns.js           # Campaign management (incl. plain-text alt body), status transitions, test sends
 │   │   ├── charts.js              # Mode-aware dashboard overview charts & stat summary cards
 │   │   ├── converter.js           # CSV converter UI, column mapping, live preview & import modal
 │   │   ├── deliverability.js      # Deliverability pre-flight audit checklist & 1-click presets
-│   │   ├── lists.js               # List management, modal forms, tag pills
-│   │   ├── replies.js             # Prospect reply feed, sentiment badges, hot lead flagging
+│   │   ├── lists.js               # List management, modal forms, tag pills, subscriber drill-down & exports
+│   │   ├── replies.js             # Prospect reply feed, sentiment badges, hot lead flagging, bulk triage
 │   │   ├── settings.js            # Settings UI: send window scheduler, auto-unblock, unsubscribe settings
-│   │   ├── subscribers.js         # Subscriber table, search, edit modal, bulk blocklist/delete
-│   │   └── unsubscribes.js        # Campaign-grouped unsubscribe dashboard, source badges, undo reset
+│   │   ├── subscribers.js         # Subscriber/lead table: filters, edit modal, bulk list/blocklist/delete
+│   │   └── unsubscribes.js        # Campaign-grouped unsubscribe dashboard, source badges, bulk removal, undo reset
 │   ├── favicon.png
 │   └── favicon.svg
 ├── templates/
@@ -76,6 +78,7 @@ ListMonk-Pro/
 │   ├── test_campaign_scheduler.py # Send-window logic
 │   ├── test_csv_converter.py      # Encoding/delimiter/column detection
 │   ├── test_replies_deliverability.py # Reply sentiment, reply API & deliverability preset tests
+│   ├── test_bulk_actions.py       # Bulk select endpoints: ID validation, scoping, partial failures
 │   ├── test_review_fixes.py       # Regression tests for the full-codebase review
 │   ├── conftest.py                # Resets module-level caches between tests
 │   └── test_regressions.py        # Route order, IMAP seen-marking, prune, timestamp regressions
@@ -237,7 +240,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 |----------|----------|--------|-------------|
 | **Auth** | `/auth/login` | GET / POST | Login page / authenticate session |
 | | `/auth/logout` | POST | End session & redirect (POST-only: a GET would be a forced-logout CSRF) |
-| **Subscribers** | `/api/subscribers` | GET | Paginated subscribers with search/query/list filter |
+| **Subscribers** | `/api/subscribers` | GET | Paginated subscribers with search/query/list/`status` filter |
 | | `/api/subscribers/export-all` | GET | Stream all subscribers as CSV |
 | | `/api/subscribers/import/status` | GET | Get subscriber import status |
 | | `/api/subscribers/import/logs` | GET | Get subscriber import logs |
@@ -247,8 +250,9 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/subscribers/{id}/blocklist` | PUT | Blocklist single subscriber |
 | | `/api/subscribers/blocklist` | PUT | Bulk blocklist subscribers by ID array |
 | | `/api/subscribers/lists` | PUT | Bulk modify list memberships (add/remove/unsub) |
-| | `/api/subscribers` | POST / DELETE | Create subscriber / bulk delete subscribers |
+| | `/api/subscribers` | POST / DELETE | Create subscriber / bulk delete subscribers by ID array |
 | **Lists** | `/api/lists` | GET / POST | List all mailing lists / create new list |
+| | `/api/lists` | DELETE | Bulk delete lists by ID array (bounded loop, partial failures reported) |
 | | `/api/lists/{id}` | GET / PUT / DELETE | Get / update / delete list |
 | **Campaigns** | `/api/campaigns` | GET / POST | List campaigns (with hard bounce cache) / create |
 | | `/api/campaigns/running/stats` | GET | Real-time running campaign stats |
@@ -260,13 +264,16 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/campaigns/{id}/preview` | GET | Preview campaign HTML rendering |
 | | `/api/campaigns/{id}/status` | PUT | Change status (start, pause, cancel) |
 | | `/api/campaigns/{id}/archive` | PUT | Archive campaign |
+| | `/api/campaigns/archive` | PUT | Bulk archive campaigns by ID array (registered before `/{id}`) |
+| | `/api/campaigns` | DELETE | Bulk delete campaigns by ID array |
 | | `/api/campaigns/{id}/test` | POST | Send test email |
 | | `/api/campaigns/{id}/subscribers/{type}` | GET | View campaign viewers, clickers, or hard bounces |
 | | `/api/campaigns/{id}/subscribers/{type}/export` | GET | Export viewers, clickers, or hard bounces as CSV |
 | **Templates** | `/api/templates` | GET / POST | List templates / create template |
+| | `/api/templates` | DELETE | Bulk delete templates by ID array |
 | | `/api/templates/{id}` | GET / PUT / DELETE | Get / update / delete template |
 | | `/api/templates/{id}/default` | PUT | Set default template |
-| **Bounces** | `/api/bounces` | GET / DELETE | List bounces (filtered) / bulk delete |
+| **Bounces** | `/api/bounces` | GET / DELETE | List bounces (filtered) / bulk delete (`ids` narrows to a selection, `campaign_id`+`bounce_type` widen to a sweep) |
 | | `/api/bounces/ingest` | POST | Trigger bounce mailbox IMAP ingestion |
 | | `/api/bounces/export` | GET | Export filtered bounce records as CSV |
 | | `/api/bounces/{id}` | DELETE | Delete single bounce record |
@@ -282,6 +289,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/unsubscribes/stats` | GET | Unsubscribe counts & source breakdown |
 | | `/api/unsubscribes/settings` | GET / PUT | Get / update unsubscribe settings (blocklist toggle) |
 | | `/api/unsubscribes/campaigns` | GET | Unsubscribes grouped by campaign |
+| | `/api/unsubscribes/campaigns` | DELETE | Bulk delete the records of several selected campaigns by ID array |
 | | `/api/unsubscribes/campaign/{id}` | GET / DELETE | Get / delete records for specific campaign |
 | | `/api/unsubscribes/campaign/{id}/export` | GET | Export campaign unsubscribes as CSV |
 | | `/api/unsubscribes/records` | DELETE | Delete specific records by email |
@@ -295,6 +303,9 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/replies/scan` | POST | Manually trigger IMAP prospect reply scan |
 | | `/api/replies/status` | GET | Check IMAP connection status |
 | | `/api/replies/settings` | GET / PUT | Get / update reply tracker settings (auto-tagging) |
+| | `/api/replies/status` | PUT | Bulk update reply status from the feed's selection bar |
+| | `/api/replies/blocklist` | POST | Bulk blocklist every selected reply's sender |
+| | `/api/replies` | DELETE | Bulk delete replies by ID array |
 | | `/api/replies/{id}/status` | PUT | Update reply status (unread, lead, replied, archived) |
 | | `/api/replies/{id}/blocklist` | POST | Blocklist the ListMonk subscriber behind a reply (resolved server-side) |
 | | `/api/replies/{id}` | DELETE | Delete / dismiss single reply record |
@@ -305,6 +316,49 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 (e.g. sending cadence, public archive) are reported for context and never drag the score
 down. The audit deliberately covers settings the app does **not** manage (ListMonk bounce
 mailboxes, media upload types) so a "100%" rating cannot hide an unconfigured bounce loop.
+
+---
+
+## Data Management (per page)
+
+Every data page exposes row-level actions plus a multi-select bulk bar
+(`App.selection` in `app.js`, `.bulk-bar` in `style.css`):
+
+| Page | Row actions | Bulk actions (checkbox column / card checkbox) |
+|------|-------------|-----------------------------------------------|
+| Leads/Subscribers | View details, Edit (incl. list memberships), Blocklist, Delete | Add/Remove from list, Blocklist, Export Selected (CSV), Delete |
+| Lead Lists | View Subscribers (jumps to the filtered Lead table), Export, Edit, Delete | Export Subscribers, Delete |
+| Cold Outreach/Campaigns | View, Start/Pause/Resume, Test Send, Archive, Delete | Archive, Export Selected (CSV), Delete |
+| Templates | Preview, Duplicate, Edit, Set Default, Delete (search by name) | Delete |
+| Bounces | Delete | Export Selected (CSV), Delete Selected (plus the existing filter-wide Delete All) |
+| Replies & Leads | Status dropdown, Mark as Hot Lead, Copy Email, Full Details, Blocklist, Delete | Mark Hot Lead / Replied / Archived / Unread, Blocklist, Delete |
+| Unsubscribes | per-campaign Remove, Remove List (detail view), record removal | Delete Records for the selected campaign cards |
+
+Frontend conventions:
+
+- A page calls `App.selection.register(key, {noun, pageValues, actions})` on every
+  render, places `App.selection.bar(key)` above its table and wires
+  `${App.selection.headbox(key, label)}` / `${App.selection.rowbox(key, value, label)}`
+  into the markup. Values are held as strings so a selection survives pagination.
+- Handlers read `App.selection.values(key)`, act once, then `App.selection.clear(key)`
+  and re-render. Selection state is per page and dropped on navigation
+  (`App.selection.clearAll()` in `App.route`).
+- Client-side CSVs (`Export Selected`) only cover rows loaded on the current page;
+  the filter-wide exports still use the streaming server endpoints.
+
+Backend conventions:
+
+- `app/services/bulk_ops.py` provides `parse_ids()` (rejects junk, dedupes, caps at
+  `MAX_BULK_IDS = 500`) and `run_bulk()` (bounded concurrency, returns
+  `{ok, errors, failed}`) for the endpoints ListMonk only offers per item
+  (lists, campaigns, templates).
+- Bulk actions must only touch the submitted IDs — never fall back to a
+  filter-wide sweep when a selection is present.
+- Partial failures are reported in the response body (`errors` / `failed`) and
+  are logged, never silently swallowed.
+- Static bulk routes (`PUT /api/campaigns/archive`) are registered before the
+  parameterized ones (`PUT /api/campaigns/{id}`) or Starlette int-parses the
+  literal segment and answers 422.
 
 ---
 
@@ -338,3 +392,4 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 11. **Module-level caches** — any service cache in a module global needs an invalidation hook and must be reset by `tests/conftest.py`, or tests leak state into each other.
 12. **ListMonk settings are all-or-nothing** — `PUT /api/settings` validates the whole payload (a partial body fails with *"At least one SMTP block should be enabled"*), and the GET response returns every secret masked with `•`. Never PUT a partial dict and never echo a mask back: use `listmonk.apply_settings(patch)`, which merges onto the current settings and blanks masked secrets so ListMonk keeps the stored value (matched by SMTP/bounce UUID).
 13. **Never treat IMAP `\Seen` as "already processed"** — the scanners work on mailboxes a human reads. Bounce ingestion persists handled DSN Message-IDs to `bounce_processed.json`; the unsubscribe and reply scanners do the same. New scanners must follow that pattern (or keep an equivalent state file).
+14. **Bulk actions only touch the submitted IDs** — never widen a selection into a filter-wide sweep. Validate IDs with `bulk_ops.parse_ids`, run per-item calls through `bulk_ops.run_bulk`, report partial failures (`errors`/`failed`) in the response, and register static bulk routes (`/archive`) before parameterized ones (`/{id}`).

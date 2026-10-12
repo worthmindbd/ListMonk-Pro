@@ -5,11 +5,13 @@ const Campaigns = {
     page: 1,
     query: '',
     statusFilter: '',
+    perPage: 50,
     analyticsChart: null,
+    _rows: [],
 
     async render() {
         try {
-            let params = `page=${this.page}&per_page=50`;
+            let params = `page=${this.page}&per_page=${this.perPage}`;
             if (this.query) params += `&query=${encodeURIComponent(this.query)}`;
             if (this.statusFilter) params += `&status=${this.statusFilter}`;
 
@@ -17,6 +19,17 @@ const Campaigns = {
             const data = result?.data || {};
             const campaigns = data.results || [];
             const total = data.total || 0;
+            this._rows = campaigns;
+
+            App.selection.register('campaigns', {
+                noun: 'campaign',
+                pageValues: this.pageIds(),
+                actions: [
+                    { label: 'Archive', onclick: 'Campaigns.bulkArchive()' },
+                    { label: 'Export Selected', onclick: 'Campaigns.exportSelected()' },
+                    { label: 'Delete', onclick: 'Campaigns.bulkDelete()', danger: true },
+                ],
+            });
 
             let html = `
                 <div class="search-bar">
@@ -42,13 +55,15 @@ const Campaigns = {
                         <button class="btn btn-primary" onclick="Campaigns.showCreate()">+ New Campaign</button>
                     </div>
                 </div>
+                ${App.selection.bar('campaigns')}
                 <div class="table-wrapper"><table>
                     <thead><tr>
+                        <th class="col-select">${App.selection.headbox('campaigns', 'Select all campaigns on this page')}</th>
                         <th>ID</th><th>Name</th><th>Subject</th><th>Status</th><th>Lists</th><th>Sent</th><th>Created</th><th class="cell-actions">Actions</th>
                     </tr></thead><tbody>`;
 
             if (!campaigns.length) {
-                html += '<tr><td colspan="8"><div class="empty-state"><h3>No campaigns found</h3></div></td></tr>';
+                html += '<tr><td colspan="9"><div class="empty-state"><h3>No campaigns found</h3></div></td></tr>';
             }
 
             campaigns.forEach(c => {
@@ -58,7 +73,9 @@ const Campaigns = {
                 // size); showing `to_send` here reported the whole list as sent.
                 const sent = c.sent || 0;
                 const audience = c.to_send || 0;
-                html += `<tr>
+                const canArchive = ['draft', 'finished', 'cancelled', 'paused'].includes(c.status);
+                html += `<tr class="${App.selection.has('campaigns', c.id) ? 'row-selected' : ''}">
+                    <td class="col-select">${App.selection.rowbox('campaigns', c.id, `Select ${c.name}`)}</td>
                     <td>${c.id}</td>
                     <td><strong>${App.escapeHtml(c.name)}</strong></td>
                     <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis"${Campaigns._subjectTooltip(c.subject)}>${App.escapeHtml(c.subject) || '-'}${Campaigns._subjectBadge(c.subject)}</td>
@@ -72,6 +89,8 @@ const Campaigns = {
                             ${c.status === 'draft' ? `<button class="btn btn-sm btn-primary" onclick="Campaigns.changeStatus(${c.id},'running')">Start</button>` : ''}
                             ${c.status === 'running' ? `<button class="btn btn-sm" style="border-color:var(--warning);color:var(--warning)" onclick="Campaigns.changeStatus(${c.id},'paused')">Pause</button>` : ''}
                             ${c.status === 'paused' ? `<button class="btn btn-sm btn-primary" onclick="Campaigns.changeStatus(${c.id},'running')">Resume</button>` : ''}
+                            <button class="btn btn-sm" onclick="Campaigns.showTestSend(${c.id})">Test</button>
+                            ${canArchive ? `<button class="btn btn-sm" onclick="Campaigns.archive(${c.id})">Archive</button>` : ''}
                             <button class="btn btn-sm btn-danger" onclick="Campaigns.remove(${c.id})">Delete</button>
                         </div>
                     </td>
@@ -79,11 +98,20 @@ const Campaigns = {
             });
 
             html += '</tbody></table></div>';
-            html += App.renderPagination(this.page, total, 50, 'Campaigns.goToPage');
+            html += App.renderPagination(this.page, total, this.perPage, 'Campaigns.goToPage');
             App.setContent(html);
         } catch {
             App.setContent('<div class="empty-state"><h3>Failed to load campaigns</h3></div>');
         }
+    },
+
+    /** IDs (as strings) of the rows currently on screen. */
+    pageIds() {
+        return this._rows.map(c => String(c.id));
+    },
+
+    _selectedIds() {
+        return App.selection.values('campaigns').map(Number).filter(Boolean);
     },
 
     search() {
@@ -257,6 +285,9 @@ const Campaigns = {
                             <button class="btn btn-sm" onclick="Campaigns.exportCampaign(${c.id})">Export CSV</button>
                             <button class="btn btn-sm" onclick="Campaigns.preview(${c.id})">Preview</button>
                             <button class="btn btn-sm" onclick="Campaigns.showEdit(${c.id})">Edit</button>
+                            <button class="btn btn-sm" onclick="Campaigns.showTestSend(${c.id})">Test Send</button>
+                            <button class="btn btn-sm" onclick="Campaigns.archive(${c.id})">Archive</button>
+                            <button class="btn btn-sm btn-danger" onclick="Campaigns.remove(${c.id})">Delete</button>
                             <button class="btn btn-sm btn-secondary" onclick="Campaigns.render()">Back</button>
                         </div>
                     </div>
@@ -430,11 +461,105 @@ const Campaigns = {
             try {
                 await API.del(`/api/campaigns/${id}`);
                 App.toast('Campaign deleted', 'success');
+                App.selection.clear('campaigns');
                 this.render();
             } catch {
                 // API.request already surfaced the server message.
             }
         }
+    },
+
+    async archive(id) {
+        if (!await App.confirm('Archive Campaign',
+                'Archive this campaign? It stays in the database and is hidden from the active list.')) return;
+        try {
+            await API.put(`/api/campaigns/${id}/archive`);
+            App.toast('Campaign archived', 'success');
+            this.render();
+        } catch {
+            // API.request already surfaced the server message.
+        }
+    },
+
+    /** Send a test copy of the campaign to an arbitrary address. */
+    showTestSend(id) {
+        const camp = this._rows.find(c => c.id === id) || {};
+        App.showResult(`Test Send: ${App.escapeHtml(camp.name || '#' + id)}`, `
+            <p style="color:var(--text-secondary)">ListMonk renders the campaign with sample data and delivers it to the address below.</p>
+            <div class="form-group" style="margin-top:12px">
+                <label>Recipient email</label>
+                <input type="email" id="testSendEmail" placeholder="you@example.com">
+            </div>
+            <div class="form-actions">
+                <button class="btn btn-primary" onclick="Campaigns.sendTest(${id})">Send Test</button>
+            </div>
+        `);
+    },
+
+    async sendTest(id) {
+        const email = document.getElementById('testSendEmail')?.value.trim();
+        if (!email) { App.toast('Enter a recipient email', 'error'); return; }
+        try {
+            await API.post(`/api/campaigns/${id}/test`, { emails: [email] });
+            App.toast(`Test email sent to ${email}`, 'success');
+            App.closeModal();
+        } catch {
+            // API.request already surfaced the server message.
+        }
+    },
+
+    // ── Bulk actions ─────────────────────────────────────
+    async bulkArchive() {
+        const ids = this._selectedIds();
+        if (!ids.length) return;
+        if (!await App.confirm('Archive Campaigns',
+                `Archive ${ids.length} selected campaign(s)?`)) return;
+        try {
+            const result = await API.put('/api/campaigns/archive', { ids });
+            const errors = result?.errors || 0;
+            App.toast(`Archived ${result?.archived ?? ids.length} campaign(s)${errors ? `, ${errors} failed` : ''}`,
+                errors ? 'info' : 'success');
+            App.selection.clear('campaigns');
+            this.render();
+        } catch {
+            // API.request already surfaced the server message.
+        }
+    },
+
+    async bulkDelete() {
+        const ids = this._selectedIds();
+        if (!ids.length) return;
+        if (!await App.confirm('Delete Campaigns',
+                `Permanently delete ${ids.length} selected campaign(s) and all their stats? This cannot be undone.`)) return;
+        try {
+            const params = ids.map(id => `ids=${id}`).join('&');
+            await API.del(`/api/campaigns?${params}`);
+            App.toast(`${ids.length} campaign(s) deleted`, 'success');
+            App.selection.clear('campaigns');
+            this.render();
+        } catch {
+            // API.request already surfaced the server message.
+        }
+    },
+
+    /** CSV of the selected campaigns loaded on this page. */
+    exportSelected() {
+        const selected = this._selectedIds();
+        const rows = this._rows.filter(c => selected.includes(c.id));
+        if (!rows.length) { App.toast('No selected rows on this page', 'error'); return; }
+
+        const header = ['id', 'name', 'subject', 'status', 'lists', 'sent', 'views', 'clicks', 'bounces', 'created_at'];
+        const csvRows = rows.map(c => [
+            c.id, c.name, c.subject, c.status,
+            (c.lists || []).map(l => l.name).join('; '),
+            c.sent || 0, c.views || 0, c.clicks || 0, c.bounces || 0, c.created_at || '',
+        ]);
+        const csv = [header, ...csvRows]
+            .map(cols => cols.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))
+            .join('\n');
+
+        API.downloadBlob(new Blob([csv], { type: 'text/csv' }), 'selected_campaigns.csv');
+        App.toast(`Exported ${rows.length} row(s)`, 'success');
     },
 
     // ── Export ────────────────────────────────────────────
