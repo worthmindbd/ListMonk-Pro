@@ -19,6 +19,20 @@
 
 ---
 
+> **Deployed and verified (2026-10-12, `fb4c643`).** The fix commits went out through the GitHub
+> Actions deploy workflow (`git reset --hard` + `docker compose up -d --build` + health check — all
+> runs green) and `https://dash.getaevoramedia.com` is serving the new code: the categorized nav,
+> the alt-body field and the corrected `SENT` value were all confirmed in the deployed assets.
+> Production's background bounce scan built its own processed-ID set alongside the 4 records
+> already in ListMonk (no duplicates), and comparing its behaviour with the local run surfaced one
+> more defect, now fixed: an unattributable DSN was discarded permanently even when the
+> campaign-history fetch itself had failed — exactly what a container-start hiccup looks like.
+> `fb4c643` retries those instead of losing them.
+>
+> Final live state: 4 bounce records · `bounce.webhooks_enabled=true` · uploads
+> `jpg/jpeg/png/gif/svg/webp` · public subscription page + double opt-in + ALTCHA on ·
+> `sequence_1_template` 7,343 bytes and ghost-free.
+
 ## 0. Scoreboard
 
 | Category | Status |
