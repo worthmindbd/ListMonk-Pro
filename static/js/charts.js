@@ -293,16 +293,21 @@ const Dashboard = {
         const views = recent.map(c => c.views || 0);
         const clicks = recent.map(c => c.clicks || 0);
 
+        const datasets = [
+            { label: 'Sent', data: sent, backgroundColor: 'rgba(83, 58, 253, 0.82)', borderRadius: 6 },
+            { label: 'Views', data: views, backgroundColor: 'rgba(16, 185, 129, 0.82)', borderRadius: 6 },
+        ];
+        // Cold email mode disables tracking, so clicks are not charted there.
+        if (App.currentMode !== 'cold_email') {
+            datasets.push({ label: 'Clicks', data: clicks, backgroundColor: 'rgba(245, 158, 11, 0.82)', borderRadius: 6 });
+        }
+
         if (this.charts.campaign) this.charts.campaign.destroy();
         this.charts.campaign = new Chart(ctx, {
             type: 'bar',
             data: {
                 labels,
-                datasets: [
-                    { label: 'Sent', data: sent, backgroundColor: 'rgba(83, 58, 253, 0.82)', borderRadius: 6 },
-                    { label: 'Views', data: views, backgroundColor: 'rgba(16, 185, 129, 0.82)', borderRadius: 6 },
-                    { label: 'Clicks', data: clicks, backgroundColor: 'rgba(245, 158, 11, 0.82)', borderRadius: 6 },
-                ],
+                datasets,
             },
             options: {
                 responsive: true,

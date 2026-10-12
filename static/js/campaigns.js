@@ -246,6 +246,8 @@ const Campaigns = {
             const openRate = c.sent ? ((c.views || 0) / c.sent * 100).toFixed(1) : '0';
             const ctr = c.sent ? ((c.clicks || 0) / c.sent * 100).toFixed(1) : '0';
             const bounceRate = c.sent ? ((c.bounces || 0) / c.sent * 100).toFixed(1) : '0';
+            // Cold email mode disables tracking, so click metrics are omitted.
+            const isCold = App.currentMode === 'cold_email';
 
             App.setContent(`
                 <div class="inline-form">
@@ -268,11 +270,12 @@ const Campaigns = {
                             <div class="stat-value">${App.formatNumber(c.views || 0)}</div>
                             <div style="font-size:0.8rem;color:var(--text-muted)">${openRate}% open rate</div>
                         </div>
+                        ${isCold ? '' : `
                         <div class="stat-card" style="border-left:3px solid var(--warning)">
                             <div class="stat-label">Clicks</div>
                             <div class="stat-value">${App.formatNumber(c.clicks || 0)}</div>
                             <div style="font-size:0.8rem;color:var(--text-muted)">${ctr}% CTR</div>
-                        </div>
+                        </div>`}
                         <div class="stat-card" style="border-left:3px solid var(--danger)">
                             <div class="stat-label">Bounces</div>
                             <div class="stat-value">${App.formatNumber(c.bounces || 0)}</div>
@@ -309,7 +312,10 @@ const Campaigns = {
     },
 
     async exportCampaign(id) {
-        const types = ['views', 'clicks', 'bounces'];
+        // Cold email mode does not track clicks, so no clicker file is exported there.
+        const types = App.currentMode === 'cold_email'
+            ? ['views', 'bounces']
+            : ['views', 'clicks', 'bounces'];
         let exported = 0;
 
         for (const type of types) {

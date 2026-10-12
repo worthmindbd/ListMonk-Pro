@@ -95,7 +95,8 @@ const Analytics = {
         const totalBounces = this.summary?.bounces ?? this.campaigns.reduce((sum, c) => sum + (c.bounces || 0), 0);
         const totalUnsubs = this.unsubStats?.total || 0;
 
-        // Cold email only: prospect replies and the overall reply rate.
+        // Cold email mode disables link tracking, so click metrics are hidden there
+        // and prospect reply stats take their place.
         const isCold = this.isColdMode();
         const totalReplies = this.replyStats?.total_replies || 0;
         const overallReplyRate = this.replyStats?.reply_rate || 0;
@@ -114,11 +115,12 @@ const Analytics = {
                     <div class="stat-value">${App.formatNumber(totalViews)}</div>
                     <div style="font-size:0.8rem;color:var(--text-muted)">${totalSent ? ((totalViews/totalSent)*100).toFixed(1) : 0}% open rate</div>
                 </div>
+                ${isCold ? '' : `
                 <div class="stat-card warning">
                     <div class="stat-label">Total Clicks</div>
                     <div class="stat-value">${App.formatNumber(totalClicks)}</div>
                     <div style="font-size:0.8rem;color:var(--text-muted)">${totalSent ? ((totalClicks/totalSent)*100).toFixed(1) : 0}% CTR</div>
-                </div>
+                </div>`}
                 <div class="stat-card" style="border-left-color:#14b8a6">
                     <div class="stat-label">Unsubscribes (IMAP)</div>
                     <div class="stat-value" style="color:#14b8a6">${App.formatNumber(totalUnsubs)}</div>
@@ -177,7 +179,7 @@ const Analytics = {
                     <div class="stat-card"><div class="stat-label">Status</div><div style="margin-top:4px">${App.statusBadge(selectedCamp.status)}</div></div>
                     <div class="stat-card accent"><div class="stat-label">Sent</div><div class="stat-value">${App.formatNumber(selectedCamp.sent || 0)}</div></div>
                     <div class="stat-card success"><div class="stat-label">Views</div><div class="stat-value">${App.formatNumber(selectedCamp.views || 0)}</div></div>
-                    <div class="stat-card warning"><div class="stat-label">Clicks</div><div class="stat-value">${App.formatNumber(selectedCamp.clicks || 0)}</div></div>
+                    ${isCold ? '' : `<div class="stat-card warning"><div class="stat-label">Clicks</div><div class="stat-value">${App.formatNumber(selectedCamp.clicks || 0)}</div></div>`}
                     <div class="stat-card danger"><div class="stat-label">Bounces</div><div class="stat-value">${App.formatNumber(selectedCamp.bounces || 0)}</div></div>
                     <div class="stat-card" style="border-left-color:#14b8a6"><div class="stat-label">Unsubscribes</div><div class="stat-value" style="color:#14b8a6">${App.formatNumber(this.campaignUnsubCount)}</div></div>
                     ${isCold ? `
@@ -194,13 +196,14 @@ const Analytics = {
                     </div>
                     <div class="chart-container"><canvas id="viewsChart"></canvas></div>
                 </div>
+                ${isCold ? '' : `
                 <div class="card">
                     <div class="card-header">
                         <h3 class="card-title">Clicks Over Time</h3>
                         <button class="btn btn-sm" onclick="Analytics.exportSubscribers('clicks')">Export Who Clicked</button>
                     </div>
                     <div class="chart-container"><canvas id="clicksChart"></canvas></div>
-                </div>
+                </div>`}
             </div>
 
             <div class="charts-grid" style="margin-top:20px">
@@ -211,21 +214,23 @@ const Analytics = {
                     </div>
                     <div class="chart-container"><canvas id="bouncesChart"></canvas></div>
                 </div>
+                ${isCold ? '' : `
                 <div class="card">
                     <div class="card-header">
                         <h3 class="card-title">Top Links</h3>
                     </div>
                     <div class="chart-container"><canvas id="linksChart"></canvas></div>
-                </div>
+                </div>`}
             </div>
 
-            <!-- Links Table -->
+            <!-- Links Table (click analytics, newsletter mode only) -->
+            ${isCold ? '' : `
             <div class="card" style="margin-top:20px">
                 <div class="card-header">
                     <h3 class="card-title">Link Click Details</h3>
                 </div>
                 <div id="linksTable"></div>
-            </div>
+            </div>`}
         `;
 
         App.setContent(html);
@@ -250,11 +255,14 @@ const Analytics = {
         const datasets = [
             { label: 'Sent', data: sorted.map(c => c.sent || 0), backgroundColor: 'rgba(83, 58, 253, 0.82)', borderRadius: 6 },
             { label: 'Views', data: sorted.map(c => c.views || 0), backgroundColor: 'rgba(16, 185, 129, 0.82)', borderRadius: 6 },
-            { label: 'Clicks', data: sorted.map(c => c.clicks || 0), backgroundColor: 'rgba(245, 158, 11, 0.82)', borderRadius: 6 },
-            { label: 'Bounces', data: sorted.map(c => c.bounces || 0), backgroundColor: 'rgba(234, 34, 97, 0.82)', borderRadius: 6 },
         ];
 
-        // Cold email mode compares prospect replies per campaign as well.
+        // Click tracking is off in cold email mode, so the Clicks series is
+        // replaced by per-campaign prospect replies.
+        if (!this.isColdMode()) {
+            datasets.push({ label: 'Clicks', data: sorted.map(c => c.clicks || 0), backgroundColor: 'rgba(245, 158, 11, 0.82)', borderRadius: 6 });
+        }
+        datasets.push({ label: 'Bounces', data: sorted.map(c => c.bounces || 0), backgroundColor: 'rgba(234, 34, 97, 0.82)', borderRadius: 6 });
         if (this.isColdMode()) {
             datasets.push({
                 label: 'Replies',
@@ -353,24 +361,30 @@ const Analytics = {
 
         const baseParams = `campaign_id=${this.selectedCampaignId}&from_date=${this.fromDate}&to_date=${this.toDate}`;
 
-        // Fetch all analytics types in parallel
+        // Fetch the analytics types that are actually displayed. Cold email
+        // mode hides click/link analytics (tracking is disabled there), so
+        // those queries are skipped instead of being drawn into nothing.
+        const isCold = this.isColdMode();
         const [viewsRes, clicksRes, bouncesRes, linksRes] = await Promise.allSettled([
             API.get(`/api/campaigns/analytics/views?${baseParams}`),
-            API.get(`/api/campaigns/analytics/clicks?${baseParams}`),
+            isCold ? null : API.get(`/api/campaigns/analytics/clicks?${baseParams}`),
             API.get(`/api/campaigns/analytics/bounces?${baseParams}`),
-            API.get(`/api/campaigns/analytics/links?${baseParams}`),
+            isCold ? null : API.get(`/api/campaigns/analytics/links?${baseParams}`),
         ]);
 
         const viewsData = viewsRes.status === 'fulfilled' ? (viewsRes.value?.data || []) : [];
-        const clicksData = clicksRes.status === 'fulfilled' ? (clicksRes.value?.data || []) : [];
         const bouncesData = bouncesRes.status === 'fulfilled' ? (bouncesRes.value?.data || []) : [];
-        const linksData = linksRes.status === 'fulfilled' ? (linksRes.value?.data || []) : [];
 
         this.renderTimeChart('viewsChart', 'views', viewsData, '#10b981', 'rgba(16,185,129,0.12)');
-        this.renderTimeChart('clicksChart', 'clicks', clicksData, '#f59e0b', 'rgba(245,158,11,0.12)');
         this.renderTimeChart('bouncesChart', 'bounces', bouncesData, '#ea2261', 'rgba(234,34,97,0.12)');
-        this.renderLinksChart(linksData);
-        this.renderLinksTable(linksData);
+
+        if (!isCold) {
+            const clicksData = clicksRes.status === 'fulfilled' ? (clicksRes.value?.data || []) : [];
+            const linksData = linksRes.status === 'fulfilled' ? (linksRes.value?.data || []) : [];
+            this.renderTimeChart('clicksChart', 'clicks', clicksData, '#f59e0b', 'rgba(245,158,11,0.12)');
+            this.renderLinksChart(linksData);
+            this.renderLinksTable(linksData);
+        }
     },
 
     renderTimeChart(canvasId, key, data, borderColor, bgColor) {
