@@ -60,7 +60,7 @@ const Converter = {
                     </svg>
                     <p>Drag & drop a CSV file here, or click to browse</p>
                     <p class="file-name" id="fileName">${App.escapeHtml(this.fileName || '')}</p>
-                    <input type="file" id="csvFile" accept=".csv,.tsv,.txt" style="display:none">
+                    <input type="file" id="csvFile" accept=".csv,.tsv,.txt" aria-label="Choose a CSV file" style="display:none">
                 </div>
                 <p style="margin-top:12px;font-size:0.85rem;color:var(--text-muted)">
                     Supports CSV, TSV, and text files. The converter will automatically detect the delimiter,

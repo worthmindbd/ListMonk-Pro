@@ -39,7 +39,7 @@ const Campaigns = {
                             aria-label="Search campaigns"
                             value="${App.escapeHtml(this.query)}" onkeydown="if(event.key==='Enter')Campaigns.search()">
                     </div>
-                    <select id="campStatusFilter" onchange="Campaigns.filterStatus(this.value)" style="width:auto">
+                    <select id="campStatusFilter" aria-label="Filter campaigns by status" onchange="Campaigns.filterStatus(this.value)" style="width:auto">
                         <option value="" ${!this.statusFilter ? 'selected' : ''}>All Status</option>
                         <option value="draft" ${this.statusFilter === 'draft' ? 'selected' : ''}>Draft</option>
                         <option value="running" ${this.statusFilter === 'running' ? 'selected' : ''}>Running</option>

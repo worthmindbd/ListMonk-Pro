@@ -315,8 +315,10 @@ const App = {
 
     showResult(title, bodyHtml) {
         this._modalResolve = null;
+        const body = document.getElementById('modalBody');
         document.getElementById('modalTitle').textContent = title;
-        document.getElementById('modalBody').innerHTML = bodyHtml;
+        body.innerHTML = bodyHtml;
+        this.labelControls(body);
         document.getElementById('modalCancel').style.display = 'none';
         const confirmBtn = document.getElementById('modalConfirm');
         confirmBtn.style.display = '';
@@ -468,19 +470,23 @@ const App = {
         /** Table-header "select all on this page" checkbox. */
         headbox(key, label) {
             const values = (this.configs[key] || {}).pageValues || [];
-            return `<input type="checkbox" id="selectAll_${key}"
+            return `<label class="cell-check"><input type="checkbox" id="selectAll_${key}"
                 aria-label="${App.escapeHtml(label || 'Select all on this page')}"
                 ${this.pageFullySelected(key, values) ? 'checked' : ''}
-                onchange="App.selection.pageToggle('${key}', (App.selection.configs['${key}'] || {}).pageValues || [], this)"/>`;
+                onchange="App.selection.pageToggle('${key}', (App.selection.configs['${key}'] || {}).pageValues || [], this)"/></label>`;
         },
 
-        /** Per-row checkbox. `value` is stored as its string form. */
+        /** Per-row checkbox. `value` is stored as its string form.
+
+            Wrapped in a label on purpose: a bare 16x16 input is the whole click
+            target, which is well under the 24x24 minimum (44 for touch). The
+            label grows the target without moving the 16px box the eye sees. */
         rowbox(key, value, label) {
             const val = String(value);
-            return `<input type="checkbox" class="row-select" data-key="${key}" data-value="${App.escapeHtml(val)}"
+            return `<label class="cell-check"><input type="checkbox" class="row-select" data-key="${key}" data-value="${App.escapeHtml(val)}"
                 aria-label="${App.escapeHtml(label || 'Select row')}"
                 ${this.has(key, val) ? 'checked' : ''}
-                onchange="App.selection.rowToggle('${key}', ${App.escapeHtml(JSON.stringify(val))}, this)"/>`;
+                onchange="App.selection.rowToggle('${key}', ${App.escapeHtml(JSON.stringify(val))}, this)"/></label>`;
         },
     },
 
@@ -530,7 +536,54 @@ const App = {
 
     // ── Set Content ──────────────────────────────────────
     setContent(html) {
-        document.getElementById('contentArea').innerHTML = html;
+        const area = document.getElementById('contentArea');
+        area.innerHTML = html;
+        this.labelControls(area);
+    },
+
+    /** Give every control an accessible name, and hide decorative icons.
+        
+        Pages build their filter rows as raw HTML strings, and 19 of those
+        controls shipped with a placeholder but no label — which is not a
+        label, so a screen reader announced an unnamed combobox. Running one
+        pass per setContent() keeps pages from regressing one at a time
+        instead of forcing every renderer to remember. */
+    labelControls(root) {
+        const labels = Array.from(root.querySelectorAll('label'));
+
+        root.querySelectorAll(
+            'select, input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]), textarea'
+        ).forEach(el => {
+            if (el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') || el.title) return;
+            if (el.closest('label')) return;
+            if (el.id && labels.some(l => l.htmlFor === el.id)) return;
+
+            const group = el.closest('.form-group, .search-input, .filter-group');
+            const ownLabel = group && group.querySelector('label');
+            // Labels are frequently a *sibling* of the control rather than a
+            // wrapper or a `for`-linked pair (the schedule time selectors do
+            // this), so the previous element counts as a label too.
+            const prev = el.previousElementSibling;
+            const prevLabel = prev && prev.tagName === 'LABEL' ? prev.textContent.trim() : '';
+            const name = (ownLabel && ownLabel.textContent.trim())
+                || prevLabel
+                || el.getAttribute('placeholder')
+                || el.getAttribute('name')
+                || '';
+            if (name) el.setAttribute('aria-label', name);
+        });
+
+        // Icons are decoration next to text. Skip any icon that is itself the
+        // only content of a control, or hiding it would leave the control
+        // completely unnamed instead of merely redundant.
+        root.querySelectorAll('svg').forEach(svg => {
+            if (svg.hasAttribute('aria-hidden') || svg.getAttribute('role') || svg.querySelector('title')) return;
+            const control = svg.closest('button, a');
+            if (control && !control.textContent.trim()
+                && !control.getAttribute('aria-label') && !control.title) return;
+            svg.setAttribute('aria-hidden', 'true');
+            svg.setAttribute('focusable', 'false');
+        });
     },
 };
 
@@ -805,11 +858,11 @@ const Bounces = {
             // the global mode/theme controls.
             let html = `
                 <div class="search-bar">
-                    <select id="bounceCampFilter" onchange="Bounces.filterCampaign(this.value)" style="width:auto;min-width:240px">
+                    <select id="bounceCampFilter" aria-label="Filter bounces by campaign" onchange="Bounces.filterCampaign(this.value)" style="width:auto;min-width:240px">
                         <option value="0" ${!this.campaignFilter ? 'selected' : ''}>All Campaigns</option>
                         ${campOptions}
                     </select>
-                    <select id="bounceTypeFilter" onchange="Bounces.filterType(this.value)" style="width:auto">
+                    <select id="bounceTypeFilter" aria-label="Filter bounces by type" onchange="Bounces.filterType(this.value)" style="width:auto">
                         <option value="hard" ${this.typeFilter === 'hard' ? 'selected' : ''}>Hard Bounces</option>
                         <option value="soft" ${this.typeFilter === 'soft' ? 'selected' : ''}>Soft Bounces</option>
                         <option value="" ${!this.typeFilter ? 'selected' : ''}>All Bounce Types</option>

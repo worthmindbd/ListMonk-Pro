@@ -61,6 +61,9 @@ const Settings = {
         } else {
             el.innerHTML = this.renderAutoUnblock();
         }
+        // These tabs replace innerHTML *after* App.setContent() ran, so they
+        // miss the central accessible-name pass unless they re-run it here.
+        App.labelControls(el);
     },
 
     // ── Scheduler Tab ────────────────────────────────────
@@ -185,16 +188,16 @@ const Settings = {
                     <div class="form-group" style="margin-bottom:0">
                         <label>Start Time</label>
                         <div style="display:flex;gap:4px">
-                            <select id="schedStartHour" style="width:auto">${hourOptions(s.start_hour)}</select>
-                            <select id="schedStartMin" style="width:auto">${minuteOptions(s.start_minute)}</select>
+                            <select id="schedStartHour" aria-label="Start hour" style="width:auto">${hourOptions(s.start_hour)}</select>
+                            <select id="schedStartMin" aria-label="Start minute" style="width:auto">${minuteOptions(s.start_minute)}</select>
                         </div>
                     </div>
                     <span style="color:var(--text-muted);font-size:1.2rem;padding-bottom:8px">to</span>
                     <div class="form-group" style="margin-bottom:0">
                         <label>End Time</label>
                         <div style="display:flex;gap:4px">
-                            <select id="schedEndHour" style="width:auto">${hourOptions(s.end_hour)}</select>
-                            <select id="schedEndMin" style="width:auto">${minuteOptions(s.end_minute)}</select>
+                            <select id="schedEndHour" aria-label="End hour" style="width:auto">${hourOptions(s.end_hour)}</select>
+                            <select id="schedEndMin" aria-label="End minute" style="width:auto">${minuteOptions(s.end_minute)}</select>
                         </div>
                     </div>
                 </div>

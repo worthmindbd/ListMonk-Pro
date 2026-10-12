@@ -967,7 +967,11 @@ td .action-btns {
 }
 
 .btn-sm {
-    padding: 5px 12px;
+    /* 32px floor: the old 5px/12px padding rendered a 25px button, which is
+       below the 24x24 WCAG 2.2 minimum for pointer targets and well below the
+       44px touch guideline. These buttons sit in every table row. */
+    min-height: 32px;
+    padding: 6px 12px;
     font-size: 0.78rem;
 }
 
@@ -1389,6 +1393,24 @@ td.col-select {
     vertical-align: middle;
 }
 
+/* The 16px box stays 16px to the eye; the label around it carries the real
+   hit area so a mis-click does not land in the row behind it. Negative
+   margins keep the row height at what the 16px box used to produce. */
+.cell-check {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    margin: -8px 0;
+    cursor: pointer;
+    vertical-align: middle;
+}
+
+.cell-check input[type="checkbox"] {
+    margin: 0;
+}
+
 /* Selected rows stay visibly selected, including the sticky action cell that
    paints its own opaque background over the row. */
 tbody tr.row-selected td {
@@ -1587,6 +1609,10 @@ td .tag {
     gap: 8px;
     flex: 1;
     min-width: 0;
+    /* At ≤768px the header stacks and aligns children to the start, which
+       sizes this row to its content — a nowrap campaign title then pushed the
+       whole page into horizontal scroll. Cap it at the card. */
+    max-width: 100%;
 }
 
 .unsub-campaign-info strong {
@@ -2093,6 +2119,52 @@ td .tag {
 
 ::-webkit-scrollbar-thumb:hover {
     background: var(--text-muted);
+}
+
+/* ── Accessibility: Focus Ring & Motion Preference ─────────── */
+/* Focus was only ever styled on form fields (a box-shadow on :focus), so a
+   keyboard user tabbing to a button, nav link or table action saw nothing. */
+:focus-visible {
+    outline: 2px solid var(--primary-soft);
+    outline-offset: 2px;
+}
+
+[data-theme="light"] :focus-visible {
+    outline-color: var(--primary);
+}
+
+/* The mesh orbs animate forever, every page fades its content in, and every
+   card lifts on hover — all of it decorative. A user who has asked the OS for
+   less motion should get a still page, not a slower one. */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+        scroll-behavior: auto !important;
+    }
+
+    .ambient-mesh .orb {
+        animation: none !important;
+    }
+
+    .content-area > * {
+        animation: none !important;
+        opacity: 1 !important;
+        transform: none !important;
+    }
+
+    .btn:hover,
+    .stat-card:hover,
+    .nav-link:hover {
+        transform: none !important;
+    }
+
+    .nav-link:hover svg {
+        transform: none !important;
+    }
 }
 
 /* ── Responsive Rules ──────────────────────────────────────── */

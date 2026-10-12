@@ -60,11 +60,11 @@ const Subscribers = {
                             aria-label="Search subscribers by email or name"
                             value="${App.escapeHtml(this.query)}" onkeydown="if(event.key==='Enter')Subscribers.search()">
                     </div>
-                    <select id="subListFilter" style="width:auto;min-width:180px" onchange="Subscribers.filterList(this.value)">
+                    <select id="subListFilter" aria-label="Filter leads by list" style="width:auto;min-width:180px" onchange="Subscribers.filterList(this.value)">
                         <option value="0" ${!this.listFilter ? 'selected' : ''}>All Lists</option>
                         ${listOptions}
                     </select>
-                    <select id="subStatusFilter" style="width:auto" onchange="Subscribers.filterStatus(this.value)">
+                    <select id="subStatusFilter" aria-label="Filter leads by status" style="width:auto" onchange="Subscribers.filterStatus(this.value)">
                         <option value="" ${!this.statusFilter ? 'selected' : ''}>All Statuses</option>
                         <option value="enabled" ${this.statusFilter === 'enabled' ? 'selected' : ''}>Enabled</option>
                         <option value="blocklisted" ${this.statusFilter === 'blocklisted' ? 'selected' : ''}>Blocklisted</option>

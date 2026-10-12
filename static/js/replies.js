@@ -109,7 +109,7 @@ const Replies = {
                             <span>Select page</span>
                         </label>
 
-                        <select class="form-control filter-select" id="sentimentFilter" onchange="Replies.filterSentiment(this.value)">
+                        <select class="form-control filter-select" id="sentimentFilter" aria-label="Filter replies by sentiment" onchange="Replies.filterSentiment(this.value)">
                             <option value="" ${!this.sentiment ? 'selected' : ''}>All Sentiments</option>
                             <option value="positive" ${this.sentiment === 'positive' ? 'selected' : ''}>Positive / Interested</option>
                             <option value="question" ${this.sentiment === 'question' ? 'selected' : ''}>Question</option>
@@ -117,7 +117,7 @@ const Replies = {
                             <option value="negative" ${this.sentiment === 'negative' ? 'selected' : ''}>Not Interested</option>
                         </select>
 
-                        <select class="form-control filter-select" id="statusFilter" onchange="Replies.filterStatus(this.value)">
+                        <select class="form-control filter-select" id="statusFilter" aria-label="Filter replies by status" onchange="Replies.filterStatus(this.value)">
                             <option value="" ${!this.status ? 'selected' : ''}>All Statuses</option>
                             <option value="unread" ${this.status === 'unread' ? 'selected' : ''}>Unread</option>
                             <option value="lead" ${this.status === 'lead' ? 'selected' : ''}>Marked Lead</option>
@@ -208,7 +208,7 @@ const Replies = {
                             <span class="badge-dot ${sent.dotClass}"></span>${sent.label}
                         </span>
                         <div class="status-select-wrap">
-                            <select class="form-control form-control-sm" onchange="Replies.updateStatus('${r.id}', this.value)">
+                            <select class="form-control form-control-sm" aria-label="Set status for ${App.escapeHtml(r.from_email || 'this reply')}" onchange="Replies.updateStatus('${r.id}', this.value)">
                                 <option value="unread" ${r.status === 'unread' ? 'selected' : ''}>Unread</option>
                                 <option value="lead" ${r.status === 'lead' ? 'selected' : ''}>Hot Lead</option>
                                 <option value="replied" ${r.status === 'replied' ? 'selected' : ''}>Replied</option>
