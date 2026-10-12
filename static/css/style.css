@@ -1463,6 +1463,80 @@ tbody tr.row-selected td:first-child {
     width: 100%;
 }
 
+/* ── Analytics: drill-down controls & link table ───────────── */
+
+/* The drill-down used an inline `grid-template-columns: 2fr 1fr 1fr auto`,
+   a fixed four-track grid that cannot collapse — it pushed 118px of
+   horizontal scroll onto the page at 420px wide. */
+.an-filter-grid {
+    display: grid;
+    grid-template-columns: minmax(200px, 2fr) minmax(130px, 1fr) minmax(130px, 1fr) auto;
+    gap: 16px;
+    align-items: end;
+}
+
+.an-filter-grid .form-group {
+    margin-bottom: 0;
+}
+
+.an-filter-action {
+    display: flex;
+}
+
+.an-filter-action .btn {
+    min-width: 116px;
+}
+
+.an-empty {
+    padding: 12px 0;
+    color: var(--text-muted);
+}
+
+.an-rank {
+    width: 1%;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.an-url-cell {
+    max-width: 500px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    word-break: break-all;
+}
+
+/* --accent (the raw indigo CTA fill) only reaches 3.0:1 as link text on the
+   dark card; --primary-soft is the token the rest of the app uses there. */
+.an-link {
+    color: var(--primary-soft);
+    text-decoration: none;
+}
+
+.an-link:hover {
+    text-decoration: underline;
+}
+
+[data-theme="light"] .an-link {
+    color: var(--primary-deep);
+}
+
+@media (max-width: 1150px) {
+    .an-filter-grid {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    }
+    .an-filter-grid > .form-group:first-child {
+        grid-column: 1 / -1;
+    }
+    .an-filter-action .btn {
+        width: 100%;
+    }
+}
+
+@media (max-width: 640px) {
+    .an-filter-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
 /* ── Form Grid & Actions ───────────────────────────────────── */
 .form-grid {
     display: grid;

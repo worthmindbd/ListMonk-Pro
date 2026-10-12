@@ -155,22 +155,22 @@ const Analytics = {
                 <div class="card-header">
                     <h3 class="card-title">Campaign Analytics</h3>
                 </div>
-                <div class="form-grid" style="grid-template-columns: 2fr 1fr 1fr auto;">
+                <div class="an-filter-grid">
                     <div class="form-group">
-                        <label>Campaign</label>
+                        <label for="analyticsCampaign">Campaign</label>
                         <select id="analyticsCampaign" onchange="Analytics.onCampaignChange(this.value)">
                             ${campOptions || '<option>No campaigns</option>'}
                         </select>
                     </div>
                     <div class="form-group">
-                        <label>From</label>
+                        <label for="analyticsFrom">From</label>
                         <input type="date" id="analyticsFrom" value="${this.fromDate}" onchange="Analytics.onDateChange()">
                     </div>
                     <div class="form-group">
-                        <label>To</label>
+                        <label for="analyticsTo">To</label>
                         <input type="date" id="analyticsTo" value="${this.toDate}" onchange="Analytics.onDateChange()">
                     </div>
-                    <div class="form-group" style="display:flex;align-items:flex-end">
+                    <div class="form-group an-filter-action">
                         <button class="btn btn-primary" onclick="Analytics.loadCampaignAnalytics()">Load</button>
                     </div>
                 </div>
@@ -583,18 +583,20 @@ const Analytics = {
         if (!el) return;
 
         if (!data.length) {
-            el.innerHTML = '<p style="color:var(--text-muted);padding:12px">No link data available</p>';
+            el.innerHTML = '<p class="an-empty">No link data available</p>';
             return;
         }
 
         let html = '<div class="table-wrapper"><table><thead><tr><th>#</th><th>URL</th><th>Clicks</th></tr></thead><tbody>';
         data.forEach((d, i) => {
             const safeUrl = App.escapeHtml(d.url);
+            // --primary-soft, not --accent: the raw indigo is a CTA fill and
+            // only reaches 3.0:1 as text on the dark card.
             const isSafeUrl = d.url && /^https?:\/\//i.test(d.url);
             html += `<tr>
-                <td>${i + 1}</td>
-                <td style="max-width:500px;overflow:hidden;text-overflow:ellipsis;word-break:break-all">
-                    ${isSafeUrl ? `<a href="${safeUrl}" target="_blank" rel="noopener" style="color:var(--accent)">${safeUrl}</a>` : `<span>${safeUrl}</span>`}
+                <td class="an-rank">${i + 1}</td>
+                <td class="an-url-cell">
+                    ${isSafeUrl ? `<a href="${safeUrl}" target="_blank" rel="noopener" class="an-link">${safeUrl}</a>` : `<span>${safeUrl}</span>`}
                 </td>
                 <td><strong>${App.formatNumber(d.count || 0)}</strong></td>
             </tr>`;
