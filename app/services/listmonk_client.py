@@ -251,8 +251,46 @@ class ListMonkClient:
     async def preview_campaign(self, campaign_id: int) -> httpx.Response:
         return await self._request_raw("GET", f"/api/campaigns/{campaign_id}/preview")
 
-    async def test_campaign(self, campaign_id: int, data: dict) -> dict:
-        return await self._request("POST", f"/api/campaigns/{campaign_id}/test", json=data)
+    async def test_campaign(self, campaign_id: int, emails: list[str]) -> dict:
+        """Send a test copy of a campaign to the given e-mail addresses.
+
+        ListMonk binds the test request to a full campaign struct and runs its
+        usual campaign validation (name/subject length, list IDs, messenger)
+        before resolving the ``subscribers`` recipients as existing ListMonk
+        subscribers, so the stored campaign fields are posted back alongside
+        the recipients — the same request ListMonk's own admin UI sends.
+        ``send_at`` is deliberately omitted: a scheduled date in the past
+        would otherwise fail validation even though it is irrelevant to the
+        test render.
+        """
+        camp = (await self.get_campaign(campaign_id)).get("data") or {}
+
+        def _ids(items: Any) -> list[int]:
+            # GET returns lists/media as objects; the test endpoint expects
+            # bare int IDs back.
+            return [int(i["id"] if isinstance(i, dict) else i) for i in items or []]
+
+        payload: dict[str, Any] = {
+            "id": campaign_id,
+            "name": camp.get("name") or "",
+            "subject": camp.get("subject") or "",
+            "lists": _ids(camp.get("lists")),
+            "from_email": camp.get("from_email") or "",
+            "messenger": camp.get("messenger") or "email",
+            "type": camp.get("type") or "regular",
+            "tags": camp.get("tags") or [],
+            "template_id": camp.get("template_id") or 0,
+            "content_type": camp.get("content_type") or "richtext",
+            "body": camp.get("body") or "",
+            "altbody": camp.get("altbody"),
+            "headers": camp.get("headers") or [],
+            "media": _ids(camp.get("media")),
+            "subscribers": emails,
+        }
+        if camp.get("body_source"):
+            payload["body_source"] = camp["body_source"]
+
+        return await self._request("POST", f"/api/campaigns/{campaign_id}/test", json=payload)
 
     async def get_running_stats(self, campaign_id: Optional[int] = None) -> dict:
         params = {}

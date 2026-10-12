@@ -485,9 +485,9 @@ const Campaigns = {
     showTestSend(id) {
         const camp = this._rows.find(c => c.id === id) || {};
         App.showResult(`Test Send: ${App.escapeHtml(camp.name || '#' + id)}`, `
-            <p style="color:var(--text-secondary)">ListMonk renders the campaign with sample data and delivers it to the address below.</p>
+            <p style="color:var(--text-secondary)">ListMonk renders the campaign with sample data and delivers it to the address below. The address must already exist as a subscriber in ListMonk.</p>
             <div class="form-group" style="margin-top:12px">
-                <label>Recipient email</label>
+                <label>Recipient email (existing subscriber)</label>
                 <input type="email" id="testSendEmail" placeholder="you@example.com">
             </div>
             <div class="form-actions">

@@ -318,7 +318,18 @@ async def delete_campaigns(ids: list[int] = Query(...)):
 
 @router.post("/{campaign_id}/test")
 async def test_campaign(campaign_id: int, data: dict):
-    return await listmonk.test_campaign(campaign_id, data)
+    """Send a test copy of the campaign to the given address.
+
+    ListMonk resolves test recipients as existing subscribers by e-mail, so
+    an address that is not a subscriber is rejected upstream.
+    """
+    emails = data.get("emails") or data.get("subscribers") or data.get("subscriber_emails") or []
+    if isinstance(emails, str):
+        emails = [emails]
+    emails = [e.strip().lower() for e in emails if isinstance(e, str) and e.strip()]
+    if not emails:
+        raise HTTPException(status_code=400, detail="Enter at least one recipient e-mail address.")
+    return await listmonk.test_campaign(campaign_id, emails)
 
 
 @router.put("/{campaign_id}")
