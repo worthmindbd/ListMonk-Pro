@@ -2767,85 +2767,14 @@ td .tag {
     border-color: #f43f5e;
 }
 
-/* Deliverability Styles */
-.deliverability-header-card {
-    display: flex;
-    align-items: center;
-    gap: 28px;
-    padding: 28px;
-    border-radius: 16px;
-    flex-wrap: wrap;
-}
+/* ==========================================================================
+   Deliverability Audit
+   A report surface, not a banner: the score reads as an instrument (numeral +
+   one tick per scored check), the audit groups checks under a label rail, and
+   only a failing check is allowed to raise its voice.
+   ========================================================================== */
 
-.deliverability-header-card.optimal {
-    border: 1px solid rgba(16, 185, 129, 0.3);
-    background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), rgba(6, 78, 59, 0.15));
-}
-
-.deliverability-header-card.needs-tuning {
-    border: 1px solid rgba(245, 158, 11, 0.3);
-    background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(120, 53, 15, 0.15));
-}
-
-.deliverability-score-circle {
-    width: 100px;
-    height: 100px;
-    border-radius: 50%;
-    background: rgba(16, 185, 129, 0.18);
-    border: 3px solid #10b981;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    box-shadow: 0 0 20px rgba(16, 185, 129, 0.25);
-}
-
-.deliverability-header-card.needs-tuning .deliverability-score-circle {
-    background: rgba(245, 158, 11, 0.18);
-    border-color: #f59e0b;
-    box-shadow: 0 0 20px rgba(245, 158, 11, 0.25);
-}
-
-.score-number {
-    font-size: 2rem;
-    font-weight: 800;
-    color: #10b981;
-    font-family: Outfit, sans-serif;
-    line-height: 1;
-}
-
-.deliverability-header-card.needs-tuning .score-number {
-    color: #f59e0b;
-}
-
-.score-label {
-    font-size: 0.62rem;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--text-muted);
-    margin-top: 4px;
-    text-align: center;
-}
-
-.deliverability-banner-info {
-    flex: 1;
-    min-width: 260px;
-}
-
-.deliverability-banner-info h2 {
-    margin: 0;
-    font-size: 1.35rem;
-    font-weight: 700;
-}
-
-.preset-action-bar {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-}
-
+/* Status timing strips on the Dashboard overview card. */
 .deliverability-status-strip.status-optimal {
     border-left: 4px solid #10b981;
 }
@@ -2854,13 +2783,609 @@ td .tag {
     border-left: 4px solid #f59e0b;
 }
 
-@media (max-width: 768px) {
-    .mode-choice-grid {
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* ── Summary ───────────────────────────────────────────────── */
+.deliv-summary {
+    display: grid;
+    grid-template-columns: minmax(250px, 330px) minmax(0, 1fr);
+    gap: 34px;
+    padding: 28px;
+    align-items: start;
+}
+
+.deliv-summary-body {
+    border-left: 1px solid var(--glass-border);
+    padding-left: 34px;
+    min-width: 0;
+}
+
+.deliv-eyebrow {
+    font-size: 0.67rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.deliv-score-line {
+    display: flex;
+    align-items: baseline;
+    gap: 9px;
+    margin-top: 6px;
+}
+
+.deliv-score-value {
+    font-family: var(--font-display);
+    font-size: 3.1rem;
+    font-weight: 600;
+    line-height: 1;
+    letter-spacing: -0.045em;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
+}
+
+.deliv-score-max {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+/* One tick per scored check: the meter is the score's evidence, so a 100 with
+   nine ticks cannot be faked by a rounded percentage. */
+.deliv-meter {
+    display: flex;
+    gap: 3px;
+    height: 6px;
+    margin-top: 16px;
+}
+
+.deliv-tick {
+    flex: 1;
+    border-radius: 2px;
+    background: var(--text-muted);
+    opacity: 0.35;
+}
+
+.deliv-tick.is-pass {
+    background: #34d399;
+    opacity: 0.85;
+}
+
+.deliv-tick.is-warn {
+    background: #fbbf24;
+    opacity: 1;
+}
+
+.deliv-tick.is-fail {
+    background: #ff5c8a;
+    opacity: 1;
+}
+
+.deliv-score-caption {
+    margin-top: 12px;
+    font-size: 0.79rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+}
+
+.deliv-score-caption strong {
+    color: var(--text-secondary);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.deliv-score-note {
+    display: block;
+    margin-top: 2px;
+    font-size: 0.74rem;
+    opacity: 0.85;
+}
+
+.deliv-profile-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 11px 4px 9px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--glass-border);
+    background: var(--bg-surface-hover);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    color: var(--text-secondary);
+}
+
+.deliv-profile-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    flex-shrink: 0;
+}
+
+.deliv-profile-pill.matched .deliv-profile-dot {
+    background: #34d399;
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
+}
+
+.deliv-profile-pill.unmatched {
+    border-color: rgba(245, 158, 11, 0.3);
+    background: var(--warning-bg);
+    color: #fbbf24;
+}
+
+.deliv-profile-pill.unmatched .deliv-profile-dot {
+    background: #fbbf24;
+    box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.16);
+}
+
+.deliv-verdict {
+    margin: 14px 0 0;
+    font-size: 1.22rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.3;
+    color: var(--text-primary);
+}
+
+.deliv-verdict-note {
+    margin-top: 8px;
+    max-width: 62ch;
+    font-size: 0.85rem;
+    line-height: 1.6;
+    color: var(--text-secondary);
+}
+
+.deliv-verdict-list {
+    margin-top: 8px;
+    font-size: 0.79rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+}
+
+.deliv-preset-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 20px;
+}
+
+/* ── Audit listing ─────────────────────────────────────────── */
+.deliv-audit {
+    margin-top: 24px;
+}
+
+.deliv-audit-head {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 14px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--glass-border);
+}
+
+.deliv-sub {
+    margin-top: 4px;
+    font-size: 0.79rem;
+    color: var(--text-muted);
+}
+
+.deliv-tally {
+    display: inline-flex;
+    align-items: center;
+    gap: 14px;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}
+
+.deliv-tally b {
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
+}
+
+.deliv-tally b.is-pass {
+    color: #34d399;
+}
+
+.deliv-tally b.is-attention {
+    color: #fbbf24;
+}
+
+.deliv-group {
+    display: grid;
+    grid-template-columns: 190px minmax(0, 1fr);
+    gap: 30px;
+    padding: 20px 0;
+}
+
+.deliv-group + .deliv-group {
+    border-top: 1px solid var(--glass-border);
+}
+
+.deliv-group-count {
+    display: inline-block;
+    margin-top: 9px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+}
+
+.deliv-group-count.has-attention {
+    color: #fbbf24;
+}
+
+.deliv-group-label {
+    font-size: 0.83rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--text-primary);
+}
+
+.deliv-group-blurb {
+    margin-top: 6px;
+    font-size: 0.75rem;
+    line-height: 1.55;
+    color: var(--text-muted);
+}
+
+.deliv-checks {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.deliv-check {
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr) auto;
+    gap: 14px;
+    padding: 13px 0;
+    align-items: start;
+}
+
+.deliv-check + .deliv-check {
+    border-top: 1px solid var(--glass-border);
+}
+
+/* Passing checks stay grey: nine green ticks in a column is decoration, not
+   information. Colour is spent on the rows that need a decision. */
+.deliv-check-mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    margin-top: 1px;
+    color: var(--text-muted);
+    opacity: 0.7;
+}
+
+.deliv-check-mark svg {
+    width: 15px;
+    height: 15px;
+}
+
+.deliv-check.is-warn .deliv-check-mark {
+    color: #fbbf24;
+    opacity: 1;
+}
+
+.deliv-check.is-fail .deliv-check-mark {
+    color: #ff5c8a;
+    opacity: 1;
+}
+
+.deliv-check-main {
+    min-width: 0;
+}
+
+.deliv-check-name {
+    font-size: 0.87rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
+}
+
+.deliv-check-desc {
+    margin-top: 4px;
+    max-width: 68ch;
+    font-size: 0.78rem;
+    line-height: 1.55;
+    color: var(--text-muted);
+}
+
+.deliv-check-value {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+    /* No `min-width: 0` here on purpose: the value column is an `auto` track,
+       and zeroing its minimum let the chips overflow their column (and print
+       over the description) on a narrowed content area. Leaving the intrinsic
+       minimum means the name/description column wraps first instead. */
+    max-width: 300px;
+}
+
+.deliv-chips {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.deliv-chip {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.71rem;
+    padding: 3px 9px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--glass-border);
+    background: var(--bg-surface-hover);
+    color: var(--text-secondary);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+.deliv-chip.is-wide {
+    max-width: 230px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.deliv-chip.is-bad {
+    background: var(--danger-bg);
+    border-color: rgba(234, 34, 97, 0.32);
+    color: #ff5c8a;
+}
+
+.deliv-chip.is-warn {
+    background: var(--warning-bg);
+    border-color: rgba(245, 158, 11, 0.32);
+    color: #fbbf24;
+}
+
+.deliv-chip.is-target {
+    background: var(--success-bg);
+    border-color: rgba(16, 185, 129, 0.32);
+    color: #34d399;
+}
+
+.deliv-arrow {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+.deliv-check-sev {
+    font-size: 0.64rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.deliv-legend {
+    padding-top: 16px;
+    border-top: 1px solid var(--glass-border);
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.deliv-error-notice {
+    margin-bottom: 20px;
+}
+
+.deliv-error-detail {
+    margin-top: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.76rem;
+    color: var(--text-muted);
+    word-break: break-word;
+}
+
+/* ── Field notes ───────────────────────────────────────────── */
+.deliv-notes {
+    margin-top: 24px;
+}
+
+.deliv-notes-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    margin-top: 6px;
+}
+
+.deliv-note {
+    padding: 18px 26px;
+    border-left: 1px solid var(--glass-border);
+}
+
+.deliv-note:first-child {
+    padding-left: 0;
+    border-left: 0;
+}
+
+.deliv-note:last-child {
+    padding-right: 0;
+}
+
+.deliv-note-index {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.1em;
+    color: var(--text-muted);
+}
+
+.deliv-note h4 {
+    margin: 10px 0 7px;
+    font-size: 0.92rem;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    line-height: 1.35;
+    color: var(--text-primary);
+}
+
+.deliv-note p {
+    font-size: 0.8rem;
+    line-height: 1.62;
+    color: var(--text-muted);
+}
+
+/* ── Loading skeleton (matches the loaded layout, so nothing jumps) ── */
+.deliv-skel {
+    display: block;
+    border-radius: 6px;
+    background: var(--bg-surface-hover);
+}
+
+.deliv-skel-eyebrow { width: 118px; height: 10px; }
+.deliv-skel-score { width: 146px; height: 46px; margin-top: 14px; border-radius: 10px; }
+.deliv-skel-meter { width: 100%; height: 6px; margin-top: 18px; }
+.deliv-skel-heading { width: 46%; height: 17px; }
+.deliv-skel-copy { width: 100%; height: 11px; margin-top: 14px; }
+.deliv-skel-copy.short { width: 68%; }
+
+.deliv-skel-row {
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr) 118px;
+    gap: 14px;
+    padding: 14px 0;
+    align-items: center;
+}
+
+.deliv-skel-row + .deliv-skel-row {
+    border-top: 1px solid var(--glass-border);
+}
+
+.deliv-skel-mark { width: 15px; height: 15px; border-radius: 50%; }
+.deliv-skel-line { height: 12px; }
+.deliv-skel-chip { height: 22px; border-radius: var(--radius-pill); }
+
+@media (prefers-reduced-motion: no-preference) {
+    .deliv-skel {
+        background-image: linear-gradient(90deg, transparent, var(--glass-highlight), transparent);
+        background-size: 200% 100%;
+        background-repeat: no-repeat;
+        animation: delivSkelShimmer 1.6s ease-in-out infinite;
+    }
+
+    @keyframes delivSkelShimmer {
+        0% { background-position: 150% 0; }
+        100% { background-position: -150% 0; }
+    }
+}
+
+/* ── Light theme ───────────────────────────────────────────── */
+/* Light tokens need darker accents than the dark theme: the tints below are
+   pale fills, so #d97706 / #059669 / #dc2626 only reached 2.9–4.0:1 there.
+   These values clear WCAG AA (4.5:1) for 11–12px chip text. */
+[data-theme="light"] .deliv-tick.is-pass { background: #047857; }
+[data-theme="light"] .deliv-tick.is-warn { background: #d97706; }
+[data-theme="light"] .deliv-tick.is-fail { background: #dc2626; }
+[data-theme="light"] .deliv-profile-pill.matched .deliv-profile-dot { background: #047857; }
+[data-theme="light"] .deliv-profile-pill.unmatched { color: #a35a00; }
+[data-theme="light"] .deliv-profile-pill.unmatched .deliv-profile-dot { background: #a35a00; }
+[data-theme="light"] .deliv-tally b.is-pass { color: #047857; }
+[data-theme="light"] .deliv-tally b.is-attention { color: #a35a00; }
+[data-theme="light"] .deliv-group-count.has-attention { color: #a35a00; }
+[data-theme="light"] .deliv-check.is-warn .deliv-check-mark { color: #a35a00; }
+[data-theme="light"] .deliv-check.is-fail .deliv-check-mark { color: #b3123a; }
+[data-theme="light"] .deliv-chip.is-bad { color: #b3123a; }
+[data-theme="light"] .deliv-chip.is-warn { color: #a35a00; }
+[data-theme="light"] .deliv-chip.is-target { color: #047857; }
+
+/* ── Responsive ────────────────────────────────────────────── */
+/* 1150px, not 900px: the sidebar takes 260px, so a 1150px viewport only leaves
+   ~830px of content — not enough for the rail + three columns + value chips.
+   Collapsing here keeps the full desktop layout on a real desktop. */
+@media (max-width: 1150px) {
+    .deliv-summary {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 26px;
+    }
+    .deliv-summary-body {
+        border-left: 0;
+        padding-left: 0;
+        padding-top: 26px;
+        border-top: 1px solid var(--glass-border);
+    }
+    .deliv-group {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 14px;
+    }
+    .deliv-group-rail {
+        display: flex;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: 4px 12px;
+    }
+    .deliv-group-blurb {
+        flex-basis: 100%;
+        margin-top: 0;
+    }
+    .deliv-group-count {
+        margin-top: 0;
+    }
+    .deliv-check {
+        grid-template-columns: 18px minmax(0, 1fr);
+        row-gap: 10px;
+    }
+    .deliv-check-value {
+        grid-column: 2;
+        align-items: flex-start;
+        max-width: none;
+    }
+    .deliv-chips {
+        justify-content: flex-start;
+    }
+    .deliv-notes-grid {
         grid-template-columns: minmax(0, 1fr);
     }
-    .deliverability-header-card {
-        flex-direction: column;
-        align-items: flex-start;
+    .deliv-note,
+    .deliv-note:first-child,
+    .deliv-note:last-child {
+        padding: 18px 0 0;
+        border-left: 0;
+    }
+    .deliv-note + .deliv-note {
+        margin-top: 18px;
+        border-top: 1px solid var(--glass-border);
+    }
+    .deliv-skel-row {
+        grid-template-columns: 18px minmax(0, 1fr);
+    }
+    .deliv-skel-chip {
+        display: none;
+    }
+}
+
+@media (max-width: 768px) {
+    .deliv-summary {
+        padding: 22px;
+    }
+    .deliv-score-value {
+        font-size: 2.6rem;
+    }
+    .deliv-audit-head .page-actions {
+        margin-left: 0;
+        width: 100%;
+        justify-content: space-between;
+    }
+    .mode-choice-grid {
+        grid-template-columns: minmax(0, 1fr);
     }
 }
 

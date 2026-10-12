@@ -11,6 +11,32 @@ from app.services.listmonk_client import ListMonkClient
 
 logger = logging.getLogger("deliverability_service")
 
+# The audit is a taxonomy, not a flat list: the UI renders one block per group
+# and prints the group's "blurb" as the section explainer. Keeping the labels
+# here means adding a rule below only requires setting its `group` id.
+CHECK_GROUPS = [
+    {
+        "id": "privacy",
+        "label": "Privacy & tracking",
+        "blurb": "What the message itself reveals about how it was sent.",
+    },
+    {
+        "id": "sending",
+        "label": "Sending engine",
+        "blurb": "How fast ListMonk drains a campaign and how hard it hits each provider.",
+    },
+    {
+        "id": "hygiene",
+        "label": "List hygiene",
+        "blurb": "Whether dead addresses leave the queue or get retried forever.",
+    },
+    {
+        "id": "surface",
+        "label": "Exposure & safety",
+        "blurb": "What your instance publishes beyond the inbox.",
+    },
+]
+
 
 def _duration_seconds(value) -> float:
     """Convert a ListMonk duration ('2m', '1h30m', 30) into seconds."""
@@ -40,6 +66,8 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
             "overall_status": "error",
             "error": str(e),
             "checks": [],
+            "groups": CHECK_GROUPS,
+            "raw_settings": {},
         }
 
     checks = []
@@ -48,6 +76,7 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
     disable_tracking = raw_settings.get("privacy.disable_tracking")
     checks.append({
         "id": "disable_tracking",
+        "group": "privacy",
         "name": "Tracking Pixel & Redirects Disabled",
         "description": "Zero 1x1 tracking pixels and no link rewrites prevent spam filter detection.",
         "status": "pass" if disable_tracking is True else "fail",
@@ -60,6 +89,7 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
     ind_tracking = raw_settings.get("privacy.individual_tracking")
     checks.append({
         "id": "individual_tracking",
+        "group": "privacy",
         "name": "Individual Tracking Disabled",
         "description": "Ensures no per-subscriber open tokens are appended to message bodies.",
         "status": "pass" if ind_tracking is False else "warn",
@@ -72,6 +102,7 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
     unsub_header = raw_settings.get("privacy.unsubscribe_header")
     checks.append({
         "id": "unsubscribe_header",
+        "group": "privacy",
         "name": "RFC List-Unsubscribe Header Disabled",
         "description": "Email clients (Gmail/Outlook) automatically route messages with this header to Promotions or Spam.",
         "status": "pass" if unsub_header is False else "fail",
@@ -84,6 +115,7 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
     batch_size = raw_settings.get("app.batch_size", 1000)
     checks.append({
         "id": "batch_size",
+        "group": "sending",
         "name": "Sending Batch Size",
         "description": "Batches of <= 100 allow fine-grained pacing and prevent sudden provider rate limiting.",
         "status": "pass" if batch_size <= 100 else ("warn" if batch_size <= 250 else "fail"),
@@ -96,6 +128,7 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
     concurrency = raw_settings.get("app.concurrency", 1)
     checks.append({
         "id": "concurrency",
+        "group": "sending",
         "name": "Worker Concurrency",
         "description": "Concurrency of 1 worker maintains steady, human-like drip sending.",
         "status": "pass" if concurrency == 1 else "warn",
@@ -108,6 +141,7 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
     public_archive = raw_settings.get("app.enable_public_archive")
     checks.append({
         "id": "public_archive",
+        "group": "surface",
         "name": "Public Archives Disabled",
         "description": "Public campaign pages expose outreach copy to scrapers and domain blacklists.",
         "status": "pass" if public_archive is False else "info",
@@ -137,6 +171,7 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
     bounce_ok = bool(bounce_enabled and (active_mailboxes or provider_enabled))
     checks.append({
         "id": "bounce_feedback",
+        "group": "hygiene",
         "name": "Bounce Feedback Loop Configured",
         "description": "ListMonk needs an enabled bounce mailbox or provider webhook before its hard-bounce "
                        "rules can blocklist dead addresses. Hard bounces that are never recorded stay in "
@@ -153,6 +188,7 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
     # 8. Hard-bounce action.
     checks.append({
         "id": "hard_bounce_action",
+        "group": "hygiene",
         "name": "Hard Bounces Blocklist Automatically",
         "description": "Ensures a permanently invalid address is removed after the first hard bounce "
                        "instead of being retried on every campaign.",
@@ -177,6 +213,7 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
         per_day = None
     checks.append({
         "id": "send_cadence",
+        "group": "sending",
         "name": "Sending Cadence",
         "description": "Window rate limits how fast a campaign drains. A very low ceiling keeps sends "
                        "human-like but can leave a large campaign queued for days.",
@@ -196,6 +233,7 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
     wildcard = "*" in extensions
     checks.append({
         "id": "upload_extensions",
+        "group": "surface",
         "name": "Media Upload Types Restricted",
         "description": "A '*' wildcard in the allowed upload extensions lets an .html or .js file be "
                        "published under the upload URL, which the mail templates can then reference.",
@@ -218,6 +256,7 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
         "score": score,
         "overall_status": overall_status,
         "checks": checks,
+        "groups": CHECK_GROUPS,
         "raw_settings": {
             "disable_tracking": disable_tracking,
             "individual_tracking": ind_tracking,
@@ -226,6 +265,11 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
             "concurrency": concurrency,
             "bounce_enabled": bounce_enabled,
             "bounce_active_mailboxes": active_mailboxes,
+            # Totals + the provider flag let the UI render the bounce loop as
+            # discrete facts (mailbox count, webhook presence) rather than
+            # re-parsing the "enabled=…, mailboxes=0/1" string above.
+            "bounce_mailboxes_total": len(mailboxes),
+            "bounce_provider_enabled": bool(provider_enabled),
             "hard_bounce_action": hard_action,
             "send_cadence_per_day": per_day,
             "upload_extensions": extensions,
