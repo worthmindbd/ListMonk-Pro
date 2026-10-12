@@ -9,6 +9,13 @@ const Analytics = {
     fromDate: '',
     toDate: '',
     campaignUnsubCount: 0,
+    replyStats: null,
+    campaignReplyStats: null,
+    replyByCampaign: {},
+
+    isColdMode() {
+        return App.currentMode === 'cold_email';
+    },
 
     async render() {
         // Set default date range: last 30 days
@@ -20,29 +27,44 @@ const Analytics = {
 
         App.setContent('<div class="loading-spinner">Loading analytics...</div>');
 
-        // Fetch campaigns, unsubscribe stats, and accurate totals in parallel
+        // Fetch campaigns, unsubscribe stats, and accurate totals in parallel.
+        // Cold email mode additionally pulls prospect reply stats (overall
+        // reply rate plus the per-campaign breakdown used by the chart).
         try {
-            const [campRes, unsubRes, summaryRes] = await Promise.allSettled([
+            const requests = [
                 API.get('/api/campaigns?per_page=100&order_by=created_at&order=DESC'),
                 API.get('/api/unsubscribes/stats'),
                 API.get('/api/campaigns/summary'),
-            ]);
+            ];
+            if (this.isColdMode()) requests.push(API.get('/api/replies/stats'));
+
+            const [campRes, unsubRes, summaryRes, replyRes] = await Promise.allSettled(requests);
             this.campaigns = campRes.status === 'fulfilled' ? (campRes.value?.data?.results || []) : [];
             this.unsubStats = unsubRes.status === 'fulfilled' ? unsubRes.value : { total: 0 };
             this.summary = summaryRes.status === 'fulfilled' ? (summaryRes.value || null) : null;
+
+            if (this.isColdMode() && replyRes?.status === 'fulfilled') {
+                this.replyStats = replyRes.value || null;
+                this.replyByCampaign = this.replyStats?.by_campaign || {};
+            } else {
+                this.replyStats = null;
+                this.replyByCampaign = {};
+            }
 
             // Default to first campaign if none selected
             if (!this.selectedCampaignId && this.campaigns.length) {
                 this.selectedCampaignId = this.campaigns[0].id;
             }
 
-            // Fetch per-campaign unsubscribe count
-            await this.loadCampaignUnsubCount();
+            // Fetch per-campaign unsubscribe count and reply stats
+            await this.loadCampaignSideStats();
             this.renderPage();
         } catch (err) {
             console.error('Analytics load error:', err);
             this.campaigns = [];
             this.unsubStats = { total: 0 };
+            this.replyStats = null;
+            this.replyByCampaign = {};
             App.setContent(`<div class="empty-state"><h3>Failed to load analytics</h3><p>${App.escapeHtml(err?.message || '')}</p></div>`);
         }
     },
@@ -73,6 +95,13 @@ const Analytics = {
         const totalBounces = this.summary?.bounces ?? this.campaigns.reduce((sum, c) => sum + (c.bounces || 0), 0);
         const totalUnsubs = this.unsubStats?.total || 0;
 
+        // Cold email only: prospect replies and the overall reply rate.
+        const isCold = this.isColdMode();
+        const totalReplies = this.replyStats?.total_replies || 0;
+        const overallReplyRate = this.replyStats?.reply_rate || 0;
+        const campReplies = this.campaignReplyStats?.total_replies || 0;
+        const campReplyRate = this.campaignReplyStats?.reply_rate || 0;
+
         let html = `
             <!-- Overview Stats -->
             <div class="stats-grid">
@@ -100,6 +129,12 @@ const Analytics = {
                     <div class="stat-value">${App.formatNumber(totalBounces)}</div>
                     <div style="font-size:0.8rem;color:var(--text-muted)">${totalSent ? ((totalBounces/totalSent)*100).toFixed(1) : 0}% bounce rate</div>
                 </div>
+                ${isCold ? `
+                <div class="stat-card success">
+                    <div class="stat-label">Prospect Replies</div>
+                    <div class="stat-value" style="color:var(--emerald)">${App.formatNumber(totalReplies)}</div>
+                    <div style="font-size:0.8rem;color:var(--text-muted)"><strong style="color:var(--emerald)">${overallReplyRate}%</strong> reply rate</div>
+                </div>` : ''}
             </div>
 
             <!-- Campaign Comparison Chart -->
@@ -117,9 +152,6 @@ const Analytics = {
             <div class="card" style="margin-bottom:20px">
                 <div class="card-header">
                     <h3 class="card-title">Campaign Analytics</h3>
-                    <div class="action-btns">
-                        <button class="btn btn-sm btn-primary" onclick="Analytics.exportAllTypes()">Export This Campaign (All Data)</button>
-                    </div>
                 </div>
                 <div class="form-grid" style="grid-template-columns: 2fr 1fr 1fr auto;">
                     <div class="form-group">
@@ -148,6 +180,8 @@ const Analytics = {
                     <div class="stat-card warning"><div class="stat-label">Clicks</div><div class="stat-value">${App.formatNumber(selectedCamp.clicks || 0)}</div></div>
                     <div class="stat-card danger"><div class="stat-label">Bounces</div><div class="stat-value">${App.formatNumber(selectedCamp.bounces || 0)}</div></div>
                     <div class="stat-card" style="border-left-color:#14b8a6"><div class="stat-label">Unsubscribes</div><div class="stat-value" style="color:#14b8a6">${App.formatNumber(this.campaignUnsubCount)}</div></div>
+                    ${isCold ? `
+                    <div class="stat-card success"><div class="stat-label">Replies</div><div class="stat-value" style="color:var(--emerald)">${App.formatNumber(campReplies)}</div><div style="font-size:0.8rem;color:var(--text-muted)"><strong style="color:var(--emerald)">${campReplyRate}%</strong> reply rate</div></div>` : ''}
                 </div>` : ''}
             </div>
 
@@ -156,20 +190,14 @@ const Analytics = {
                 <div class="card">
                     <div class="card-header">
                         <h3 class="card-title">Views Over Time</h3>
-                        <div class="action-btns">
-                            <button class="btn btn-sm" onclick="Analytics.exportSubscribers('views')">Export Who Opened</button>
-                            <button class="btn btn-sm btn-secondary" onclick="Analytics.exportType('views')">Export Chart Data</button>
-                        </div>
+                        <button class="btn btn-sm" onclick="Analytics.exportSubscribers('views')">Export Who Opened</button>
                     </div>
                     <div class="chart-container"><canvas id="viewsChart"></canvas></div>
                 </div>
                 <div class="card">
                     <div class="card-header">
                         <h3 class="card-title">Clicks Over Time</h3>
-                        <div class="action-btns">
-                            <button class="btn btn-sm" onclick="Analytics.exportSubscribers('clicks')">Export Who Clicked</button>
-                            <button class="btn btn-sm btn-secondary" onclick="Analytics.exportType('clicks')">Export Chart Data</button>
-                        </div>
+                        <button class="btn btn-sm" onclick="Analytics.exportSubscribers('clicks')">Export Who Clicked</button>
                     </div>
                     <div class="chart-container"><canvas id="clicksChart"></canvas></div>
                 </div>
@@ -179,17 +207,13 @@ const Analytics = {
                 <div class="card">
                     <div class="card-header">
                         <h3 class="card-title">Bounces Over Time</h3>
-                        <div class="action-btns">
-                            <button class="btn btn-sm" onclick="Analytics.exportSubscribers('bounces')">Export Who Bounced</button>
-                            <button class="btn btn-sm btn-secondary" onclick="Analytics.exportType('bounces')">Export Chart Data</button>
-                        </div>
+                        <button class="btn btn-sm" onclick="Analytics.exportSubscribers('bounces')">Export Who Bounced</button>
                     </div>
                     <div class="chart-container"><canvas id="bouncesChart"></canvas></div>
                 </div>
                 <div class="card">
                     <div class="card-header">
                         <h3 class="card-title">Top Links</h3>
-                        <button class="btn btn-sm" onclick="Analytics.exportType('links')">Export Links CSV</button>
                     </div>
                     <div class="chart-container"><canvas id="linksChart"></canvas></div>
                 </div>
@@ -223,17 +247,29 @@ const Analytics = {
         const sorted = [...this.campaigns].reverse();
         const labels = sorted.map(c => c.name?.substring(0, 25) || 'Untitled');
 
+        const datasets = [
+            { label: 'Sent', data: sorted.map(c => c.sent || 0), backgroundColor: 'rgba(83, 58, 253, 0.82)', borderRadius: 6 },
+            { label: 'Views', data: sorted.map(c => c.views || 0), backgroundColor: 'rgba(16, 185, 129, 0.82)', borderRadius: 6 },
+            { label: 'Clicks', data: sorted.map(c => c.clicks || 0), backgroundColor: 'rgba(245, 158, 11, 0.82)', borderRadius: 6 },
+            { label: 'Bounces', data: sorted.map(c => c.bounces || 0), backgroundColor: 'rgba(234, 34, 97, 0.82)', borderRadius: 6 },
+        ];
+
+        // Cold email mode compares prospect replies per campaign as well.
+        if (this.isColdMode()) {
+            datasets.push({
+                label: 'Replies',
+                data: sorted.map(c => this.replyByCampaign?.[String(c.id)] || 0),
+                backgroundColor: 'rgba(20, 184, 166, 0.82)',
+                borderRadius: 6,
+            });
+        }
+
         if (this.charts.comparison) this.charts.comparison.destroy();
         this.charts.comparison = new Chart(ctx, {
             type: 'bar',
             data: {
                 labels,
-                datasets: [
-                    { label: 'Sent', data: sorted.map(c => c.sent || 0), backgroundColor: 'rgba(83, 58, 253, 0.82)', borderRadius: 6 },
-                    { label: 'Views', data: sorted.map(c => c.views || 0), backgroundColor: 'rgba(16, 185, 129, 0.82)', borderRadius: 6 },
-                    { label: 'Clicks', data: sorted.map(c => c.clicks || 0), backgroundColor: 'rgba(245, 158, 11, 0.82)', borderRadius: 6 },
-                    { label: 'Bounces', data: sorted.map(c => c.bounces || 0), backgroundColor: 'rgba(234, 34, 97, 0.82)', borderRadius: 6 },
-                ],
+                datasets,
             },
             options: {
                 responsive: true,
@@ -276,21 +312,29 @@ const Analytics = {
 
     async onCampaignChange(val) {
         this.selectedCampaignId = parseInt(val);
-        await this.loadCampaignUnsubCount();
+        await this.loadCampaignSideStats();
         this.renderPage();
     },
 
-    async loadCampaignUnsubCount() {
+    // Per-campaign unsubscribe count plus (cold email only) reply stats, which
+    // the campaign stat cards render alongside sent/views/clicks.
+    async loadCampaignSideStats() {
         if (!this.selectedCampaignId) {
             this.campaignUnsubCount = 0;
+            this.campaignReplyStats = null;
             return;
         }
-        try {
-            const res = await API.get(`/api/unsubscribes/stats?campaign_id=${this.selectedCampaignId}`);
-            this.campaignUnsubCount = res.campaign_count || 0;
-        } catch {
-            this.campaignUnsubCount = 0;
+
+        const requests = [
+            API.get(`/api/unsubscribes/stats?campaign_id=${this.selectedCampaignId}`),
+        ];
+        if (this.isColdMode()) {
+            requests.push(API.get(`/api/replies/stats?campaign_id=${this.selectedCampaignId}`));
         }
+
+        const [unsubRes, replyRes] = await Promise.allSettled(requests);
+        this.campaignUnsubCount = unsubRes.status === 'fulfilled' ? (unsubRes.value?.campaign_count || 0) : 0;
+        this.campaignReplyStats = replyRes?.status === 'fulfilled' ? (replyRes.value || null) : null;
     },
 
     onDateChange() {
@@ -503,27 +547,6 @@ const Analytics = {
 
     // ── Export Functions ──────────────────────────────────
 
-    // Export chart data (aggregate counts by date)
-    async exportType(type) {
-        const from = document.getElementById('analyticsFrom')?.value || this.fromDate;
-        const to = document.getElementById('analyticsTo')?.value || this.toDate;
-        const campId = this.selectedCampaignId;
-
-        if (!campId) { App.toast('Select a campaign first', 'error'); return; }
-
-        try {
-            const result = await API.get(`/api/campaigns/analytics/${type}/export?campaign_id=${campId}&from_date=${from}&to_date=${to}`);
-            if (result.blob) {
-                const campName = this.campaigns.find(c => c.id === campId)?.name || 'campaign';
-                const safeName = campName.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 30);
-                API.downloadBlob(result.blob, `${safeName}_${type}_chart.csv`);
-                App.toast(`${type} chart data exported`, 'success');
-            }
-        } catch {
-            // API.request already surfaced the server message.
-        }
-    },
-
     // Export subscriber list (who opened / who clicked / who bounced)
     async exportSubscribers(type) {
         const campId = this.selectedCampaignId;
@@ -545,44 +568,7 @@ const Analytics = {
         }
     },
 
-    // Export all subscriber lists for the selected campaign
-    async exportAllTypes() {
-        const campId = this.selectedCampaignId;
-        if (!campId) { App.toast('Select a campaign first', 'error'); return; }
-
-        const campName = this.campaigns.find(c => c.id === campId)?.name || 'campaign';
-        const safeName = campName.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 30);
-        App.toast(`Exporting all data for "${campName}"... this may take a moment`, 'info');
-
-        const types = ['views', 'clicks', 'bounces'];
-        let exported = 0;
-
-        for (const type of types) {
-            try {
-                const result = await API.get(`/api/campaigns/${campId}/subscribers/${type}/export`);
-                if (result.blob) {
-                    API.downloadBlob(result.blob, `${safeName}_${type}_subscribers.csv`);
-                    exported++;
-                }
-            } catch {}
-        }
-
-        // Also export unsubscribes for this campaign
-        try {
-            const unsubResult = await API.get(`/api/unsubscribes/campaign/${campId}/export`);
-            if (unsubResult.blob) {
-                API.downloadBlob(unsubResult.blob, `${safeName}_unsubscribes.csv`);
-                exported++;
-            }
-        } catch {}
-
-        if (exported > 0) {
-            App.toast(`Exported ${exported} file(s) including unsubscribes`, 'success');
-        } else {
-            App.toast('No data available to export', 'error');
-        }
-    },
-
+    // Export all campaigns summary (comparison chart data)
     async exportAllCampaigns() {
         try {
             const result = await API.get('/api/campaigns/export-all');

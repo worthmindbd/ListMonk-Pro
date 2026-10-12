@@ -272,7 +272,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/unsubscribes/clear` | DELETE | Clear all unsubscribe log records |
 | | `/api/unsubscribes/reset` | POST | Undo all unsubscribes & restore list memberships |
 | **Replies** | `/api/replies` | GET | Paginated prospect replies with sentiment/status filtering |
-| | `/api/replies/stats` | GET | Aggregate reply counts, reply rate %, and sentiment breakdown |
+| | `/api/replies/stats` | GET | Aggregate reply counts, reply rate %, and sentiment breakdown (optional `campaign_id` scopes counts and rate to one campaign; a `by_campaign` breakdown is always returned for the analytics chart) |
 | | `/api/replies/scan` | POST | Manually trigger IMAP prospect reply scan |
 | | `/api/replies/status` | GET | Check IMAP connection status |
 | | `/api/replies/settings` | GET / PUT | Get / update reply tracker settings (auto-tagging) |

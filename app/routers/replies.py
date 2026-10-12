@@ -51,31 +51,65 @@ async def update_reply_settings(request: Request):
     return load_settings()
 
 
+async def _reply_rate_sent_total(campaign_id: int = 0) -> int:
+    """Sent total used as the reply-rate denominator.
+
+    For the whole account the cached campaign summary is reused, because the
+    newest campaign page alone would make the reply rate look inflated. A
+    single campaign is scoped to its own ``sent`` count.
+    """
+    if campaign_id:
+        try:
+            result = await listmonk.get_campaign(campaign_id)
+            return int((result.get("data") or {}).get("sent") or 0)
+        except Exception as e:
+            logger.warning(f"Could not compute sent total for campaign {campaign_id}: {e}")
+            return 0
+
+    try:
+        from app.routers.campaigns import get_campaigns_summary
+
+        summary = await get_campaigns_summary()
+        return int(summary.get("sent", 0) or 0)
+    except Exception as e:
+        logger.warning(f"Could not compute total sent for reply rate: {e}")
+        return 0
+
+
 @router.get("/stats")
-async def get_reply_stats():
-    """Return aggregated statistics on replies and sentiments."""
-    records = load_log()
+async def get_reply_stats(campaign_id: int = Query(0, description="Optional campaign ID filter")):
+    """Return aggregated statistics on replies and sentiments.
+
+    With ``campaign_id`` the counts and the reply rate are scoped to that
+    campaign, so the Analytics page can show per-campaign reply performance
+    without re-deriving the denominator in the browser.
+    """
+    all_records = load_log()
+    records = all_records
+    if campaign_id:
+        records = [r for r in all_records
+                   if str(r.get("campaign_id")) == str(campaign_id)]
+
     total = len(records)
     positive = sum(1 for r in records if r.get("sentiment") == "positive")
     question = sum(1 for r in records if r.get("sentiment") == "question")
     auto_reply = sum(1 for r in records if r.get("sentiment") == "auto_reply")
     negative = sum(1 for r in records if r.get("sentiment") == "negative")
 
-    # Total sent must cover *all* campaigns, not just the newest page, or the
-    # reply rate is inflated. The campaign summary endpoint caches the full
-    # walk for a minute, so reuse it instead of re-paginating here.
-    total_sent = 0
-    try:
-        from app.routers.campaigns import get_campaigns_summary
+    # Reply counts per campaign (always from the full log, even for a scoped
+    # call) power the Analytics campaign comparison chart.
+    by_campaign: dict[str, int] = {}
+    for r in all_records:
+        cid = r.get("campaign_id")
+        if cid:
+            key = str(cid)
+            by_campaign[key] = by_campaign.get(key, 0) + 1
 
-        summary = await get_campaigns_summary()
-        total_sent = summary.get("sent", 0) or 0
-    except Exception as e:
-        logger.warning(f"Could not compute total sent for reply rate: {e}")
-
+    total_sent = await _reply_rate_sent_total(campaign_id)
     reply_rate = round((total / total_sent * 100), 2) if total_sent > 0 else 0.0
 
     return {
+        "campaign_id": campaign_id,
         "total_replies": total,
         "positive": positive,
         "question": question,
@@ -84,6 +118,7 @@ async def get_reply_stats():
         "total_sent": total_sent,
         "reply_rate": reply_rate,
         "positive_rate": round((positive / total_sent * 100), 2) if total_sent > 0 else 0.0,
+        "by_campaign": by_campaign,
     }
 
 

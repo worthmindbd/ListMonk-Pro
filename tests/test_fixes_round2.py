@@ -554,6 +554,57 @@ def test_reply_stats_use_full_sent_total(client, tmp_path, monkeypatch):
     assert data["reply_rate"] == 0.5
 
 
+# ── 13b. Reply stats can be scoped to a single campaign ─────────────────────
+
+def test_reply_stats_scoped_to_campaign(client, tmp_path, monkeypatch):
+    """The Analytics page asks for one campaign's reply rate, so the endpoint
+    must filter the counts and use that campaign's sent total as denominator
+    while still returning the full per-campaign breakdown for the chart."""
+    _reply_log(tmp_path, monkeypatch, [
+        {"id": "rep_1", "sentiment": "positive", "campaign_id": 7},
+        # Tracker records have used both ints and strings for campaign_id.
+        {"id": "rep_2", "sentiment": "question", "campaign_id": "7"},
+        {"id": "rep_3", "sentiment": "positive", "campaign_id": 9},
+    ])
+
+    with patch(
+        "app.routers.replies.listmonk.get_campaign",
+        new=AsyncMock(return_value={"data": {"id": 7, "sent": 200}}),
+    ) as get_campaign:
+        resp = client.get("/api/replies/stats?campaign_id=7")
+
+    data = resp.json()
+    assert data["campaign_id"] == 7
+    assert data["total_replies"] == 2
+    assert data["positive"] == 1
+    assert data["question"] == 1
+    assert data["negative"] == 0
+    assert data["total_sent"] == 200
+    assert data["reply_rate"] == 1.0
+    # The breakdown always covers every campaign, not just the scoped one.
+    assert data["by_campaign"] == {"7": 2, "9": 1}
+    get_campaign.assert_awaited_once_with(7)
+
+
+def test_reply_stats_survive_campaign_lookup_failure(client, tmp_path, monkeypatch):
+    """A ListMonk hiccup must not 500 the stats endpoint; the rate degrades to 0."""
+    _reply_log(tmp_path, monkeypatch, [
+        {"id": "rep_1", "sentiment": "positive", "campaign_id": 7},
+    ])
+
+    with patch(
+        "app.routers.replies.listmonk.get_campaign",
+        new=AsyncMock(side_effect=RuntimeError("listmonk down")),
+    ):
+        resp = client.get("/api/replies/stats?campaign_id=7")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_replies"] == 1
+    assert data["total_sent"] == 0
+    assert data["reply_rate"] == 0.0
+
+
 # ── 14. Auto-unblock runs concurrently and preserves list memberships ────────
 
 @pytest.mark.asyncio
