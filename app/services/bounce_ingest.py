@@ -15,8 +15,11 @@ import asyncio
 import email
 import email.policy
 import email.utils
+import hashlib
 import imaplib
+import json
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -30,6 +33,97 @@ logger = logging.getLogger("bounce_ingest")
 from app.services.imap_helpers import (
     safe_email_for_query, imap_date, extract_email_body, render_container_text,
 )
+
+
+# ─── Processed-message state ─────────────────────────────────────────────────
+#
+# The bounce mailbox is an ordinary mailbox that a human also reads, so IMAP
+# \Seen alone cannot mean "already ingested": opening a DSN in webmail would
+# hide it from every future scan. A persisted ID set makes ingestion
+# idempotent regardless of read state (mirrors reply_processed.json and
+# unsubscribe_processed.json).
+PROCESSED_FILE = settings.data_path("bounce_processed.json")
+MAX_PROCESSED_IDS = 5000
+
+# DSN "Action:" values (RFC 3464) that are not bounces at all. A delay notice
+# means the message is still in flight, so recording a bounce for it would be
+# wrong — the eventual failure arrives as its own DSN with its own Message-ID.
+_NON_BOUNCE_ACTIONS = ("delayed",)
+
+
+def _message_state_id(msg: email.message.EmailMessage) -> str:
+    """Stable identifier for a DSN, preferring the Message-ID header."""
+    message_id = (msg.get("Message-ID") or "").strip()
+    if message_id:
+        return message_id
+    fingerprint = "|".join([
+        str(msg.get("From") or ""),
+        str(msg.get("Date") or ""),
+        str(msg.get("Subject") or ""),
+    ])
+    return "fp:" + hashlib.sha256(fingerprint.encode("utf-8", "replace")).hexdigest()[:32]
+
+
+def _dsn_action(body: str) -> str:
+    """Return the RFC 3464 ``Action:`` value of a DSN body, if present."""
+    match = re.search(r"^\s*Action:\s*(.+)$", body, re.IGNORECASE | re.MULTILINE)
+    return match.group(1).strip().lower() if match else ""
+
+
+def load_processed_ids() -> list[str]:
+    """Return persisted handled-DSN identifiers, oldest first."""
+    try:
+        data = json.loads(PROCESSED_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return [str(x) for x in data if x]
+    except (FileNotFoundError, json.JSONDecodeError, IsADirectoryError, PermissionError):
+        pass
+    return []
+
+
+def save_processed_ids(ids: list[str]) -> None:
+    """Persist handled-DSN identifiers atomically, capped to the newest N."""
+    trimmed = ids[-MAX_PROCESSED_IDS:] if len(ids) > MAX_PROCESSED_IDS else ids
+    try:
+        PROCESSED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = PROCESSED_FILE.with_name(PROCESSED_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(trimmed), encoding="utf-8")
+        os.replace(tmp, PROCESSED_FILE)
+    except OSError as e:
+        logger.warning(f"Could not persist processed bounce ids: {e}")
+
+
+def mark_processed_ids(ids: list[str]) -> None:
+    """Add identifiers to the processed set in one read + one write."""
+    fresh = [str(i) for i in ids if i]
+    if not fresh:
+        return
+    current = load_processed_ids()
+    known = set(current)
+    added = [i for i in fresh if i not in known]
+    if not added:
+        return
+    current.extend(added)
+    save_processed_ids(current)
+
+
+def _fetch_state_id(conn: imaplib.IMAP4_SSL, msg_id: bytes) -> str:
+    """Fetch only the Message-ID header so processed DSNs need no full download."""
+    try:
+        status, data = conn.fetch(msg_id, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+    except Exception as e:
+        logger.warning(f"header fetch failed for {msg_id!r}: {e}")
+        return ""
+    if status != "OK" or not data:
+        return ""
+    raw = b""
+    for part in data:
+        if isinstance(part, tuple) and len(part) > 1 and isinstance(part[1], (bytes, bytearray)):
+            raw = bytes(part[1])
+            break
+    if not raw:
+        return ""
+    return _message_state_id(email.message_from_bytes(raw, policy=email.policy.default))
 
 
 # ─── Classification ──────────────────────────────────────────────────────────
@@ -159,12 +253,24 @@ def _extract_bounced_recipient(msg: email.message.EmailMessage, body: str) -> Op
                         if match:
                             return match.group(0).lower()
 
+    own_addr = (settings.bounce_imap_user or "").lower()
+
+    # Some relays emit the DSN as a plain text/plain message with the RFC 3464
+    # fields inline instead of a message/delivery-status part. Those bodies
+    # still carry "Final-Recipient: rfc822; user@domain", which the generic
+    # patterns below cannot reach (the line has no angle brackets and the
+    # address is not the first token after the colon).
+    for line in body.splitlines():
+        if line.lower().startswith(("final-recipient:", "original-recipient:")):
+            match = re.search(r"[\w.+-]+@[\w.-]+\.\w+", line)
+            if match and match.group(0).lower() != own_addr:
+                return match.group(0).lower()
+
     patterns = [
         re.compile(r"delivery\s+to\s+<?(\S+@\S+\.\w+)>?", re.IGNORECASE),
         re.compile(r"recipient[:\s]+<?(\S+@\S+\.\w+)>?", re.IGNORECASE),
         re.compile(r"<(\S+@\S+\.\w+)>", re.IGNORECASE),
     ]
-    own_addr = (settings.bounce_imap_user or "").lower()
     for pat in patterns:
         for m in pat.finditer(body):
             addr = m.group(1).lower().rstrip(">")
@@ -202,7 +308,7 @@ def _extract_campaign_hint(msg: email.message.EmailMessage) -> Optional[str]:
 
 # ─── Core ingestion ──────────────────────────────────────────────────────────
 
-# Only unseen DSNs from the last BOUNCE_SCAN_DAYS days are scanned, so campaign
+# DSNs from the last BOUNCE_SCAN_DAYS days are scanned, so campaign
 # attribution must be able to cover the same window. A single page of the 50
 # newest campaigns silently dropped bounces for anything older.
 BOUNCE_SCAN_DAYS = 30
@@ -281,9 +387,12 @@ _INGEST_LOCK = asyncio.Lock()
 
 async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
     """
-    Scan the bounce mailbox for UNSEEN bounces, classify each, and create a
-    matching bounce record in ListMonk. Messages are marked \\Seen after
-    processing so subsequent scans don't re-ingest them.
+    Scan the bounce mailbox for DSNs in the scan window, classify each, and
+    create a matching bounce record in ListMonk.
+
+    Idempotency comes from the persisted processed-ID set (not IMAP \\Seen), so
+    a DSN that a human already opened in webmail is still ingested exactly
+    once. Messages are also marked \\Seen so the shared mailbox stays tidy.
 
     Campaign attribution order:
       1. ListMonk campaign headers inside the attached original message
@@ -329,19 +438,43 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
         try:
             await asyncio.to_thread(conn.select, "INBOX", readonly=False)
             since = imap_date(scan_since)
+            processed_ids = load_processed_ids()
+            processed_set = set(processed_ids)
+            handled_ids: list[str] = []
+
             status, msg_ids = await asyncio.to_thread(
-                conn.search, None, f"(UNSEEN SINCE {since})"
+                conn.search, None, f"(SINCE {since})"
             )
             if status != "OK" or not msg_ids or not msg_ids[0]:
                 return {"scanned": 0, "ingested": 0, "skipped": 0, "errors": 0,
-                        "message": "No unseen bounce emails"}
+                        "message": f"No bounce emails since {since}"}
 
-            ids = msg_ids[0].split()
-            scanned = len(ids)
-            logger.info(f"[BounceIngest] scanning {scanned} unseen bounce emails")
+            candidates = [m for m in msg_ids[0].split() if m]
+            logger.info(
+                f"[BounceIngest] {len(candidates)} DSN(s) in the last "
+                f"{BOUNCE_SCAN_DAYS} days ({len(processed_set)} already processed)"
+            )
 
-            for msg_id in ids:
+            async def _finish(msg_id: bytes, state_id: str) -> None:
+                """Record a terminal outcome so this DSN is never re-processed."""
+                if state_id:
+                    handled_ids.append(state_id)
+                    processed_set.add(state_id)
                 try:
+                    await asyncio.to_thread(conn.store, msg_id, "+FLAGS", "\\Seen")
+                except Exception as e:
+                    logger.warning(f"Could not mark {msg_id!r} as seen: {e}")
+
+            for msg_id in candidates:
+                try:
+                    # Cheap header fetch first: a DSN that a human already
+                    # opened (so it is no longer UNSEEN) must still be ingested
+                    # exactly once, and one already handled must not be
+                    # re-downloaded.
+                    state_id = await asyncio.to_thread(_fetch_state_id, conn, msg_id)
+                    if state_id and state_id in processed_set:
+                        continue
+
                     status, data = await asyncio.to_thread(conn.fetch, msg_id, "(RFC822)")
                     if status != "OK" or not data or not data[0]:
                         errors += 1
@@ -351,6 +484,18 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
                     msg = email.message_from_bytes(raw, policy=email.policy.default)
                     subject = msg.get("Subject", "")
                     body = _extract_body(msg)
+                    scanned += 1
+
+                    # Delay notices (Action: delayed) are not bounces: the
+                    # message is still in flight, and a later failure arrives
+                    # as its own DSN.
+                    dsn_action = _dsn_action(body)
+                    if dsn_action in _NON_BOUNCE_ACTIONS:
+                        skipped += 1
+                        reason_key = f"not_a_bounce:{dsn_action}"
+                        skipped_reasons[reason_key] = skipped_reasons.get(reason_key, 0) + 1
+                        await _finish(msg_id, state_id)
+                        continue
 
                     # Parse bounce date from the email Date header
                     bounce_date = None
@@ -369,14 +514,14 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
                     if not recipient:
                         skipped += 1
                         skipped_reasons["no_recipient"] = skipped_reasons.get("no_recipient", 0) + 1
-                        await asyncio.to_thread(conn.store, msg_id, "+FLAGS", "\\Seen")
+                        await _finish(msg_id, state_id)
                         continue
 
                     # Look up subscriber
                     safe_email = safe_email_for_query(recipient)
                     if not safe_email:
                         logger.warning(f"Invalid recipient format, skipping: {recipient}")
-                        await asyncio.to_thread(conn.store, msg_id, "+FLAGS", "\\Seen")
+                        await _finish(msg_id, state_id)
                         continue
                     try:
                         sub_res = await client.get_subscribers(
@@ -391,7 +536,7 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
                     if not subs:
                         skipped += 1
                         skipped_reasons["no_subscriber"] = skipped_reasons.get("no_subscriber", 0) + 1
-                        await asyncio.to_thread(conn.store, msg_id, "+FLAGS", "\\Seen")
+                        await _finish(msg_id, state_id)
                         continue
 
                     subscriber = subs[0]
@@ -407,7 +552,7 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
                     if not campaign:
                         skipped += 1
                         skipped_reasons["no_campaign"] = skipped_reasons.get("no_campaign", 0) + 1
-                        await asyncio.to_thread(conn.store, msg_id, "+FLAGS", "\\Seen")
+                        await _finish(msg_id, state_id)
                         continue
 
                     if await subscriber_opened_campaign(
@@ -421,7 +566,7 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
                             f"[BounceIngest] skip {recipient}: opened campaign "
                             f"{campaign.get('id')}"
                         )
-                        await asyncio.to_thread(conn.store, msg_id, "+FLAGS", "\\Seen")
+                        await _finish(msg_id, state_id)
                         continue
 
                     classification = classify_bounce(body, subject)
@@ -445,7 +590,7 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
                             hard_count += 1
                         else:
                             soft_count += 1
-                        await asyncio.to_thread(conn.store, msg_id, "+FLAGS", "\\Seen")
+                        await _finish(msg_id, state_id)
                     except Exception as e:
                         logger.error(f"create_bounce failed for {recipient}: {e}")
                         errors += 1
@@ -454,6 +599,11 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
                 except Exception as e:
                     logger.error(f"error processing message {msg_id}: {e}")
                     errors += 1
+
+            # Persist every terminal outcome in one write (the reply scanner
+            # does the same) so the next scan skips them without downloading.
+            if handled_ids:
+                await asyncio.to_thread(mark_processed_ids, handled_ids)
 
         finally:
             try:

@@ -28,7 +28,7 @@ ListMonk-Pro/
 │       ├── __init__.py
 │       ├── auto_unblock.py        # Auto-unblock engaged contacts (clickers/openers) from blocklist
 │       ├── bounce_filters.py      # Smart bounce filtering (excludes campaign openers as false positives)
-│       ├── bounce_ingest.py       # RFC 3463 bounce DSN classifier & IMAP bounce mailbox scanner
+│       ├── bounce_ingest.py       # RFC 3463 DSN classifier, IMAP scanner & processed-ID state
 │       ├── bounce_list.py         # Paginated bounce listing with opener exclusion & cache integration
 │       ├── campaign_scheduler.py  # Timezone-aware send window scheduler (auto-pause/auto-resume)
 │       ├── csv_converter.py       # Converts arbitrary CSV to ListMonk schema (JSON attributes)
@@ -50,8 +50,8 @@ ListMonk-Pro/
 │   ├── js/
 │   │   ├── analytics.js           # Campaign analytics charts, date filtering, link tracking
 │   │   ├── api.js                 # Centralized fetch wrapper with 401 redirect & error handling
-│   │   ├── app.js                 # SPA router, mode switcher, onboarding modal & shared UI
-│   │   ├── campaigns.js           # Campaign management, status transitions, test email sending
+│   │   ├── app.js                 # SPA router, mode switcher (incl. nav-group collapsing), onboarding modal & shared UI
+│   │   ├── campaigns.js           # Campaign management (incl. plain-text alt body), status transitions, test sends
 │   │   ├── charts.js              # Mode-aware dashboard overview charts & stat summary cards
 │   │   ├── converter.js           # CSV converter UI, column mapping, live preview & import modal
 │   │   ├── deliverability.js      # Deliverability pre-flight audit checklist & 1-click presets
@@ -63,7 +63,7 @@ ListMonk-Pro/
 │   ├── favicon.png
 │   └── favicon.svg
 ├── templates/
-│   ├── index.html                 # Main authenticated SPA shell with mode switcher & onboarding
+│   ├── index.html                 # Main authenticated SPA shell: categorized sidebar nav (5 groups), mode switcher & onboarding
 │   └── login.html                 # Login page with dark theme
 ├── tests/
 │   ├── __init__.py
@@ -71,6 +71,7 @@ ListMonk-Pro/
 │   ├── test_bounce_classify.py    # RFC 3463 bounce classifier unit tests
 │   ├── test_bounce_filters.py     # Opener exclusion & false positive filter tests
 │   ├── test_link_unsubscribe.py   # Link unsubscribe scanner & dedup tests
+│   ├── test_bounce_ingest.py      # Bounce DSN idempotency, delay filtering & recipient parsing
 │   ├── test_bounce_list.py        # Bounce pagination + type filtering
 │   ├── test_campaign_scheduler.py # Send-window logic
 │   ├── test_csv_converter.py      # Encoding/delimiter/column detection
@@ -102,7 +103,7 @@ ListMonk-Pro/
 
 - **Backend**: Python 3.12+, FastAPI 0.141+, Uvicorn, httpx (async HTTP), Jinja2, Python-dotenv
 - **Frontend**: Vanilla JavaScript (ES6+), Chart.js (vendored in `static/js/vendor/`), Modern Dark CSS (no build step)
-- **State & Storage**: Writable JSON state files in `DATA_DIR` (`schedule.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`), in-memory caches (`opener_cache`, `hard_bounce_cache`)
+- **State & Storage**: Writable JSON state files in `DATA_DIR` (`schedule.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`, `bounce_processed.json`), in-memory caches (`opener_cache`, `hard_bounce_cache`)
 - **Testing**: Pytest 9.1+, pytest-asyncio, AnyIO
 - **Deployment**: Docker, Docker Compose, Nginx, Certbot
 
@@ -133,11 +134,25 @@ ListMonk-Pro/
 
 ### 3. Bounce Ingestion & Smart Filtering
 - **Bounce Ingestion** (`app/services/bounce_ingest.py`):
-  - Connects to bounce IMAP mailbox (`BOUNCE_IMAP_*`), reads unseen DSN messages.
+  - Connects to bounce IMAP mailbox (`BOUNCE_IMAP_*`) and scans **all DSNs in the last
+    `BOUNCE_SCAN_DAYS` (30) days** — not just unseen ones. The mailbox is shared with a
+    human, so `\Seen` cannot mean "already ingested": a DSN opened in webmail would
+    otherwise be invisible forever.
+  - Idempotency comes from `bounce_processed.json` in `DATA_DIR` (a capped list of
+    Message-IDs, with a `From|Date|Subject` fingerprint fallback). Only the Message-ID
+    header is fetched to test that set, so already-handled DSNs cost no body download.
+    A failed `create_bounce` is deliberately **not** recorded, so the next scan retries.
   - Classifies into **hard** vs **soft** bounces using RFC 3463 enhanced status codes (e.g. `5.1.1`, `5.1.2`, `5.2.1`) and failure patterns.
+  - Skips `Action: delayed` notices entirely — the message is still in flight and a real
+    failure arrives as its own DSN.
   - Attributes bounces to campaigns via message headers (`X-Listmonk-Campaign`, `List-ID`) or list membership and dates.
+  - Reads the recipient from a `message/delivery-status` part **or** from inline
+    `Final-Recipient:` lines, so relays that send bare-text DSNs are handled too.
   - Skips recipients who opened the campaign (cannot be genuine hard bounces).
   - Creates matching bounce records in ListMonk via API.
+  - ListMonk's own bounce processing (`bounce.mailboxes`, provider webhooks) is separate:
+    the `Bounce Feedback Loop Configured` audit check reports whether *ListMonk* can
+    blocklist hard bounces by itself.
 - **Opener Cache** (`app/services/opener_cache.py`):
   - In-memory cache of subscribers who opened a campaign (`campaign_views`), with a 10-minute TTL and in-flight request deduplication.
 - **Hard Bounce Cache** (`app/services/hard_bounce_cache.py`):
@@ -172,17 +187,23 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | `auto_unblock_loop` | 6 hours | Finds blocklisted clickers/openers, re-enables them, deletes false bounce records |
 | `scheduler_loop` | 60 seconds | Enforces daily send windows, auto-pauses/resumes campaigns |
 | `imap_scan_loop` | 1 hour | Scans IMAP inbox for replies + polls ListMonk for link unsubscribes |
-| `bounce_ingest_loop` | 1 hour | Scans bounce mailbox for unseen DSNs, classifies & records bounces |
+| `bounce_ingest_loop` | 1 hour | Scans the bounce mailbox for new DSNs in the 30-day window, classifies & records bounces; skips delay notices and anything already in `bounce_processed.json` |
 | `reply_scan_loop` | 15 minutes | Scans IMAP for cold-outreach prospect replies, strips quotes, classifies sentiment |
 | `start_cache_updater` | 5 minutes | Refreshes in-memory hard bounce counts per campaign |
 
 ### 6. CSV Converter (`app/services/csv_converter.py`)
 - Detects column headers and sample data from uploaded CSVs.
+- Suggests the email/name columns (`detect_columns` → `suggested`): header names first
+  (`Email Address`, `Full Name`, `E-MAIL`, …), then the sample values themselves (the
+  column that actually holds addresses wins over an unrecognised header).
+- Reports rows whose field count differs from the header (`ragged_rows` + `warnings`) so a
+  shifted row is visible in the preview instead of silently importing wrong values.
 - Maps custom columns to ListMonk's required structure: `email`, `name`, `attributes` (serialized as JSON).
 - Supports direct import into ListMonk with list selection and subscription mode (`subscribe`, `unsubscribed`).
 
 ### 7. Persistent Runtime State (`DATA_DIR`)
-- `app/config.py` provides `settings.data_path(filename)` to store mutable JSON state files (`schedule.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`, `reply_log.json`, `reply_processed.json`, `reply_settings.json`).
+- `app/config.py` provides `settings.data_path(filename)` to store mutable JSON state files (`schedule.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`, `reply_log.json`, `reply_processed.json`, `reply_settings.json`, `bounce_processed.json`).
+- `bounce_processed.json` is a capped list of handled DSN Message-IDs (newest first) that makes bounce ingestion idempotent independently of IMAP `\Seen`.
 - In Docker, `DATA_DIR` defaults to `/data` (backed by a named volume).
 - Automatically migrates legacy root JSON files into `DATA_DIR` on first run.
 
@@ -254,8 +275,13 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/replies/{id}/status` | PUT | Update reply status (unread, lead, replied, archived) |
 | | `/api/replies/{id}/blocklist` | POST | Blocklist the ListMonk subscriber behind a reply (resolved server-side) |
 | | `/api/replies/{id}` | DELETE | Delete / dismiss single reply record |
-| **Deliverability** | `/api/deliverability/checklist` | GET | Audit Listmonk settings against deliverability rules |
-| | `/api/deliverability/apply-preset` | POST | 1-click apply 'cold_email' or 'newsletter' preset |
+| **Deliverability** | `/api/deliverability/checklist` | GET | Audit Listmonk settings against deliverability rules (10 checks: tracking, individual tracking, unsubscribe header, batch size, concurrency, public archive, bounce feedback loop, hard-bounce action, send cadence, upload allow-list) |
+| | `/api/deliverability/apply-preset` | POST | 1-click apply 'cold_email' or 'newsletter' preset (merged onto current settings via `apply_settings`) |
+
+**Scoring rule:** only `pass`/`warn`/`fail` checks count toward the score; `info` checks
+(e.g. sending cadence, public archive) are reported for context and never drag the score
+down. The audit deliberately covers settings the app does **not** manage (ListMonk bounce
+mailboxes, media upload types) so a "100%" rating cannot hide an unconfigured bounce loop.
 
 ---
 
@@ -287,3 +313,5 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 9. **Persistent Storage** — respect `DATA_DIR` for mounted volumes and file storage (`session_secret.key`, `reply_log.json`, etc.).
 10. **Frontend error contract** — `API.request` toasts server errors once and marks the rejection `err.handled = true`. Callers must not toast again; wrap mutating handlers in `try/catch` or the promise rejection is unhandled.
 11. **Module-level caches** — any service cache in a module global needs an invalidation hook and must be reset by `tests/conftest.py`, or tests leak state into each other.
+12. **ListMonk settings are all-or-nothing** — `PUT /api/settings` validates the whole payload (a partial body fails with *"At least one SMTP block should be enabled"*), and the GET response returns every secret masked with `•`. Never PUT a partial dict and never echo a mask back: use `listmonk.apply_settings(patch)`, which merges onto the current settings and blanks masked secrets so ListMonk keeps the stored value (matched by SMTP/bounce UUID).
+13. **Never treat IMAP `\Seen` as "already processed"** — the scanners work on mailboxes a human reads. Bounce ingestion persists handled DSN Message-IDs to `bounce_processed.json`; the unsubscribe and reply scanners do the same. New scanners must follow that pattern (or keep an equivalent state file).

@@ -6,6 +6,40 @@ from app.config import settings
 
 logger = logging.getLogger("listmonk_client")
 
+# ListMonk masks every stored secret (SMTP password, provider keys, S3 secret,
+# OIDC client secret ...) with this character when returning settings. The API
+# re-uses the stored secret when a password comes back blank, so a mask must
+# never be sent back verbatim or it replaces the real value.
+SETTINGS_MASK_CHAR = "\u2022"
+
+
+def _blank_if_masked(value: Any) -> Any:
+    if isinstance(value, str) and value and set(value) == {SETTINGS_MASK_CHAR}:
+        return ""
+    return value
+
+
+def sanitize_settings_for_update(raw: dict) -> dict:
+    """Make GET-ed settings safe to PUT back.
+
+    Replaces masked secrets with empty strings (kept as-is by ListMonk) while
+    leaving every other value — including the SMTP/bounce/messenger UUIDs used
+    to match blocks — untouched.
+    """
+    clean: dict = {}
+    for key, value in (raw or {}).items():
+        if isinstance(value, list):
+            clean[key] = [
+                {k: _blank_if_masked(v) for k, v in item.items()}
+                if isinstance(item, dict) else item
+                for item in value
+            ]
+        elif isinstance(value, dict):
+            clean[key] = {k: _blank_if_masked(v) for k, v in value.items()}
+        else:
+            clean[key] = _blank_if_masked(value)
+    return clean
+
 
 class ListMonkClient:
     """Async client wrapping all ListMonk API calls with Basic Auth."""
@@ -331,7 +365,28 @@ class ListMonkClient:
         return await self._request("GET", "/api/settings")
 
     async def update_settings(self, data: dict) -> dict:
+        """Raw PUT of a settings payload.
+
+        ListMonk validates the payload as a whole (it rejects an empty SMTP
+        block list), so callers that change a few keys must go through
+        :meth:`apply_settings` instead of sending a partial dict.
+        """
         return await self._request("PUT", "/api/settings", json=data)
+
+    async def apply_settings(self, patch: dict) -> dict:
+        """Change a few settings, preserving everything else.
+
+        Reads the current settings, replaces ListMonk's masked secrets with
+        empty strings (the API re-uses the stored value when a password comes
+        back blank — sending the mask back would overwrite the real secret),
+        then PUTs the merged payload.
+        """
+        current = (await self.get_settings()).get("data", {})
+        if not current:
+            raise ValueError("Could not read current Listmonk settings")
+        payload = sanitize_settings_for_update(current)
+        payload.update(patch)
+        return await self._request("PUT", "/api/settings", json=payload)
 
 
 # Singleton instance

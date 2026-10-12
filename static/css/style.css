@@ -73,6 +73,13 @@
        above the 4.5:1 WCAG AA threshold without flattening the hierarchy. */
     --text-muted: #7c8ba1;
 
+    /* Opaque surfaces for the sticky table action column. */
+    --bg-table-sticky: #0f1729;
+    --bg-table-sticky-hover: #1b2740;
+
+    /* Off-state switch track: visible against the card surface. */
+    --toggle-track: rgba(255, 255, 255, 0.16);
+
     /* ── Dimensions & Radii (DESIGN.md) ────────────────────── */
     --sidebar-width: 260px;
     --topbar-height: 68px;
@@ -106,6 +113,11 @@
     --text-primary: #0d253d;
     --text-secondary: #273951;
     --text-muted: #64748d;
+
+    --bg-table-sticky: #ffffff;
+    --bg-table-sticky-hover: #f1f5f9;
+
+    --toggle-track: rgba(13, 37, 61, 0.14);
 
     /* Semantic light overrides with WCAG AAA contrast */
     --accent: var(--primary);
@@ -320,6 +332,25 @@ td strong,
     display: flex;
     flex-direction: column;
     gap: 3px;
+}
+
+/* Category headings: the sidebar groups its pages (Overview, Audience,
+   Outreach, Deliverability, Tools) so 11+ entries stay scannable. Text uses
+   --text-muted without extra opacity so the WCAG AA contrast tuned into that
+   token survives. */
+.nav-section-title {
+    margin: 14px 0 4px 0;
+    padding: 0 14px;
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    user-select: none;
+}
+
+.nav-section-title:first-child {
+    margin-top: 0;
 }
 
 .nav-link {
@@ -807,6 +838,31 @@ th.cell-actions {
 
 td.cell-actions {
     text-align: right;
+}
+
+/* Keep the action column reachable no matter how wide the table gets: at
+   1280px the Edit/Delete buttons sat past the right edge of the card with
+   nothing but a horizontal scrollbar (invisible in some browsers) to find
+   them. Pinning the column keeps every action on screen. */
+th.cell-actions,
+td.cell-actions {
+    position: sticky;
+    right: 0;
+    /* Opaque: rows scroll underneath this cell. */
+    background: var(--bg-table-sticky);
+    box-shadow: -10px 0 14px -12px rgba(0, 0, 0, 0.55);
+}
+
+th.cell-actions {
+    z-index: 3;
+}
+
+td.cell-actions {
+    z-index: 2;
+}
+
+tbody tr:hover td.cell-actions {
+    background: var(--bg-table-sticky-hover);
 }
 
 td.cell-actions .action-btns,
@@ -1401,8 +1457,11 @@ td .action-btns {
 .toggle-slider {
     position: absolute;
     inset: 0;
-    background: var(--bg-input);
-    border: 1px solid var(--glass-border);
+    /* The off state used --bg-input, which is nearly identical to the card
+       surface, so only the knob was visible and the switch read as a bare
+       dot. A dedicated track token keeps on/off legible in both themes. */
+    background: var(--toggle-track);
+    border: 1px solid var(--glass-border-hover);
     border-radius: 22px;
     transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -1788,6 +1847,62 @@ td .action-btns {
     margin-bottom: 6px;
 }
 
+/* ── Inline Notices ────────────────────────────────────────── */
+.field-hint {
+    margin: -4px 0 16px 0;
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+}
+
+.field-hint code {
+    background: var(--bg-input);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-xs);
+    padding: 1px 5px;
+    font-size: 0.85em;
+    color: var(--text-secondary);
+}
+
+.notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+    border: 1px solid var(--glass-border);
+    border-left: 3px solid var(--text-muted);
+    border-radius: var(--radius-md);
+    background: var(--bg-surface-hover);
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    line-height: 1.5;
+}
+
+.notice svg {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+
+.notice-warning {
+    border-left-color: var(--warning);
+    background: var(--warning-bg);
+}
+
+.notice-warning svg {
+    color: var(--warning);
+}
+
+.notice-info {
+    border-left-color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.notice-info svg {
+    color: var(--accent);
+}
+
 .preview-frame {
     width: 100%;
     height: 520px;
@@ -1819,6 +1934,20 @@ td .action-btns {
 @media (max-width: 900px) {
     .charts-grid {
         grid-template-columns: 1fr;
+    }
+}
+
+/* Laptops around 1280-1440px: trim cell padding so the widest tables
+   (Subscribers, Templates) fit without horizontal scrolling at all. */
+@media (max-width: 1440px) {
+    th,
+    td {
+        padding: 12px 12px;
+    }
+
+    th.cell-actions,
+    td.cell-actions {
+        padding-left: 8px;
     }
 }
 

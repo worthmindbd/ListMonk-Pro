@@ -289,7 +289,7 @@ const Dashboard = {
         const theme = this.getThemeColors();
         const recent = (campaigns || this.campaignsData).slice(0, 8).reverse();
         const labels = recent.map(c => c.name?.substring(0, 20) || 'Untitled');
-        const sent = recent.map(c => c.to_send || 0);
+        const sent = recent.map(c => c.sent || 0);
         const views = recent.map(c => c.views || 0);
         const clicks = recent.map(c => c.clicks || 0);
 

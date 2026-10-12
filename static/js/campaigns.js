@@ -54,14 +54,18 @@ const Campaigns = {
 
             campaigns.forEach(c => {
                 const listNames = (c.lists || []).map(l => `<span class="tag">${App.escapeHtml(l.name)}</span>`).join('') || '-';
-                const sent = c.to_send || 0;
+                // "Sent" must be the real dispatched count. ListMonk exposes
+                // `sent` (delivered to the SMTP server) and `to_send` (audience
+                // size); showing `to_send` here reported the whole list as sent.
+                const sent = c.sent || 0;
+                const audience = c.to_send || 0;
                 html += `<tr>
                     <td>${c.id}</td>
                     <td><strong>${App.escapeHtml(c.name)}</strong></td>
-                    <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">${App.escapeHtml(c.subject) || '-'}</td>
+                    <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis"${Campaigns._subjectTooltip(c.subject)}>${App.escapeHtml(c.subject) || '-'}${Campaigns._subjectBadge(c.subject)}</td>
                     <td>${App.statusBadge(c.status)}</td>
                     <td>${listNames}</td>
-                    <td>${App.formatNumber(sent)}</td>
+                    <td title="${audience ? `Audience: ${App.formatNumber(audience)}` : ''}">${App.formatNumber(sent)}</td>
                     <td>${App.formatDate(c.created_at)}</td>
                     <td class="cell-actions">
                         <div class="action-btns">
@@ -97,6 +101,25 @@ const Campaigns = {
 
     goToPage(p) { this.page = p; this.render(); },
 
+    // ── Subject cell helpers ─────────────────────────────
+    // ListMonk stores the subject with Go template placeholders intact, so a
+    // personalised campaign literally shows `{{ .Subscriber.Attribs.x }}`.
+    // Flag that (and expose the raw source) instead of letting it look like a
+    // broken subject line.
+    _isTemplateSubject(subject) {
+        return typeof subject === 'string' && subject.includes('{{');
+    },
+
+    _subjectBadge(subject) {
+        if (!this._isTemplateSubject(subject)) return '';
+        return ' <span class="tag" title="Personalised per recipient when the campaign sends" style="font-size:0.65rem;vertical-align:middle">tpl</span>';
+    },
+
+    _subjectTooltip(subject) {
+        if (!this._isTemplateSubject(subject)) return '';
+        return ` title="Raw subject template: ${App.escapeHtml(subject)}"`;
+    },
+
     async showCreate() {
         // Fetch lists for selection
         let lists = [];
@@ -124,9 +147,20 @@ const Campaigns = {
             <div class="inline-form">
                 <h3 style="margin-bottom:16px">Create Campaign</h3>
                 <div class="form-grid">
-                    <div class="form-group"><label>Name *</label><input type="text" id="campName" placeholder="Campaign name"></div>
-                    <div class="form-group"><label>Subject *</label><input type="text" id="campSubject" placeholder="Email subject line"></div>
+                    <div class="form-group">
+                        <label>Name *</label>
+                        <input type="text" id="campName" placeholder="Campaign name">
+                    </div>
+                    <div class="form-group">
+                        <label>Subject *</label>
+                        <input type="text" id="campSubject" placeholder="Quick question for {{ .Subscriber.Attribs.company_name }}">
+                    </div>
                 </div>
+                <p class="field-hint">Subjects and body can use ListMonk placeholders. For cold outreach the per-lead
+                    copy already stored on the subscriber works well:
+                    <code>{{ .Subscriber.Attribs.email_1_subject }}</code> (subject),
+                    <code>{{ .Subscriber.Attribs.company_name }}</code>,
+                    <code>{{ .Subscriber.Name }}</code>.</p>
                 <div class="form-group">
                     <label>Lists *</label>
                     <div class="checkbox-group">${listOptions || '<span style="color:var(--text-muted)">No lists available</span>'}</div>
@@ -150,6 +184,10 @@ const Campaigns = {
                     <label>Body</label>
                     <textarea id="campBody" rows="10" placeholder="Email body content"></textarea>
                 </div>
+                <div class="form-group">
+                    <label>Plain-text alternative body (recommended)</label>
+                    <textarea id="campAltBody" rows="5" placeholder="Text-only version delivered alongside the HTML. Mail clients and spam filters both weight a matching text part."></textarea>
+                </div>
                 <div class="form-group"><label>Tags (comma-separated)</label><input type="text" id="campTags" placeholder="newsletter, promo"></div>
                 <div class="form-actions">
                     <button class="btn btn-primary" onclick="Campaigns.create()">Create Campaign</button>
@@ -165,6 +203,7 @@ const Campaigns = {
         const templateId = parseInt(document.getElementById('campTemplate').value);
         const contentType = document.getElementById('campContentType').value;
         const body = document.getElementById('campBody').value;
+        const altbody = document.getElementById('campAltBody').value;
         const tags = document.getElementById('campTags').value.split(',').map(t => t.trim()).filter(Boolean);
 
         const selectedLists = Array.from(document.querySelectorAll('input[name="campLists"]:checked'))
@@ -175,7 +214,7 @@ const Campaigns = {
 
         try {
             await API.post('/api/campaigns', {
-                name, subject, body, content_type: contentType,
+                name, subject, body, altbody, content_type: contentType,
                 type: 'regular', lists: selectedLists,
                 template_id: templateId, tags,
             });
@@ -320,6 +359,10 @@ const Campaigns = {
                         <label>Body</label>
                         <textarea id="editCampBody" rows="10">${App.escapeHtml(c.body || '')}</textarea>
                     </div>
+                    <div class="form-group">
+                        <label>Plain-text alternative body</label>
+                        <textarea id="editCampAltBody" rows="5" placeholder="Text-only version delivered alongside the HTML.">${App.escapeHtml(c.altbody || '')}</textarea>
+                    </div>
                     <div class="form-group"><label>Tags</label><input type="text" id="editCampTags" value="${App.escapeHtml((c.tags || []).join(', '))}"></div>
                     <div class="form-actions">
                         <button class="btn btn-primary" onclick="Campaigns.update(${c.id})">Update</button>
@@ -336,12 +379,13 @@ const Campaigns = {
         const name = document.getElementById('editCampName').value.trim();
         const subject = document.getElementById('editCampSubject').value.trim();
         const body = document.getElementById('editCampBody').value;
+        const altbody = document.getElementById('editCampAltBody').value;
         const tags = document.getElementById('editCampTags').value.split(',').map(t => t.trim()).filter(Boolean);
         const lists = Array.from(document.querySelectorAll('input[name="editCampLists"]:checked'))
             .map(cb => parseInt(cb.value));
 
         try {
-            await API.put(`/api/campaigns/${id}`, { name, subject, body, lists, tags });
+            await API.put(`/api/campaigns/${id}`, { name, subject, body, altbody, lists, tags });
             App.toast('Campaign updated', 'success');
             this.showDetail(id);
         } catch {

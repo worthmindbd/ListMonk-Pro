@@ -93,6 +93,19 @@ const App = {
             el.style.display = isCold ? 'none' : '';
         });
 
+        // A category heading only makes sense while it still has visible items
+        // (Newsletter mode has no Replies/Deliverability page, so that group
+        // collapses to a single Bounces entry and keeps its heading).
+        document.querySelectorAll('.nav-section-title').forEach(title => {
+            const group = title.dataset.navGroup;
+            if (!group) return;
+            const siblings = document.querySelectorAll(
+                `.nav-menu li[data-nav-group="${group}"]:not(.nav-section-title)`
+            );
+            const anyVisible = Array.from(siblings).some(li => li.style.display !== 'none');
+            title.style.display = anyVisible ? '' : 'none';
+        });
+
         // Re-render current page
         if (this.currentPage) {
             this.route();

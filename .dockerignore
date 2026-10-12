@@ -10,6 +10,9 @@ __pycache__/
 schedule.json
 session_secret.key
 *.md
+docs/
+*.jpg
+*.png
 unsubscribe_log.json*
 unsubscribe_settings.json
 unsubscribe_processed.json

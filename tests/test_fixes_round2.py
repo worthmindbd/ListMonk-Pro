@@ -456,6 +456,40 @@ def test_reply_tracker_uses_shared_stripper():
     assert extract_clean_reply(body) == "Interested, call me."
 
 
+# ── 11b. Reply display text is tidied (image markers, blank runs) ────────────
+
+def test_clean_reply_drops_image_placeholders_and_blank_runs():
+    from app.services.imap_reply_tracker import extract_clean_reply
+
+    body = (
+        "Who's this?\n\n\n\n"
+        "Kind Regards,\n\n"
+        "[image: image]\n\n"
+        "Tevyn Chubinski   \n"
+    )
+    cleaned = extract_clean_reply(body)
+    assert "[image" not in cleaned
+    assert "\n\n\n" not in cleaned
+    assert cleaned.endswith("Tevyn Chubinski")
+    assert "Who's this?" in cleaned
+
+
+def test_clean_reply_strips_wrapped_on_wrote_tail():
+    from app.services.imap_reply_tracker import extract_clean_reply
+
+    # Shape seen in production: narrow no-break space in the date and the
+    # "wrote:" marker pushed onto the next line.
+    body = (
+        "Who's this?\n\n"
+        "Email Pixelpulsemediamb@gmail.com\n\n"
+        "On Tue, Oct 6, 2026 at 7:49\u202fPM Kawsar Mahmud <kawsar@getaevoramedia.com>\n"
+        "wrote:"
+    )
+    cleaned = extract_clean_reply(body)
+    assert "wrote:" not in cleaned
+    assert cleaned.endswith("Email Pixelpulsemediamb@gmail.com")
+
+
 # ── 12. Blocklisting a reply resolves the email server-side ──────────────────
 
 def _reply_log(tmp_path, monkeypatch, records):

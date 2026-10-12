@@ -66,3 +66,60 @@ def test_convert_csv_missing_email_col():
     res = convert_csv(csv_data, email_column="email")
     assert "error" in res["stats"]
     assert "Email column 'email' not found" in res["stats"]["error"]
+
+
+# ── Column suggestions (email/name auto-detection) ────────────
+def test_suggest_columns_from_headers():
+    csv_data = b"Email Address,Full Name,Company\nmaria@x.io,Maria Lopez,Brightloop\n"
+    res = detect_columns(csv_data)
+    assert res["suggested"] == {"email": "Email Address", "name": "Full Name"}
+
+
+def test_suggest_columns_handles_punctuation_and_case():
+    csv_data = b"E-MAIL,NAME\nbob@y.com,Bob\n"
+    res = detect_columns(csv_data)
+    assert res["suggested"] == {"email": "E-MAIL", "name": "NAME"}
+
+
+def test_suggest_columns_falls_back_to_sample_values():
+    # No recognisable header names: the column holding addresses must win.
+    csv_data = b"contact_person,work_mail,city\nJane,jane@corp.com,Paris\n"
+    res = detect_columns(csv_data)
+    assert res["suggested"]["email"] == "work_mail"
+    assert res["suggested"]["name"] == "contact_person"
+
+
+def test_suggest_columns_never_reuses_email_for_name():
+    csv_data = b"email,notes\nalice@example.com,hello\n"
+    res = detect_columns(csv_data)
+    assert res["suggested"]["email"] == "email"
+    assert res["suggested"]["name"] != "email"
+
+
+def test_suggest_columns_no_email_column():
+    csv_data = b"city,country\nParis,France\n"
+    res = detect_columns(csv_data)
+    assert res["suggested"]["email"] is None
+
+
+# ── Ragged row reporting ──────────────────────────────────────
+def test_detect_columns_reports_ragged_rows():
+    csv_data = b"email,name\nmaria@x.io,Maria\n,bob@y.com,Bob Shifted\n"
+    res = detect_columns(csv_data)
+    assert res["ragged_rows"] == 1
+    assert len(res["warnings"]) == 1
+    assert "different number of fields" in res["warnings"][0]
+
+
+def test_detect_columns_no_warning_when_clean():
+    csv_data = b"email,name\na@x.io,A\nb@y.io,B\n"
+    res = detect_columns(csv_data)
+    assert res["ragged_rows"] == 0
+    assert res["warnings"] == []
+
+
+def test_convert_csv_reports_ragged_rows():
+    csv_data = b"email,name\nalice@example.com,Alice\nbob@example.com,Bob,Surplus\n"
+    res = convert_csv(csv_data, email_column="email", name_column="name")
+    assert res["stats"]["ragged_rows"] == 1
+    assert res["stats"]["converted"] == 2

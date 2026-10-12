@@ -9,7 +9,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <link rel="alternate icon" type="image/png" href="/static/favicon.png">
-    <link rel="stylesheet" href="/static/css/style.css?v=20260820a">
+    <link rel="stylesheet" href="/static/css/style.css?v=20261012d">
     <script src="/static/js/vendor/chart.umd.min.js?v=4.5.1"></script>
 </head>
 <body>
@@ -32,51 +32,56 @@
             </div>
 
             <ul class="nav-menu">
-                <li><a href="#/dashboard" class="nav-link active" data-page="dashboard">
+                <li class="nav-section-title" data-nav-group="overview">Overview</li>
+                <li data-nav-group="overview"><a href="#/dashboard" class="nav-link active" data-page="dashboard">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
                     <span>Dashboard</span>
                 </a></li>
-                <li><a href="#/campaigns" class="nav-link" data-page="campaigns">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
-                    <span>Campaigns</span>
-                </a></li>
-                <li class="nav-item-cold"><a href="#/replies" class="nav-link" data-page="replies">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="9" y1="10" x2="15" y2="10"/><line x1="12" y1="7" x2="12" y2="13"/></svg>
-                    <span>Replies & Leads</span>
-                </a></li>
-                <li class="nav-item-cold"><a href="#/deliverability" class="nav-link" data-page="deliverability">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
-                    <span>Deliverability</span>
-                </a></li>
-                <li><a href="#/subscribers" class="nav-link" data-page="subscribers">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-                    <span>Subscribers</span>
-                </a></li>
-                <li><a href="#/lists" class="nav-link" data-page="lists">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
-                    <span>Lists</span>
-                </a></li>
-                <li><a href="#/analytics" class="nav-link" data-page="analytics">
+                <li data-nav-group="overview"><a href="#/analytics" class="nav-link" data-page="analytics">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
                     <span>Analytics</span>
                 </a></li>
-                <li><a href="#/bounces" class="nav-link" data-page="bounces">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                    <span>Bounces</span>
+                <li class="nav-section-title" data-nav-group="audience">Audience</li>
+                <li data-nav-group="audience"><a href="#/subscribers" class="nav-link" data-page="subscribers">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                    <span>Subscribers</span>
                 </a></li>
-                <li class="nav-item-newsletter"><a href="#/templates" class="nav-link" data-page="templates">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                    <span>Templates</span>
+                <li data-nav-group="audience"><a href="#/lists" class="nav-link" data-page="lists">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                    <span>Lists</span>
                 </a></li>
-                <li><a href="#/unsubscribes" class="nav-link" data-page="unsubscribes">
+                <li data-nav-group="audience"><a href="#/unsubscribes" class="nav-link" data-page="unsubscribes">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="18" y1="8" x2="23" y2="13"/><line x1="23" y1="8" x2="18" y2="13"/></svg>
                     <span>Unsubscribes</span>
                 </a></li>
-                <li><a href="#/converter" class="nav-link" data-page="converter">
+                <li class="nav-section-title" data-nav-group="outreach">Outreach</li>
+                <li data-nav-group="outreach"><a href="#/campaigns" class="nav-link" data-page="campaigns">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                    <span>Campaigns</span>
+                </a></li>
+                <li class="nav-item-cold" data-nav-group="outreach"><a href="#/replies" class="nav-link" data-page="replies">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="9" y1="10" x2="15" y2="10"/><line x1="12" y1="7" x2="12" y2="13"/></svg>
+                    <span>Replies & Leads</span>
+                </a></li>
+                <li class="nav-item-newsletter" data-nav-group="outreach"><a href="#/templates" class="nav-link" data-page="templates">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                    <span>Templates</span>
+                </a></li>
+                <li class="nav-section-title" data-nav-group="deliverability">Deliverability</li>
+                <li class="nav-item-cold" data-nav-group="deliverability"><a href="#/deliverability" class="nav-link" data-page="deliverability">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
+                    <span>Deliverability</span>
+                </a></li>
+                <li data-nav-group="deliverability"><a href="#/bounces" class="nav-link" data-page="bounces">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                    <span>Bounces</span>
+                </a></li>
+                <li class="nav-section-title" data-nav-group="tools">Tools</li>
+                <li data-nav-group="tools"><a href="#/converter" class="nav-link" data-page="converter">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>
                     <span>CSV Converter</span>
                 </a></li>
-                <li><a href="#/settings" class="nav-link" data-page="settings">
+                <li data-nav-group="tools"><a href="#/settings" class="nav-link" data-page="settings">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                     <span>Settings</span>
                 </a></li>
@@ -220,17 +225,17 @@
             });
         })();
     </script>
-    <script src="/static/js/api.js?v=20261011"></script>
-    <script src="/static/js/app.js?v=20261011"></script>
-    <script src="/static/js/charts.js?v=20261011"></script>
-    <script src="/static/js/subscribers.js?v=20261011"></script>
-    <script src="/static/js/campaigns.js?v=20261011"></script>
-    <script src="/static/js/lists.js?v=20261011"></script>
-    <script src="/static/js/analytics.js?v=20261011"></script>
-    <script src="/static/js/settings.js?v=20261011"></script>
-    <script src="/static/js/converter.js?v=20261011"></script>
-    <script src="/static/js/unsubscribes.js?v=20261011"></script>
-    <script src="/static/js/replies.js?v=20261011"></script>
-    <script src="/static/js/deliverability.js?v=20261011"></script>
+    <script src="/static/js/api.js?v=20261012c"></script>
+    <script src="/static/js/app.js?v=20261012c"></script>
+    <script src="/static/js/charts.js?v=20261012c"></script>
+    <script src="/static/js/subscribers.js?v=20261012c"></script>
+    <script src="/static/js/campaigns.js?v=20261012c"></script>
+    <script src="/static/js/lists.js?v=20261012c"></script>
+    <script src="/static/js/analytics.js?v=20261012c"></script>
+    <script src="/static/js/settings.js?v=20261012c"></script>
+    <script src="/static/js/converter.js?v=20261012c"></script>
+    <script src="/static/js/unsubscribes.js?v=20261012c"></script>
+    <script src="/static/js/replies.js?v=20261012c"></script>
+    <script src="/static/js/deliverability.js?v=20261012c"></script>
 </body>
 </html>

@@ -6,6 +6,9 @@ const Converter = {
     fileName: '',
     columns: [],
     sampleRows: [],
+    suggested: {},
+    warnings: [],
+    _mapping: null,
     step: 1,
 
     render() {
@@ -14,6 +17,9 @@ const Converter = {
         this.fileName = '';
         this.columns = [];
         this.sampleRows = [];
+        this.suggested = {};
+        this.warnings = [];
+        this._mapping = null;
         this.renderStep();
     },
 
@@ -61,7 +67,15 @@ const Converter = {
 
     // ── Step 2: Column Mapping ───────────────────────────
     renderMapping() {
-        let colOptions = this.columns.map(c => `<option value="${App.escapeHtml(c)}">${App.escapeHtml(c)}</option>`).join('');
+        const suggested = this.suggested || {};
+        // Pre-select the guessed email/name columns so obvious headers
+        // ("Email Address", "Full Name") need no manual mapping.
+        const colOptions = this.columns.map(c =>
+            `<option value="${App.escapeHtml(c)}"${suggested.email === c ? ' selected' : ''}>${App.escapeHtml(c)}</option>`
+        ).join('');
+        const nameOptions = this.columns.map(c =>
+            `<option value="${App.escapeHtml(c)}"${suggested.name === c ? ' selected' : ''}>${App.escapeHtml(c)}</option>`
+        ).join('');
 
         let attrCheckboxes = this.columns.map(c =>
             `<label class="checkbox-label"><input type="checkbox" name="attrCols" value="${App.escapeHtml(c)}"><span>${App.escapeHtml(c)}</span></label>`
@@ -87,6 +101,7 @@ const Converter = {
                     <h3 class="card-title">Map Columns</h3>
                     <span style="color:var(--text-muted);font-size:0.85rem">${this.fileName} - ${this.columns.length} columns detected</span>
                 </div>
+                ${this.renderWarnings()}
                 <div class="form-grid">
                     <div class="form-group">
                         <label>Email Column * (required)</label>
@@ -94,7 +109,7 @@ const Converter = {
                     </div>
                     <div class="form-group">
                         <label>Name Column (optional)</label>
-                        <select id="nameCol"><option value="">-- None --</option>${colOptions}</select>
+                        <select id="nameCol"><option value="">-- None --</option>${nameOptions}</select>
                     </div>
                 </div>
                 <div class="form-group">
@@ -108,6 +123,16 @@ const Converter = {
                 </div>
             </div>
         `;
+    },
+
+    // ── Warnings ─────────────────────────────────────────
+    renderWarnings() {
+        const warnings = this.warnings || [];
+        if (!warnings.length) return '';
+        return `<div class="notice notice-warning" style="margin-bottom:16px">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            <div>${warnings.map(w => App.escapeHtml(w)).join('<br>')}</div>
+        </div>`;
     },
 
     // ── Step 3: Preview & Actions ────────────────────────
@@ -184,6 +209,8 @@ const Converter = {
             const result = await API.upload('/api/converter/detect-columns', formData);
             this.columns = result.columns || [];
             this.sampleRows = result.sample_rows || [];
+            this.suggested = result.suggested || {};
+            this.warnings = result.warnings || [];
 
             if (!this.columns.length) {
                 App.toast('No columns detected in file', 'error');
@@ -259,6 +286,9 @@ const Converter = {
                 if (result.stats) {
                     const stats = JSON.parse(result.stats);
                     App.toast(`Converted ${stats.converted} rows (${stats.skipped} skipped)`, 'success');
+                    if (stats.ragged_rows) {
+                        App.toast(`${stats.ragged_rows} row(s) had a field-count mismatch - verify the download`, 'info');
+                    }
                 }
             }
         } catch {

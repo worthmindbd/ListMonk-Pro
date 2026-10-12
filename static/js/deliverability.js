@@ -23,6 +23,7 @@ const Deliverability = {
         const score = data.score || 0;
         const checks = data.checks || [];
         const isOptimal = score === 100;
+        const failing = checks.filter(c => c.status === 'fail' || c.status === 'warn');
 
         let html = `
             <!-- Deliverability Score Header Banner -->
@@ -38,8 +39,8 @@ const Deliverability = {
                         : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="22" height="22" style="vertical-align:-3px;margin-right:8px;color:var(--amber)"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Deliverability Recommendations'}</h2>
                     <p style="color:var(--text-secondary);margin:6px 0 16px 0;line-height:1.5;">
                         ${isOptimal 
-                            ? 'Your Listmonk instance is fully optimized for B2B cold email deliverability. Tracking pixels are disabled, RFC unsubscribe headers are omitted, and batch concurrency is safely throttled for primary inbox placement.'
-                            : 'Certain settings may increase spam filter suspicion or route messages to the Promotions tab. Use the 1-click preset button below to apply recommended cold outreach safeguards.'}
+                            ? 'Every audited Listmonk setting matches the B2B cold outreach profile: no tracking pixels, no bulk-unsubscribe header, and safely throttled batching.'
+                            : `These checks need attention before your next send: <strong>${failing.map(c => App.escapeHtml(c.name)).join(', ') || 'see the audit below'}</strong>. The 1-click preset fixes the engine parameters it manages; settings it does not manage (bounce mailbox, media uploads) still show below.`}
                     </p>
 
                     <div class="preset-action-bar">
@@ -85,7 +86,9 @@ const Deliverability = {
                 ? '<span class="badge badge-success">PASS</span>'
                 : (c.status === 'warn'
                     ? '<span class="badge badge-warning">WARN</span>'
-                    : '<span class="badge badge-danger">FAIL</span>');
+                    : (c.status === 'info'
+                        ? '<span class="badge">INFO</span>'
+                        : '<span class="badge badge-danger">FAIL</span>'));
 
             html += `
                 <tr>

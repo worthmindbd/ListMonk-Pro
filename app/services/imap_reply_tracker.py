@@ -75,6 +75,10 @@ _POSITIVE_PATTERNS = [
     re.compile(r"forwarded\s+to\s+our", re.IGNORECASE),
 ]
 
+# Display noise left behind by mail clients inside the plain-text part.
+_IMAGE_PLACEHOLDER_RE = re.compile(r"\[image:\s*[^\]]*\]", re.IGNORECASE)
+_BLANK_RUN_RE = re.compile(r"\n{3,}")
+
 
 def classify_sentiment(subject: str, reply_text: str) -> str:
     """Classify the sentiment of a prospect reply.
@@ -254,8 +258,23 @@ def extract_clean_reply(full_body: str) -> str:
         return ""
     cleaned = _extract_reply_only(full_body)
     if cleaned:
-        return cleaned
-    return full_body[:500].strip()
+        return _tidy_reply_text(cleaned)
+    return _tidy_reply_text(full_body[:500])
+
+
+def _tidy_reply_text(text: str) -> str:
+    """Remove display noise that mail clients leave inside plain-text replies.
+
+    Inline images arrive as ``[image: image]`` markers and clients pad the body
+    with runs of blank lines and trailing spaces, all of which made the reply
+    feed harder to read than the message itself.
+    """
+    if not text:
+        return ""
+    text = _IMAGE_PLACEHOLDER_RE.sub("", text)
+    text = "\n".join(line.rstrip() for line in text.splitlines())
+    text = _BLANK_RUN_RE.sub("\n\n", text)
+    return text.strip()
 
 
 def _connect_imap() -> imaplib.IMAP4:

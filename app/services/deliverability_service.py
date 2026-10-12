@@ -6,9 +6,26 @@ between Newsletter Mode and Cold Email Mode.
 """
 
 import logging
+import re
 from app.services.listmonk_client import ListMonkClient
 
 logger = logging.getLogger("deliverability_service")
+
+
+def _duration_seconds(value) -> float:
+    """Convert a ListMonk duration ('2m', '1h30m', 30) into seconds."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value or "").strip().lower()
+    if not text:
+        return 0.0
+    if text.isdigit():
+        return float(text)
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    total = 0.0
+    for amount, unit in re.findall(r"(\d+(?:\.\d+)?)\s*([smhd])", text):
+        total += float(amount) * units[unit]
+    return total
 
 
 async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
@@ -99,10 +116,101 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
         "impact": "Low",
     })
 
-    # Calculate score
-    total_checks = len(checks)
-    passed = sum(1 for c in checks if c["status"] == "pass")
-    score = int((passed / total_checks) * 100)
+    # 7. Bounce feedback loop. ListMonk can only apply hard-bounce rules
+    # (bounce.actions) when it actually receives bounces; a placeholder mailbox
+    # plus no provider/webhook means bounces are invisible to ListMonk and
+    # invalid addresses keep getting mailed.
+    bounce_enabled = raw_settings.get("bounce.enabled")
+    mailboxes = raw_settings.get("bounce.mailboxes") or []
+    active_mailboxes = sum(1 for m in mailboxes if isinstance(m, dict) and m.get("enabled"))
+    provider_enabled = any([
+        raw_settings.get("bounce.sendgrid_enabled"),
+        raw_settings.get("bounce.ses_enabled"),
+        raw_settings.get("bounce.webhooks_enabled"),
+        (raw_settings.get("bounce.postmark") or {}).get("enabled"),
+        (raw_settings.get("bounce.azure") or {}).get("enabled"),
+        (raw_settings.get("bounce.forwardemail") or {}).get("enabled"),
+        (raw_settings.get("bounce.lettermint") or {}).get("enabled"),
+    ])
+    bounce_actions = raw_settings.get("bounce.actions") or {}
+    hard_action = (bounce_actions.get("hard") or {}).get("action")
+    bounce_ok = bool(bounce_enabled and (active_mailboxes or provider_enabled))
+    checks.append({
+        "id": "bounce_feedback",
+        "name": "Bounce Feedback Loop Configured",
+        "description": "ListMonk needs an enabled bounce mailbox or provider webhook before its hard-bounce "
+                       "rules can blocklist dead addresses. Hard bounces that are never recorded stay in "
+                       "the sending queue on every future campaign.",
+        "status": "pass" if bounce_ok else "fail",
+        "current_value": (
+            f"enabled={bounce_enabled}, mailboxes={active_mailboxes}/{len(mailboxes)}, "
+            f"providers={'yes' if provider_enabled else 'none'}"
+        ),
+        "recommended": "1 enabled mailbox or provider webhook",
+        "impact": "Critical for list hygiene",
+    })
+
+    # 8. Hard-bounce action.
+    checks.append({
+        "id": "hard_bounce_action",
+        "name": "Hard Bounces Blocklist Automatically",
+        "description": "Ensures a permanently invalid address is removed after the first hard bounce "
+                       "instead of being retried on every campaign.",
+        "status": "pass" if hard_action == "blocklist" else "warn",
+        "current_value": hard_action or "unset",
+        "recommended": "blocklist",
+        "impact": "High",
+    })
+
+    # 9. Sending cadence. Not good/bad by itself — surfacing it prevents the
+    # "campaign says finished but most of the list never got the mail" surprise.
+    sliding = raw_settings.get("app.message_sliding_window")
+    window_duration = raw_settings.get("app.message_sliding_window_duration")
+    window_rate = raw_settings.get("app.message_sliding_window_rate")
+    message_rate = raw_settings.get("app.message_rate")
+    per_day = None
+    try:
+        seconds = _duration_seconds(window_duration)
+        if sliding and seconds and window_rate:
+            per_day = int(86400 / seconds * int(window_rate))
+    except (TypeError, ValueError, ZeroDivisionError):
+        per_day = None
+    checks.append({
+        "id": "send_cadence",
+        "name": "Sending Cadence",
+        "description": "Window rate limits how fast a campaign drains. A very low ceiling keeps sends "
+                       "human-like but can leave a large campaign queued for days.",
+        "status": "info",
+        "current_value": (
+            f"window {window_rate}/{window_duration}, batch {raw_settings.get('app.batch_size')}, "
+            f"concurrency {raw_settings.get('app.concurrency')}, "
+            f"rate {message_rate}/s ⇒ ≈{per_day} msgs/day" if per_day else
+            f"fixed rate {message_rate}/s"
+        ),
+        "recommended": "match the cadence to your list size",
+        "impact": "Informational",
+    })
+
+    # 10. Media upload allow-list (the audit page is "Deliverability & Safety").
+    extensions = raw_settings.get("upload.extensions") or []
+    wildcard = "*" in extensions
+    checks.append({
+        "id": "upload_extensions",
+        "name": "Media Upload Types Restricted",
+        "description": "A '*' wildcard in the allowed upload extensions lets an .html or .js file be "
+                       "published under the upload URL, which the mail templates can then reference.",
+        "status": "pass" if not wildcard else "fail",
+        "current_value": ", ".join(extensions) if extensions else "unset",
+        "recommended": "explicit image/document types only",
+        "impact": "Medium",
+    })
+
+    # Calculate score. Informational checks are excluded so they cannot drag the
+    # score down; they exist to surface context (e.g. a deliberate slow drip).
+    scored = [c for c in checks if c["status"] != "info"]
+    total_checks = len(scored)
+    passed = sum(1 for c in scored if c["status"] == "pass")
+    score = int((passed / total_checks) * 100) if total_checks else 0
 
     overall_status = "optimal" if score == 100 else ("good" if score >= 70 else "needs_attention")
 
@@ -116,6 +224,11 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
             "unsubscribe_header": unsub_header,
             "batch_size": batch_size,
             "concurrency": concurrency,
+            "bounce_enabled": bounce_enabled,
+            "bounce_active_mailboxes": active_mailboxes,
+            "hard_bounce_action": hard_action,
+            "send_cadence_per_day": per_day,
+            "upload_extensions": extensions,
         }
     }
 
@@ -147,7 +260,11 @@ async def apply_deliverability_preset(listmonk: ListMonkClient, mode: str) -> di
         raise ValueError(f"Unknown preset mode: {mode}")
 
     try:
-        await listmonk.update_settings(payload)
+        # ListMonk validates the whole settings payload, so a partial PUT is
+        # rejected ("At least one SMTP block should be enabled"). apply_settings
+        # merges the preset onto the current settings and blanks the masked
+        # secrets so they are not overwritten with the mask.
+        await listmonk.apply_settings(payload)
         logger.info(f"Applied {mode} preset settings to Listmonk")
         return {"status": "ok", "mode": mode, "applied": payload}
     except Exception as e:

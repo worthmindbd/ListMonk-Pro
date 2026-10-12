@@ -9,10 +9,23 @@ where attributes is a JSON string of extra fields.
 import csv
 import io
 import json
+import re
 from typing import Optional
 
 
 ENCODINGS = ["utf-8-sig", "utf-8", "latin-1", "cp1252"]
+
+# Header-name hints for guessing which column is which. Compared after
+# stripping every non-alphanumeric character and lowercasing, so
+# "E-Mail Address" and "email_address" both normalise to "emailaddress".
+_EMAIL_HEADER_EXACT = {"email", "emailaddress", "emailid", "mail", "email1", "primaryemail"}
+_NAME_HEADER_EXACT = {"name", "fullname", "contactname", "firstname", "lastname", "contactperson", "contact"}
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$", re.IGNORECASE)
+
+
+def _normalise_header(header: str) -> str:
+    """Lowercase a header and drop everything that is not alphanumeric."""
+    return re.sub(r"[^a-z0-9]", "", header.lower())
 
 
 def _count_csv_rows(text: str, dialect) -> int:
@@ -27,6 +40,75 @@ def _count_csv_rows(text: str, dialect) -> int:
     except Exception:
         # Fallback for malformed content
         return max(0, len(text.splitlines()) - 1)
+
+
+def _count_ragged_rows(text: str, dialect, expected: int) -> int:
+    """Count data rows whose field count differs from the header length.
+
+    Such rows are still converted (a trailing/leading empty field is common and
+    usually harmless), but they can shift values into the wrong column, so the
+    caller surfaces the count as a warning instead of failing silently.
+    """
+    if expected <= 0:
+        return 0
+    bad = 0
+    try:
+        reader = csv.reader(io.StringIO(text), dialect=dialect)
+        next(reader, None)
+        for row in reader:
+            if not row or (len(row) == 1 and not row[0].strip()):
+                continue
+            if len(row) != expected:
+                bad += 1
+    except Exception:
+        return bad
+    return bad
+
+
+def suggest_columns(columns: list[str], sample_rows: list[dict]) -> dict:
+    """Best-effort guess of which CSV columns map to ListMonk's email/name.
+
+    Header names are checked first, then the sample values themselves (a column
+    that actually contains addresses wins over an unrecognised header).
+    Returns ``{"email": col|None, "name": col|None}``.
+    """
+    norm = {c: _normalise_header(c) for c in columns}
+    email = None
+    name = None
+
+    for col, n in norm.items():
+        if n in _EMAIL_HEADER_EXACT:
+            email = col
+            break
+    if email is None:
+        for col, n in norm.items():
+            if "email" in n or n.endswith("mail"):
+                email = col
+                break
+
+    if email is None and sample_rows:
+        best_ratio, best_col = 0.0, None
+        for col in columns:
+            values = [str(row.get(col) or "").strip() for row in sample_rows]
+            values = [v for v in values if v]
+            if not values:
+                continue
+            ratio = sum(1 for v in values if _EMAIL_RE.match(v)) / len(values)
+            if ratio >= 0.6 and ratio > best_ratio:
+                best_ratio, best_col = ratio, col
+        email = best_col
+
+    for col, n in norm.items():
+        if col != email and n in _NAME_HEADER_EXACT:
+            name = col
+            break
+    if name is None:
+        for col, n in norm.items():
+            if col != email and (n.endswith("name") or n.startswith("name")):
+                name = col
+                break
+
+    return {"email": email, "name": name}
 
 
 def detect_encoding(file_bytes: bytes) -> str:
@@ -61,7 +143,8 @@ def detect_columns(file_bytes: bytes) -> dict:
     if not reader.fieldnames:
         return {"columns": [], "sample_rows": [], "encoding": encoding}
 
-    columns = [f.strip() for f in reader.fieldnames if f]
+    raw_fieldnames = [f for f in reader.fieldnames if f]
+    columns = [f.strip() for f in raw_fieldnames]
 
     # Read first 5 rows as sample
     sample_rows = []
@@ -71,11 +154,22 @@ def detect_columns(file_bytes: bytes) -> dict:
         cleaned = {k.strip(): (v.strip() if isinstance(v, str) else ("" if v is None else str(v))) for k, v in row.items() if k}
         sample_rows.append(cleaned)
 
+    ragged_rows = _count_ragged_rows(text, dialect, len(columns))
+    warnings = []
+    if ragged_rows:
+        warnings.append(
+            f"{ragged_rows} row(s) have a different number of fields than the header. "
+            "Those rows may be shifted or skipped - check the preview before importing."
+        )
+
     return {
         "columns": columns,
         "sample_rows": sample_rows,
         "encoding": encoding,
         "row_count_estimate": _count_csv_rows(text, dialect),
+        "suggested": suggest_columns(columns, sample_rows),
+        "ragged_rows": ragged_rows,
+        "warnings": warnings,
     }
 
 
@@ -113,6 +207,7 @@ def convert_csv(
     if not reader.fieldnames:
         return {"csv_content": "", "stats": {"error": "No columns found in CSV"}}
 
+    ragged_rows = _count_ragged_rows(text, dialect, len([f for f in reader.fieldnames if f]))
     reader.fieldnames = [f.strip() for f in reader.fieldnames if f]
 
     # Build case-insensitive column mapping
@@ -182,5 +277,6 @@ def convert_csv(
             "skipped": skipped,
             "total": success + skipped,
             "encoding_detected": encoding,
+            "ragged_rows": ragged_rows,
         },
     }
