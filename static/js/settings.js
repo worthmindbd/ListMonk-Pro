@@ -8,6 +8,7 @@ const Settings = {
     _refreshInterval: null,
 
     async render() {
+        this._seq = App.seq();
         App.setContent('<div class="loading-spinner">Loading settings...</div>');
 
         try {
@@ -15,9 +16,11 @@ const Settings = {
                 API.get('/api/scheduler'),
                 API.get('/api/auto-unblock/status'),
             ]);
+            if (App.stale(this._seq)) return;
             this.schedule = sched;
             this.unblockStatus = unblock;
         } catch {
+            if (App.stale(this._seq)) return;
             App.setContent('<div class="empty-state"><h3>Failed to load settings</h3></div>');
             return;
         }
@@ -29,6 +32,7 @@ const Settings = {
     },
 
     renderPage() {
+        if (this._seq !== undefined && App.stale(this._seq)) return;
         const html = `
             <div class="settings-tabs">
                 <button class="settings-tab ${this.activeTab === 'scheduler' ? 'active' : ''}" onclick="Settings.switchTab('scheduler')">

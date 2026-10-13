@@ -12,6 +12,7 @@ const Subscribers = {
     _editing: null,
 
     async render() {
+        const seq = App.seq();
         try {
             // The list filter is a convenience: if the lists call fails, the
             // subscriber table must still render with the other filters.
@@ -26,11 +27,15 @@ const Subscribers = {
                 page: String(this.page),
                 per_page: String(this.perPage),
             });
-            if (this.query) params.set('query', this.query);
+            // `search` is free text; the backend turns it into a safely
+            // escaped ILIKE expression. (ListMonk's own `query` parameter is
+            // raw SQL and rejects plain words like "info@acme".)
+            if (this.query) params.set('search', this.query);
             if (this.statusFilter) params.set('status', this.statusFilter);
             if (this.listFilter) params.set('list_id', String(this.listFilter));
 
             const result = await API.get(`/api/subscribers?${params.toString()}`);
+            if (App.stale(seq)) return;
             const data = result?.data || {};
             const subscribers = data.results || [];
             const total = data.total || 0;
@@ -110,8 +115,10 @@ const Subscribers = {
 
             html += '</tbody></table></div>';
             html += App.renderPagination(this.page, total, this.perPage, 'Subscribers.goToPage');
+            if (App.stale(seq)) return;
             App.setContent(html);
         } catch {
+            if (App.stale(seq)) return;
             App.setContent('<div class="empty-state"><h3>Failed to load subscribers</h3></div>');
         }
     },
@@ -206,7 +213,9 @@ const Subscribers = {
                 ? `<pre style="background:var(--bg-input);padding:12px;border-radius:8px;overflow:auto;max-height:240px;font-size:0.8rem">${App.escapeHtml(JSON.stringify(s.attribs, null, 2))}</pre>`
                 : '<p style="color:var(--text-muted)">No custom attributes</p>';
 
-            App.showResult(`Subscriber: ${App.escapeHtml(s.email)}`, `
+            // showResult sets the title via textContent — escaping here would
+            // show the entities literally.
+            App.showResult(`Subscriber: ${s.email}`, `
                 <div style="font-size:0.9rem;line-height:1.7">
                     <p><strong>Name:</strong> ${App.escapeHtml(s.name) || '-'}</p>
                     <p><strong>Status:</strong> ${App.statusBadge(s.status)}</p>
@@ -219,8 +228,10 @@ const Subscribers = {
                     ${bounces.length ? `<ul>${bounces.slice(0, 20).map(b => `<li>${App.escapeHtml(b.type || '?')} · ${App.escapeHtml(b.source || '')} · ${App.formatDate(b.created_at)}</li>`).join('')}</ul>` : '<p style="color:var(--text-muted)">No bounce records</p>'}
                 </div>
             `);
-        } catch {
-            // API.request already surfaced the server message.
+        } catch (err) {
+            // Errors thrown locally (e.g. "Subscriber not found") were never
+            // toasted by API.request — surface them instead of failing silently.
+            if (!err?.handled) App.toast(err?.message || 'Failed to load subscriber', 'error');
         }
     },
 
@@ -236,10 +247,9 @@ const Subscribers = {
             const listBoxes = this._lists.map(l =>
                 `<label class="checkbox-label"><input type="checkbox" name="editSubLists" value="${l.id}" ${currentLists.includes(l.id) ? 'checked' : ''}><span>${App.escapeHtml(l.name)}</span></label>`
             ).join('');
-            // Whether the form could offer membership checkboxes at all: with
-            // none rendered, the update must echo the stored lists instead of
-            // treating "nothing checked" as "remove from every list".
-            this._editHasListBoxes = listBoxes.length > 0;
+            // Memberships the form cannot show (lists beyond the fetched page)
+            // are merged back in from `this._editing` on save — ListMonk's PUT
+            // is a full replace, so anything not echoed would be dropped.
 
             App.setContent(`
                 <div class="inline-form">
@@ -281,24 +291,26 @@ const Subscribers = {
         let attribs = {};
         try { attribs = JSON.parse(document.getElementById('editAttribs').value); } catch {}
 
-        const checked = Array.from(document.querySelectorAll('input[name="editSubLists"]:checked'))
-            .map(cb => parseInt(cb.value));
+        const boxes = Array.from(document.querySelectorAll('input[name="editSubLists"]'));
+        const checked = boxes.filter(cb => cb.checked).map(cb => parseInt(cb.value));
 
         try {
             // ListMonk's PUT /api/subscribers/{id} replaces the whole record:
             // omitting `lists` removes the subscriber from every list. Honor
-            // the checkboxes the form showed; when it could not show any,
-            // echo the stored memberships so an edit cannot silently
-            // unsubscribe the subscriber.
-            let lists = checked;
-            if (!this._editHasListBoxes) {
-                if (this._editing && this._editing.id === id) {
-                    lists = (this._editing.lists || []).map(l => l.id);
-                } else {
-                    const res = await API.get(`/api/subscribers/${id}`);
-                    lists = ((res?.data?.lists) || []).map(l => l.id);
-                }
+            // the checkboxes the form showed, and additionally echo any
+            // stored membership the form could NOT show (no list boxes at
+            // all, or a list beyond the fetched page) so an edit can never
+            // silently unsubscribe the subscriber from it.
+            const renderedIds = new Set(boxes.map(cb => parseInt(cb.value)));
+            let stored;
+            if (this._editing && this._editing.id === id) {
+                stored = (this._editing.lists || []).map(l => l.id);
+            } else {
+                const res = await API.get(`/api/subscribers/${id}`);
+                stored = ((res?.data?.lists) || []).map(l => l.id);
             }
+            const hidden = stored.filter(lid => !renderedIds.has(lid));
+            const lists = [...checked, ...hidden];
 
             await API.put(`/api/subscribers/${id}`, { email, name, status, attribs, lists });
             App.toast('Subscriber updated', 'success');
@@ -416,7 +428,7 @@ const Subscribers = {
             s.created_at || '',
         ]);
         const csv = [header, ...csvRows]
-            .map(cols => cols.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))
+            .map(cols => cols.map(v => App.csvCell(v)).join(','))
             .join('\n');
 
         API.downloadBlob(new Blob([csv], { type: 'text/csv' }), 'selected_subscribers.csv');
@@ -426,7 +438,7 @@ const Subscribers = {
     async exportAll() {
         try {
             const params = new URLSearchParams();
-            if (this.query) params.set('query', this.query);
+            if (this.query) params.set('search', this.query);
             if (this.statusFilter) params.set('status', this.statusFilter);
             if (this.listFilter) params.set('list_id', String(this.listFilter));
             const qs = params.toString();

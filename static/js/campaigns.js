@@ -10,12 +10,14 @@ const Campaigns = {
     _rows: [],
 
     async render() {
+        const seq = App.seq();
         try {
             let params = `page=${this.page}&per_page=${this.perPage}`;
             if (this.query) params += `&query=${encodeURIComponent(this.query)}`;
             if (this.statusFilter) params += `&status=${this.statusFilter}`;
 
             const result = await API.get(`/api/campaigns?${params}`);
+            if (App.stale(seq)) return;
             const data = result?.data || {};
             const campaigns = data.results || [];
             const total = data.total || 0;
@@ -99,8 +101,10 @@ const Campaigns = {
 
             html += '</tbody></table></div>';
             html += App.renderPagination(this.page, total, this.perPage, 'Campaigns.goToPage');
+            if (App.stale(seq)) return;
             App.setContent(html);
         } catch {
+            if (App.stale(seq)) return;
             App.setContent('<div class="empty-state"><h3>Failed to load campaigns</h3></div>');
         }
     },
@@ -321,15 +325,17 @@ const Campaigns = {
                         <tr><td style="color:var(--text-muted);padding:8px 20px 8px 0">Subject</td><td>${App.escapeHtml(c.subject) || '-'}</td></tr>
                         <tr><td style="color:var(--text-muted);padding:8px 20px 8px 0">Lists</td><td>${lists}</td></tr>
                         <tr><td style="color:var(--text-muted);padding:8px 20px 8px 0">Tags</td><td>${tags}</td></tr>
-                        <tr><td style="color:var(--text-muted);padding:8px 20px 8px 0">Content Type</td><td>${c.content_type || '-'}</td></tr>
+                        <tr><td style="color:var(--text-muted);padding:8px 20px 8px 0">Content Type</td><td>${App.escapeHtml(c.content_type || '-')}</td></tr>
                         <tr><td style="color:var(--text-muted);padding:8px 20px 8px 0">Created</td><td>${App.formatDateTime(c.created_at)}</td></tr>
                         <tr><td style="color:var(--text-muted);padding:8px 20px 8px 0">Updated</td><td>${App.formatDateTime(c.updated_at)}</td></tr>
                         <tr><td style="color:var(--text-muted);padding:8px 20px 8px 0">Started</td><td>${App.formatDateTime(c.started_at)}</td></tr>
                     </table>
                 </div>
             `);
-        } catch {
-            // API.request already surfaced the server message.
+        } catch (err) {
+            // Errors thrown locally (e.g. "Campaign not found") were never
+            // toasted by API.request — surface them instead of failing silently.
+            if (!err?.handled) App.toast(err?.message || 'Failed to load campaign', 'error');
         }
     },
 
@@ -375,6 +381,10 @@ const Campaigns = {
             const c = campRes?.data || {};
             const allLists = listsRes?.data?.results || [];
             const selectedIds = (c.lists || []).map(l => l.id);
+            // Keep the full record: ListMonk's PUT replaces the whole list
+            // set, so memberships the checkboxes cannot show (lists beyond
+            // the fetched page) must be echoed back on save.
+            this._editing = c;
 
             let listOptions = allLists.map(l =>
                 `<label class="checkbox-label"><input type="checkbox" name="editCampLists" value="${l.id}" ${selectedIds.includes(l.id) ? 'checked' : ''}><span>${App.escapeHtml(l.name)}</span></label>`
@@ -417,8 +427,15 @@ const Campaigns = {
         const body = document.getElementById('editCampBody').value;
         const altbody = document.getElementById('editCampAltBody').value;
         const tags = document.getElementById('editCampTags').value.split(',').map(t => t.trim()).filter(Boolean);
-        const lists = Array.from(document.querySelectorAll('input[name="editCampLists"]:checked'))
-            .map(cb => parseInt(cb.value));
+        const boxes = Array.from(document.querySelectorAll('input[name="editCampLists"]'));
+        const checked = boxes.filter(cb => cb.checked).map(cb => parseInt(cb.value));
+        // Merge back any stored membership the form could not render, so a
+        // save never silently detaches a list beyond the fetched page.
+        const renderedIds = new Set(boxes.map(cb => parseInt(cb.value)));
+        const stored = (this._editing && this._editing.id === id)
+            ? (this._editing.lists || []).map(l => l.id)
+            : [];
+        const lists = [...checked, ...stored.filter(lid => !renderedIds.has(lid))];
 
         try {
             await API.put(`/api/campaigns/${id}`, { name, subject, body, altbody, lists, tags });
@@ -430,11 +447,15 @@ const Campaigns = {
     },
 
     async changeStatus(id, status) {
-        const action = status === 'running' ? 'start' : status;
+        // Correct English for both the confirm question and the toast:
+        // "pauseded" shipped because the past tense was built by appending
+        // "ed" to the raw status.
+        const verbs = { running: ['start', 'started'], paused: ['pause', 'paused'], cancelled: ['cancel', 'cancelled'] };
+        const [action, past] = verbs[status] || [status, `${status}d`];
         if (await App.confirm('Change Status', `Are you sure you want to ${action} this campaign?`)) {
             try {
                 await API.put(`/api/campaigns/${id}/status`, { status });
-                App.toast(`Campaign ${action}ed`, 'success');
+                App.toast(`Campaign ${past}`, 'success');
                 this.render();
             } catch {
                 // API.request already surfaced the server message.
@@ -484,7 +505,9 @@ const Campaigns = {
     /** Send a test copy of the campaign to an arbitrary address. */
     showTestSend(id) {
         const camp = this._rows.find(c => c.id === id) || {};
-        App.showResult(`Test Send: ${App.escapeHtml(camp.name || '#' + id)}`, `
+        // showResult sets the title via textContent — escaping here would
+        // show the entities literally.
+        App.showResult(`Test Send: ${camp.name || '#' + id}`, `
             <p style="color:var(--text-secondary)">ListMonk renders the campaign with sample data and delivers it to the address below. The address must already exist as a subscriber in ListMonk.</p>
             <div class="form-group" style="margin-top:12px">
                 <label>Recipient email (existing subscriber)</label>
@@ -555,7 +578,7 @@ const Campaigns = {
             c.sent || 0, c.views || 0, c.clicks || 0, c.bounces || 0, c.created_at || '',
         ]);
         const csv = [header, ...csvRows]
-            .map(cols => cols.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))
+            .map(cols => cols.map(v => App.csvCell(v)).join(','))
             .join('\n');
 
         API.downloadBlob(new Blob([csv], { type: 'text/csv' }), 'selected_campaigns.csv');

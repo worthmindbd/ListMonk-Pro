@@ -15,15 +15,21 @@ const Deliverability = {
     checkedAt: null,
 
     async render() {
+        // applyPreset() re-renders after an await; if the user navigated away
+        // in the meantime, painting over the new page would be wrong.
+        if (App.currentPage !== 'deliverability') return;
+        this._seq = App.seq();
         this.isLoading = true;
         App.setContent(this.loadingHtml());
 
         try {
             this.checklistData = await API.get('/api/deliverability/checklist');
             this.checkedAt = new Date();
+            if (App.stale(this._seq)) return;
             this.renderPage();
         } catch (err) {
             console.error('Deliverability error:', err);
+            if (App.stale(this._seq)) return;
             App.setContent(`<div class="empty-state"><h3>Failed to load deliverability checklist</h3><p>${App.escapeHtml(err?.message || '')}</p></div>`);
         } finally {
             this.isLoading = false;
@@ -52,6 +58,7 @@ const Deliverability = {
     },
 
     renderPage() {
+        if (this._seq !== undefined && App.stale(this._seq)) return;
         const data = this.checklistData || {};
         const checks = Array.isArray(data.checks) ? data.checks : [];
         const groups = Array.isArray(data.groups) ? data.groups : [];

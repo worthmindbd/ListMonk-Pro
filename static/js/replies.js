@@ -13,6 +13,10 @@ const Replies = {
     isScanning: false,
 
     async render() {
+        // An action callback (status update, bulk op) can fire after the user
+        // navigated away; never repaint over another page.
+        if (App.currentPage !== 'replies') return;
+        this._seq = App.seq();
         App.setContent('<div class="loading-spinner">Loading prospect replies...</div>');
 
         try {
@@ -23,6 +27,7 @@ const Replies = {
             this.renderPage();
         } catch (err) {
             console.error('Replies load error:', err);
+            if (App.stale(this._seq)) return;
             App.setContent(`<div class="empty-state"><h3>Failed to load replies</h3><p>${App.escapeHtml(err?.message || '')}</p></div>`);
         }
     },
@@ -48,6 +53,7 @@ const Replies = {
     },
 
     renderPage() {
+        if (this._seq !== undefined && App.stale(this._seq)) return;
         const s = this.stats || {};
         const replies = this.repliesData?.results || [];
         const total = this.repliesData?.total || 0;
@@ -104,10 +110,10 @@ const Replies = {
                     </div>
 
                     <div class="replies-filters">
-                        <label class="reply-card-select" title="Select every reply on this page">
+                        <span class="reply-card-select" title="Select every reply on this page">
                             ${App.selection.headbox('replies', 'Select all replies on this page')}
-                            <span>Select page</span>
-                        </label>
+                            <label for="selectAll_replies">Select page</label>
+                        </span>
 
                         <select class="form-control filter-select" id="sentimentFilter" aria-label="Filter replies by sentiment" onchange="Replies.filterSentiment(this.value)">
                             <option value="" ${!this.sentiment ? 'selected' : ''}>All Sentiments</option>
@@ -233,7 +239,7 @@ const Replies = {
                         <svg viewBox="0 0 24 24" fill="${r.status === 'lead' ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
                         ${r.status === 'lead' ? 'Hot Lead Flagged' : 'Mark as Hot Lead'}
                     </button>
-                    <button class="btn btn-sm btn-secondary" onclick="Replies.copyEmail('${App.escapeHtml(r.from_email)}')">
+                    <button class="btn btn-sm btn-secondary" onclick="Replies.copyEmail(${App.escapeHtml(JSON.stringify(r.from_email || ''))})">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                         Copy Email
                     </button>
@@ -335,6 +341,7 @@ const Replies = {
         if (this.isScanning) return;
         this.isScanning = true;
         const btn = document.getElementById('btnScanInbox');
+        const btnHtml = btn ? btn.innerHTML : '';
         if (btn) {
             btn.disabled = true;
             btn.innerHTML = `<span class="spinner-sm"></span> Scanning Mailbox...`;
@@ -343,8 +350,14 @@ const Replies = {
         try {
             const res = await API.post('/api/replies/scan', {});
             const stats = res.stats || {};
-            const count = stats.new_replies || 0;
-            App.toast(`Scan complete! Found ${count} new prospect reply(ies).`, count > 0 ? 'success' : 'info');
+            // Safety net: the endpoint now answers 502 on IMAP failure, but a
+            // 200 carrying an error must never read as a successful scan.
+            if (stats.error) {
+                App.toast(`Scan failed: ${stats.error}`, 'error');
+            } else {
+                const count = stats.new_replies || 0;
+                App.toast(`Scan complete! Found ${count} new prospect reply(ies).`, count > 0 ? 'success' : 'info');
+            }
             await Promise.all([this.loadStats(), this.loadReplies()]);
             this.renderPage();
         } catch (err) {
@@ -352,6 +365,10 @@ const Replies = {
             // API.request already surfaced the server message.
         } finally {
             this.isScanning = false;
+            // Restore the button even when the scan failed, so it does not
+            // stay stuck on "Scanning Mailbox..." forever.
+            const b = document.getElementById('btnScanInbox');
+            if (b && btnHtml) { b.disabled = false; b.innerHTML = btnHtml; }
         }
     },
 
@@ -388,7 +405,9 @@ const Replies = {
         const reply = (this.repliesData?.results || []).find(r => r.id === id);
         if (!reply) return;
 
-        App.showResult(`Reply Details: ${App.escapeHtml(reply.from_name || reply.from_email)}`, `
+        // showResult sets the title via textContent — escaping here would
+        // show the entities literally.
+        App.showResult(`Reply Details: ${reply.from_name || reply.from_email}`, `
             <div style="font-size:0.92rem;line-height:1.6">
                 <p><strong>From:</strong> ${App.escapeHtml(reply.from_name || '')} &lt;${App.escapeHtml(reply.from_email)}&gt;</p>
                 <p><strong>Subject:</strong> ${App.escapeHtml(reply.subject || '')}</p>

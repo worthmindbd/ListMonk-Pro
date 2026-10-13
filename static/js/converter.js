@@ -39,6 +39,9 @@ const Converter = {
     },
 
     renderStep() {
+        // Upload/detect/preview handlers re-render after awaits; never paint
+        // over a page the user navigated to in the meantime.
+        if (App.currentPage !== 'converter') return;
         let html = `
             <div class="steps">
                 <div class="step ${this.step >= 1 ? (this.step > 1 ? 'completed' : 'active') : ''}">1. Upload CSV</div>
@@ -560,7 +563,7 @@ const Converter = {
         const attrsEmpty = !!stats.attributes_empty;
         const optinLabel = { double: 'double opt-in', single: 'single opt-in', none: 'no opt-in' };
         let listOptions = lists.map(l =>
-            `<label class="checkbox-label"><input type="checkbox" name="importLists" value="${l.id}" onchange="Converter.updateImportButton()"><span>${App.escapeHtml(l.name)}${l.optin ? ` <em style="opacity:.65;font-style:normal;font-size:.75rem">(${optinLabel[l.optin] || l.optin})</em>` : ''}</span></label>`
+            `<label class="checkbox-label"><input type="checkbox" name="importLists" value="${l.id}" onchange="Converter.updateImportButton()"><span>${App.escapeHtml(l.name)}${l.optin ? ` <em style="opacity:.65;font-style:normal;font-size:.75rem">(${App.escapeHtml(optinLabel[l.optin] || l.optin)})</em>` : ''}</span></label>`
         ).join('');
 
         dialog.style.display = 'block';
@@ -695,12 +698,24 @@ const Converter = {
                 return;
             }
             try {
+                // Silent mode: a flapping status endpoint must not stack an
+                // error toast every 2 seconds — failures are counted and
+                // reported in the dialog instead.
                 const [statusRes, logsRes] = await Promise.allSettled([
-                    API.get('/api/subscribers/import/status'),
-                    API.get('/api/subscribers/import/logs'),
+                    API.get('/api/subscribers/import/status', true),
+                    API.get('/api/subscribers/import/logs', true),
                 ]);
 
+                // The awaits above can outlive a navigation; re-check before
+                // touching the dialog elements.
+                const statusEl = document.getElementById('importStatusText');
+                if (!statusEl) {
+                    this._importing = false;
+                    return;
+                }
+
                 if (statusRes.status === 'fulfilled') {
+                    failures = 0;
                     const status = statusRes.value?.data || {};
                     const total = status.total || 1;
                     const imported = status.imported || 0;
@@ -708,7 +723,7 @@ const Converter = {
 
                     const progressEl = document.getElementById('importProgress');
                     if (progressEl) progressEl.style.width = `${pct}%`;
-                    document.getElementById('importStatusText').textContent =
+                    statusEl.textContent =
                         `${imported} / ${total} imported (${pct}%) - Status: ${status.status || 'unknown'}`;
 
                     if (status.status === 'finished' || status.status === 'stopped') {
@@ -716,6 +731,16 @@ const Converter = {
                         App.toast(`Import complete! ${imported} subscribers imported.`, 'success');
                         return;
                     }
+                } else {
+                    failures++;
+                    if (failures >= 5) {
+                        this._importing = false;
+                        statusEl.textContent =
+                            'Lost contact with the import status endpoint. The import may still be running — reload to check.';
+                        App.toast('Stopped polling import status after repeated failures', 'error');
+                        return;
+                    }
+                    statusEl.textContent = `Status check failed (${failures}/5), retrying...`;
                 }
 
                 if (logsRes.status === 'fulfilled') {
@@ -725,12 +750,15 @@ const Converter = {
                 }
 
                 setTimeout(poll, 2000);
-            } catch {
+            } catch (err) {
                 this._importing = false;
-                App.toast('Failed to check import status', 'error');
+                const el = document.getElementById('importStatusText');
+                if (el) el.textContent = 'Failed to check import status.';
+                if (!err?.handled) App.toast('Failed to check import status', 'error');
             }
         };
 
+        let failures = 0;
         setTimeout(poll, 1000);
     },
 };

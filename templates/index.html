@@ -116,11 +116,11 @@
 
                 <!-- Mode Segmented Switcher -->
                 <div class="mode-segmented" id="modeSegmented" role="radiogroup" aria-label="Dashboard Mode">
-                    <button type="button" class="mode-pill-btn active" data-mode="newsletter" id="btnModeNewsletter" onclick="App.setMode('newsletter')">
+                    <button type="button" class="mode-pill-btn active" role="radio" aria-checked="true" data-mode="newsletter" id="btnModeNewsletter" onclick="App.setMode('newsletter')">
                         <svg class="mode-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
                         <span class="mode-label">Newsletter</span>
                     </button>
-                    <button type="button" class="mode-pill-btn" data-mode="cold_email" id="btnModeColdEmail" onclick="App.setMode('cold_email')">
+                    <button type="button" class="mode-pill-btn" role="radio" aria-checked="false" data-mode="cold_email" id="btnModeColdEmail" onclick="App.setMode('cold_email')">
                         <svg class="mode-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polygon points="22 2 15 22 11 13 2 9 22 2"/><line x1="22" y1="2" x2="11" y2="13"/></svg>
                         <span class="mode-label">Cold Email</span>
                     </button>
@@ -146,10 +146,10 @@
 
     <!-- Mode Selection Onboarding Modal -->
     <div class="modal-overlay" id="modeOnboardingModal" style="display:none;">
-        <div class="modal onboarding-modal">
+        <div class="modal onboarding-modal" role="dialog" aria-modal="true" aria-labelledby="onboardingTitle">
             <div class="modal-header">
                 <div>
-                    <h3 style="margin:0;font-size:1.4rem;font-weight:700;">Welcome to ListMonk Pro</h3>
+                    <h3 id="onboardingTitle" style="margin:0;font-size:1.4rem;font-weight:700;">Welcome to ListMonk Pro</h3>
                     <p style="margin:6px 0 0 0;font-size:0.9rem;color:var(--text-secondary)">Choose your primary operating mode. You can switch anytime using the toggle in the top header.</p>
                 </div>
             </div>
@@ -195,7 +195,7 @@
 
     <!-- Confirmation Modal -->
     <div class="modal-overlay" id="modalOverlay" style="display:none;">
-        <div class="modal">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
             <div class="modal-header">
                 <h3 id="modalTitle">Confirm</h3>
                 <button class="modal-close" id="modalClose" aria-label="Close dialog">&times;</button>
@@ -224,17 +224,17 @@
             });
         })();
     </script>
-    <script src="/static/js/api.js?v=20261012c"></script>
-    <script src="/static/js/app.js?v=20261014a"></script>
-    <script src="/static/js/charts.js?v=20261012z"></script>
-    <script src="/static/js/subscribers.js?v=20261013a"></script>
-    <script src="/static/js/campaigns.js?v=20261013a"></script>
-    <script src="/static/js/lists.js?v=20261012f"></script>
-    <script src="/static/js/analytics.js?v=20261013d"></script>
-    <script src="/static/js/settings.js?v=20261013a"></script>
-    <script src="/static/js/converter.js?v=20261014b"></script>
-    <script src="/static/js/unsubscribes.js?v=20261012s"></script>
-    <script src="/static/js/replies.js?v=20261013a"></script>
-    <script src="/static/js/deliverability.js?v=20261012d"></script>
+    <script src="/static/js/api.js?v=20261014c"></script>
+    <script src="/static/js/app.js?v=20261014c"></script>
+    <script src="/static/js/charts.js?v=20261014c"></script>
+    <script src="/static/js/subscribers.js?v=20261014c"></script>
+    <script src="/static/js/campaigns.js?v=20261014c"></script>
+    <script src="/static/js/lists.js?v=20261014c"></script>
+    <script src="/static/js/analytics.js?v=20261014c"></script>
+    <script src="/static/js/settings.js?v=20261014c"></script>
+    <script src="/static/js/converter.js?v=20261014c"></script>
+    <script src="/static/js/unsubscribes.js?v=20261014c"></script>
+    <script src="/static/js/replies.js?v=20261014c"></script>
+    <script src="/static/js/deliverability.js?v=20261014c"></script>
 </body>
 </html>

@@ -48,6 +48,7 @@ const Unsubscribes = {
     },
 
     async render() {
+        this._seq = App.seq();
         App.setContent('<div class="loading-spinner">Loading unsubscribes...</div>');
 
         try {
@@ -71,12 +72,14 @@ const Unsubscribes = {
                 this.renderListView();
             }
         } catch (err) {
+            if (App.stale(this._seq)) return;
             App.setContent(`<div class="empty-state"><h3>Failed to load unsubscribes</h3><p>${App.escapeHtml(err.message || '')}</p></div>`);
         }
     },
 
     /* ── List View — shows campaign cards ──────────────────── */
     renderListView() {
+        if (this._seq !== undefined && App.stale(this._seq)) return;
         this.activeCampaign = null;
         this.selectedEmails.clear();
         App.selection.clear('unsub_campaigns');
@@ -203,7 +206,7 @@ const Unsubscribes = {
                         <div class="unsub-campaign-header">
                             <div class="unsub-campaign-info">
                                 ${isClickable ? `<span onclick="event.stopPropagation()" style="margin-right:10px">${App.selection.rowbox('unsub_campaigns', g.campaign_id, `Select ${this.cleanCampaignName(g.campaign_name)}`)}</span>` : ''}
-                                <span class="badge badge-primary" style="font-size:0.8rem;padding:4px 10px;margin-right:8px">${readableDate}</span>
+                                <span class="badge badge-primary" style="font-size:0.8rem;padding:4px 10px;margin-right:8px">${App.escapeHtml(readableDate)}</span>
                                 <strong>${cleanName}</strong>
                             </div>
                             <div class="unsub-campaign-meta">
@@ -245,6 +248,7 @@ const Unsubscribes = {
     },
 
     renderDetailView() {
+        if (this._seq !== undefined && App.stale(this._seq)) return;
         const camp = this.activeCampaign;
         const data = this.campaignRecords;
         const records = data.results || [];
@@ -265,7 +269,7 @@ const Unsubscribes = {
                 <div class="card">
                     <div class="card-header" style="margin-bottom:0">
                         <div style="display:flex;align-items:center;gap:10px">
-                            <span class="badge badge-primary" style="font-size:0.9rem;padding:6px 14px">${readableDate}</span>
+                            <span class="badge badge-primary" style="font-size:0.9rem;padding:6px 14px">${App.escapeHtml(readableDate)}</span>
                             <h3 class="card-title" style="margin:0">${cleanName}</h3>
                         </div>
                         <div class="page-actions">
@@ -305,7 +309,7 @@ const Unsubscribes = {
             <div class="card">
                 <div class="table-wrapper"><table>
                     <thead><tr>
-                        <th style="width:30px"><input type="checkbox" onchange="Unsubscribes.toggleSelectAll(this)" ${this._isPageFullySelected() ? 'checked' : ''}/></th>
+                        <th style="width:30px"><input type="checkbox" aria-label="Select all records on this page" onchange="Unsubscribes.toggleSelectAll(this)" ${this._isPageFullySelected() ? 'checked' : ''}/></th>
                         <th>#</th><th>Email</th><th>Name</th><th>Type</th><th>Date</th><th>Actions</th>
                     </tr></thead><tbody>`;
 
@@ -320,7 +324,7 @@ const Unsubscribes = {
             const isChecked = this.selectedEmails.has(r.email);
 
             html += `<tr>
-                <td><input type="checkbox" value="${email}" onchange="Unsubscribes.toggleSelect(${i})" ${isChecked ? 'checked' : ''}/></td>
+                <td><input type="checkbox" value="${email}" aria-label="Select ${email}" onchange="Unsubscribes.toggleSelect(${i})" ${isChecked ? 'checked' : ''}/></td>
                 <td>${idx}</td>
                 <td><strong>${email}</strong></td>
                 <td>${name}</td>
@@ -543,7 +547,8 @@ const Unsubscribes = {
             // Re-render to update the label
             this.renderListView();
         } catch {
-            App.toast('Failed to update setting', 'error');
+            // API.request already surfaced the server message — toasting
+            // again here showed the failure twice.
             // Revert toggle
             this.settings.blocklist_enabled = !enabled;
             this.renderListView();

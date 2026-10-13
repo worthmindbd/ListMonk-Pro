@@ -66,6 +66,34 @@ const App = {
             if (e.target === e.currentTarget) this.closeModal();
         });
 
+        // Dialog behavior for the shared overlay: Escape cancels, and Tab
+        // cycles inside the modal instead of walking the page behind it.
+        document.addEventListener('keydown', (e) => {
+            const overlay = document.getElementById('modalOverlay');
+            if (!overlay || overlay.style.display === 'none') return;
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                this.closeModal();
+                return;
+            }
+            if (e.key === 'Tab') {
+                const focusables = Array.from(overlay.querySelectorAll(
+                    'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+                )).filter(el => !el.disabled && el.offsetParent !== null);
+                if (!focusables.length) { e.preventDefault(); return; }
+                const first = focusables[0];
+                const last = focusables[focusables.length - 1];
+                const active = document.activeElement;
+                if (e.shiftKey && (active === first || !overlay.contains(active))) {
+                    e.preventDefault();
+                    last.focus();
+                } else if (!e.shiftKey && (active === last || !overlay.contains(active))) {
+                    e.preventDefault();
+                    first.focus();
+                }
+            }
+        });
+
         // Initialize mode. localStorage is only an instant-render hint for
         // this browser: the server-persisted choice decides whether the
         // onboarding modal still needs to show, so "pick a mode" appears once
@@ -101,7 +129,12 @@ const App = {
 
     showModeOnboarding() {
         const modal = document.getElementById('modeOnboardingModal');
-        if (modal) modal.style.display = 'flex';
+        if (modal) {
+            modal.style.display = 'flex';
+            // Move focus into the dialog so it is operable without a mouse.
+            const first = modal.querySelector('button, [href], input');
+            if (first && first.focus) first.focus();
+        }
     },
 
     selectInitialMode(mode) {
@@ -125,7 +158,9 @@ const App = {
 
         // Update mode switcher buttons
         document.querySelectorAll('.mode-pill-btn').forEach(btn => {
-            btn.classList.toggle('active', btn.dataset.mode === mode);
+            const active = btn.dataset.mode === mode;
+            btn.classList.toggle('active', active);
+            btn.setAttribute('aria-checked', active ? 'true' : 'false');
         });
 
         const isCold = mode === 'cold_email';
@@ -165,7 +200,26 @@ const App = {
         if (this.currentPage) {
             this.route();
         }
-        window.dispatchEvent(new CustomEvent('modeChanged', { detail: { mode } }));
+    },
+
+    /** Navigation generation counter. Every route() bumps it; async page
+        renders capture App.seq() before awaiting and bail via App.stale(seq)
+        before painting, so a slow page A can never overwrite page B. */
+    _navSeq: 0,
+    seq() { return this._navSeq; },
+    stale(seq) { return seq !== this._navSeq; },
+
+    /** Destroy every live Chart.js instance. Charts are bound to canvases
+        that route() is about to discard; Chart.js keeps them in its global
+        registry, so without this each SPA navigation leaks one set. */
+    destroyCharts() {
+        try {
+            if (window.Chart && Chart.instances) {
+                Object.values(Chart.instances).forEach(c => {
+                    try { c.destroy(); } catch { /* already destroyed */ }
+                });
+            }
+        } catch { /* Chart not loaded yet */ }
     },
 
     route() {
@@ -181,6 +235,7 @@ const App = {
         }
 
         this.currentPage = hash;
+        const seq = ++this._navSeq;
 
         // A selection only makes sense on the page it was made on; the new
         // page re-registers its own bulk config while rendering.
@@ -196,9 +251,15 @@ const App = {
             Bounces.page = 1;
         }
 
+        // Release charts bound to the outgoing page's canvases
+        this.destroyCharts();
+
         // Update nav
         document.querySelectorAll('.nav-link').forEach(link => {
-            link.classList.toggle('active', link.dataset.page === hash);
+            const active = link.dataset.page === hash;
+            link.classList.toggle('active', active);
+            if (active) link.setAttribute('aria-current', 'page');
+            else link.removeAttribute('aria-current');
         });
 
         // Update title
@@ -212,11 +273,13 @@ const App = {
             if (res && typeof res.catch === 'function') {
                 res.catch(err => {
                     console.error(`Error rendering page ${hash}:`, err);
+                    if (this.stale(seq)) return;
                     content.innerHTML = `<div class="empty-state"><h3>Failed to load ${App.escapeHtml(page.title)}</h3><p>${App.escapeHtml(err?.message || '')}</p></div>`;
                 });
             }
         } catch (err) {
             console.error(`Error rendering page ${hash}:`, err);
+            if (this.stale(seq)) return;
             content.innerHTML = `<div class="empty-state"><h3>Failed to load ${App.escapeHtml(page.title)}</h3><p>${App.escapeHtml(err?.message || '')}</p></div>`;
         }
     },
@@ -261,6 +324,16 @@ const App = {
             .replace(/'/g, '&#39;');
     },
 
+    /** One CSV cell, safe to open in a spreadsheet: quote-wrapped, and cells
+        starting with a formula trigger (=, +, -, @, tab, CR) get a leading
+        apostrophe — a subscriber named `=HYPERLINK(...)` must not execute in
+        Excel/LibreOffice. */
+    csvCell(v) {
+        let s = String(v ?? '');
+        if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+        return `"${s.replace(/"/g, '""')}"`;
+    },
+
     _resetModalButtons() {
         const cancelBtn = document.getElementById('modalCancel');
         const confirmBtn = document.getElementById('modalConfirm');
@@ -273,13 +346,32 @@ const App = {
         }
     },
 
+    /** Element that had focus before the shared overlay opened; restored on
+        close so keyboard users land back on the control that triggered it. */
+    _lastFocused: null,
+
+    /** Show the shared overlay as a real dialog: remember the trigger and
+        move focus inside. Tab cycling is trapped by the document-level
+        keydown handler registered in init(). */
+    _openModalOverlay() {
+        this._lastFocused = document.activeElement;
+        const overlay = document.getElementById('modalOverlay');
+        overlay.style.display = 'flex';
+        const confirm = document.getElementById('modalConfirm');
+        const cancel = document.getElementById('modalCancel');
+        const target = (confirm && confirm.style.display !== 'none' && confirm)
+            || (cancel && cancel.style.display !== 'none' && cancel)
+            || overlay.querySelector('button, [href], input, select, textarea');
+        if (target && target.focus) target.focus();
+    },
+
     confirm(title, message) {
         return new Promise((resolve) => {
             this._modalResolve = resolve;
             document.getElementById('modalTitle').textContent = title;
             document.getElementById('modalBody').innerHTML = `<p>${this.escapeHtml(message)}</p>`;
             this._resetModalButtons();
-            document.getElementById('modalOverlay').style.display = 'flex';
+            this._openModalOverlay();
             document.getElementById('modalConfirm').onclick = () => {
                 this._modalResolve = null;
                 this.closeModal();
@@ -291,6 +383,10 @@ const App = {
     closeModal() {
         document.getElementById('modalOverlay').style.display = 'none';
         this._resetModalButtons();
+        if (this._lastFocused && this._lastFocused.focus) {
+            this._lastFocused.focus();
+            this._lastFocused = null;
+        }
         if (this._modalResolve) {
             this._modalResolve(false);
             this._modalResolve = null;
@@ -311,7 +407,7 @@ const App = {
         `;
         document.getElementById('modalCancel').style.display = 'none';
         document.getElementById('modalConfirm').style.display = 'none';
-        document.getElementById('modalOverlay').style.display = 'flex';
+        this._openModalOverlay();
     },
 
     updateProgress(progress) {
@@ -352,7 +448,7 @@ const App = {
         confirmBtn.textContent = 'OK';
         confirmBtn.className = 'btn btn-primary';
         confirmBtn.onclick = () => this.closeModal();
-        document.getElementById('modalOverlay').style.display = 'flex';
+        this._openModalOverlay();
     },
 
     // ── Pagination ───────────────────────────────────────
@@ -360,17 +456,21 @@ const App = {
         const totalPages = Math.ceil(total / perPage);
         if (totalPages <= 1) return '';
 
-        // Build the list of page numbers to show (windowed with ellipsis)
+        // Build the list of page numbers to show (windowed with ellipsis).
+        // The ellipsis conditions compare against the window actually
+        // rendered (start/end), so no page silently vanishes at the edges —
+        // e.g. page 4 of 10 used to render "1 3 4 5 … 10" with page 2 gone
+        // and no hint that anything was hidden.
         const pages = [];
         if (totalPages <= 7) {
             for (let i = 1; i <= totalPages; i++) pages.push(i);
         } else {
             pages.push(1);
-            if (currentPage > 4) pages.push('...');
             const start = Math.max(2, currentPage - 1);
             const end = Math.min(totalPages - 1, currentPage + 1);
+            if (start > 2) pages.push('...');
             for (let i = start; i <= end; i++) pages.push(i);
-            if (currentPage < totalPages - 3) pages.push('...');
+            if (end < totalPages - 1) pages.push('...');
             pages.push(totalPages);
         }
 
@@ -620,8 +720,10 @@ const Templates = {
     _filter: '',
 
     async render() {
+        const seq = App.seq();
         try {
             const result = await API.get('/api/templates');
+            if (App.stale(seq)) return;
             this._data = result?.data || [];
 
             const needle = this._filter.trim().toLowerCase();
@@ -684,9 +786,11 @@ const Templates = {
             });
 
             html += '</tbody></table></div>';
+            if (App.stale(seq)) return;
             App.setContent(html);
         } catch (err) {
             console.error('Templates load error:', err);
+            if (App.stale(seq)) return;
             App.setContent(`<div class="empty-state"><h3>Failed to load templates</h3><p>${App.escapeHtml(err.message || '')}</p></div>`);
         }
     },
@@ -841,6 +945,7 @@ const Bounces = {
     },
 
     async render() {
+        const seq = App.seq();
         try {
             const fetchCampaigns = !this.campaigns.length
                 ? API.get('/api/campaigns?per_page=500&order_by=created_at&order=DESC')
@@ -850,6 +955,7 @@ const Bounces = {
                 fetchCampaigns,
                 API.get(`/api/bounces?${this._queryParams()}`),
             ]);
+            if (App.stale(seq)) return;
             if (campRes) this.campaigns = campRes?.data?.results || [];
 
             const data = bounceRes?.data || {};
@@ -860,7 +966,7 @@ const Bounces = {
 
             // Build campaign filter options
             const campOptions = this.campaigns.map(c =>
-                `<option value="${c.id}" ${c.id === this.campaignFilter ? 'selected' : ''}>${App.escapeHtml(c.name)} (${c.status})</option>`
+                `<option value="${c.id}" ${c.id === this.campaignFilter ? 'selected' : ''}>${App.escapeHtml(c.name)} (${App.escapeHtml(c.status || '')})</option>`
             ).join('');
 
             const filterLabel = this.campaignFilter
@@ -896,7 +1002,7 @@ const Bounces = {
                     </select>
                     <span style="color:var(--text-secondary);font-size:0.9rem">
                         ${App.formatNumber(total)} ${this._typeLabel()}
-                        ${this.campaignFilter ? ' for ' + filterLabel : ''}
+                        ${this.campaignFilter ? ' for ' + App.escapeHtml(filterLabel) : ''}
                     </span>
                     <div class="page-actions">
                         <button class="btn btn-primary" onclick="Bounces.ingestBounces()">Ingest New Bounces</button>
@@ -924,8 +1030,8 @@ const Bounces = {
                         <td>${b.id}</td>
                         <td><strong>${App.escapeHtml(b.email || '-')}</strong></td>
                         <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis">${campName}</td>
-                        <td>${b.source || '-'}</td>
-                        <td><span class="badge badge-${b.type === 'hard' ? 'danger' : 'warning'}">${b.type || 'unknown'}</span></td>
+                        <td>${App.escapeHtml(b.source || '-')}</td>
+                        <td><span class="badge badge-${b.type === 'hard' ? 'danger' : 'warning'}">${App.escapeHtml(b.type || 'unknown')}</span></td>
                         <td>${App.formatDate(b.created_at)}</td>
                         <td class="cell-actions"><button class="btn btn-sm btn-danger" onclick="Bounces.remove(${b.id})">Delete</button></td>
                     </tr>`;
@@ -935,8 +1041,10 @@ const Bounces = {
             }
 
             html += App.renderPagination(this.page, total, this.perPage, 'Bounces.goToPage');
+            if (App.stale(seq)) return;
             App.setContent(html);
         } catch (err) {
+            if (App.stale(seq)) return;
             App.setContent(`<div class="empty-state"><h3>Failed to load bounces</h3><p>${App.escapeHtml(err.message || '')}</p></div>`);
         }
     },
@@ -1000,7 +1108,7 @@ const Bounces = {
             b.id, b.email || '', b.campaign?.name || '', b.source || '', b.type || '', b.created_at || '',
         ]);
         const csv = [header, ...csvRows]
-            .map(cols => cols.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(','))
+            .map(cols => cols.map(v => App.csvCell(v)).join(','))
             .join('\n');
 
         API.downloadBlob(new Blob([csv], { type: 'text/csv' }), 'selected_bounces.csv');

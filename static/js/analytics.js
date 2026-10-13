@@ -18,6 +18,7 @@ const Analytics = {
     },
 
     async render() {
+        this._seq = App.seq();
         // Set default date range: last 30 days
         const now = new Date();
         const thirtyDaysAgo = new Date(now);
@@ -65,6 +66,7 @@ const Analytics = {
             this.unsubStats = { total: 0 };
             this.replyStats = null;
             this.replyByCampaign = {};
+            if (App.stale(this._seq)) return;
             App.setContent(`<div class="empty-state"><h3>Failed to load analytics</h3><p>${App.escapeHtml(err?.message || '')}</p></div>`);
         }
     },
@@ -82,8 +84,9 @@ const Analytics = {
     },
 
     renderPage() {
+        if (this._seq !== undefined && App.stale(this._seq)) return;
         const campOptions = this.campaigns.map(c =>
-            `<option value="${c.id}" ${c.id === this.selectedCampaignId ? 'selected' : ''}>${App.escapeHtml(c.name)} (${c.status})</option>`
+            `<option value="${c.id}" ${c.id === this.selectedCampaignId ? 'selected' : ''}>${App.escapeHtml(c.name)} (${App.escapeHtml(c.status || '')})</option>`
         ).join('');
 
         // Build the overview stats. Prefer the all-campaigns summary endpoint;
@@ -607,7 +610,9 @@ const Analytics = {
 
     // ── Export Functions ──────────────────────────────────
 
-    // Export subscriber list (who opened / who clicked / who bounced)
+    // Export subscriber list (who opened / who clicked / who bounced).
+    // The From/To range travels with the request so the CSV covers exactly
+    // the window the charts beside it are showing.
     async exportSubscribers(type) {
         const campId = this.selectedCampaignId;
         if (!campId) { App.toast('Select a campaign first', 'error'); return; }
@@ -616,7 +621,11 @@ const Analytics = {
         App.toast(`Exporting ${labels[type] || type}... this may take a moment`, 'info');
 
         try {
-            const result = await API.get(`/api/campaigns/${campId}/subscribers/${type}/export`);
+            const params = new URLSearchParams();
+            if (this.fromDate) params.set('from_date', this.fromDate);
+            if (this.toDate) params.set('to_date', this.toDate);
+            const qs = params.toString();
+            const result = await API.get(`/api/campaigns/${campId}/subscribers/${type}/export${qs ? '?' + qs : ''}`);
             if (result.blob) {
                 const campName = this.campaigns.find(c => c.id === campId)?.name || 'campaign';
                 const safeName = campName.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 30);

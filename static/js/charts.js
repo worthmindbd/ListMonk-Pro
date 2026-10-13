@@ -19,6 +19,7 @@ const Dashboard = {
     },
 
     async render() {
+        const seq = App.seq();
         App.setContent('<div class="loading-spinner">Loading dashboard...</div>');
 
         const isCold = App.currentMode === 'cold_email';
@@ -63,6 +64,9 @@ const Dashboard = {
 
             if (isCold) {
                 const repStats = replyStatsRes?.status === 'fulfilled' ? replyStatsRes.value : {};
+                // Retained so the theme toggle can re-render the sentiment
+                // chart without a full page reload.
+                this.lastRepStats = repStats;
                 const deliv = delivRes?.status === 'fulfilled' ? delivRes.value : {};
                 const recentReplies = recentRepliesRes?.status === 'fulfilled' ? (recentRepliesRes.value?.results || []) : [];
                 const delivScore = deliv?.score ?? 100;
@@ -197,14 +201,14 @@ const Dashboard = {
 
                 html += `</tbody></table></div></div></div>`;
 
+                if (App.stale(seq)) return;
                 App.setContent(html);
 
                 // Render cold charts
                 this.renderCampaignChart(campaigns);
                 this.renderColdSentimentChart(repStats);
 
-            } else {
-                // Newsletter Mode
+            } else {                // Newsletter Mode
                 html += `
                     <div class="stats-grid">
                         <div class="stat-card accent">
@@ -271,6 +275,7 @@ const Dashboard = {
                 }
 
                 html += '</tbody></table></div></div>';
+                if (App.stale(seq)) return;
                 App.setContent(html);
 
                 this.renderCampaignChart(campaigns);
@@ -278,6 +283,7 @@ const Dashboard = {
             }
 
         } catch (err) {
+            if (App.stale(seq)) return;
             App.setContent(`<div class="empty-state"><h3>Failed to load dashboard</h3><p>${App.escapeHtml(err.message)}</p></div>`);
         }
     },
@@ -496,11 +502,19 @@ const Dashboard = {
     },
 };
 
-// Listen to theme switch to dynamically update charts
+// Listen to theme switch to dynamically update charts.
+// The second dashboard doughnut belongs to a different metric per mode
+// (campaign status vs. prospect sentiment) — re-render the one the current
+// mode actually shows, otherwise toggling the theme silently swaps in the
+// wrong data under the wrong heading.
 window.addEventListener('themeChanged', () => {
     if (App.currentPage === 'dashboard') {
         Dashboard.renderCampaignChart();
-        Dashboard.renderStatusChart();
+        if (App.currentMode === 'cold_email') {
+            Dashboard.renderColdSentimentChart(Dashboard.lastRepStats || {});
+        } else {
+            Dashboard.renderStatusChart();
+        }
     }
 });
 

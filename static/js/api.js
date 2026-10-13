@@ -7,7 +7,10 @@
  * otherwise the user sees the same failure twice.
  */
 const API = {
-    async request(method, path, body = null, isFormData = false) {
+    /** `silent` suppresses the automatic error toast — for background polls
+        that surface failures in their own UI instead of stacking toasts.
+        The rejection is still marked err.handled so callers stay consistent. */
+    async request(method, path, body = null, isFormData = false, silent = false) {
         const opts = {
             method,
             headers: {},
@@ -33,7 +36,7 @@ const API = {
                     detail = err.detail || err.message || detail;
                 } catch {}
                 // Surface the real message once, here.
-                App.toast(detail, 'error');
+                if (!silent) App.toast(detail, 'error');
                 throw Object.assign(new Error(detail), { handled: true });
             }
 
@@ -48,14 +51,14 @@ const API = {
         } catch (err) {
             if (!err.handled) {
                 // Network/abort failures never reached the response checks above.
-                App.toast(err.message, 'error');
+                if (!silent) App.toast(err.message, 'error');
                 err.handled = true;
             }
             throw err;
         }
     },
 
-    get(path) { return this.request('GET', path); },
+    get(path, silent = false) { return this.request('GET', path, null, false, silent); },
     post(path, body) { return this.request('POST', path, body); },
     put(path, body) { return this.request('PUT', path, body); },
     del(path) { return this.request('DELETE', path); },

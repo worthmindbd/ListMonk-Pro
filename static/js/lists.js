@@ -8,9 +8,11 @@ const Lists = {
     _rows: [],
 
     async render() {
+        const seq = App.seq();
         try {
             const params = `page=${this.page}&per_page=${this.perPage}${this.query ? '&query=' + encodeURIComponent(this.query) : ''}`;
             const result = await API.get(`/api/lists?${params}`);
+            if (App.stale(seq)) return;
             const data = result?.data || {};
             const lists = data.results || [];
             const total = data.total || 0;
@@ -55,8 +57,8 @@ const Lists = {
                     <td class="col-select">${App.selection.rowbox('lists', l.id, `Select ${l.name}`)}</td>
                     <td>${l.id}</td>
                     <td><strong>${App.escapeHtml(l.name)}</strong> ${tags}</td>
-                    <td><span class="badge badge-${l.type === 'public' ? 'info' : 'default'}">${l.type}</span></td>
-                    <td>${l.optin}</td>
+                    <td><span class="badge badge-${l.type === 'public' ? 'info' : 'default'}">${App.escapeHtml(l.type || '')}</span></td>
+                    <td>${App.escapeHtml(l.optin || '')}</td>
                     <td>${App.formatNumber(l.subscriber_count || 0)}</td>
                     <td>${App.statusBadge(l.status || 'active')}</td>
                     <td>${App.formatDate(l.created_at)}</td>
@@ -73,8 +75,10 @@ const Lists = {
 
             html += '</tbody></table></div>';
             html += App.renderPagination(this.page, total, this.perPage, 'Lists.goToPage');
+            if (App.stale(seq)) return;
             App.setContent(html);
         } catch {
+            if (App.stale(seq)) return;
             App.setContent('<div class="empty-state"><h3>Failed to load lists</h3></div>');
         }
     },
@@ -261,14 +265,21 @@ const Lists = {
         });
         if (!ids.length) { App.toast('Selected list(s) have no subscribers', 'error'); return; }
 
+        let exported = 0;
         for (const id of ids) {
             try {
                 const result = await API.get(`/api/subscribers/export-all?list_id=${id}`);
                 API.downloadBlob(result.blob, `list_${id}_subscribers.csv`);
+                exported++;
             } catch {
                 // API.request already surfaced the server message.
             }
         }
-        App.toast(`Exported ${ids.length} list(s)`, 'success');
+        // Count only what actually downloaded — the old toast claimed every
+        // selected list even when individual exports had failed.
+        if (exported) {
+            App.toast(`Exported ${exported} of ${ids.length} list(s)${exported < ids.length ? ' (failures reported above)' : ''}`,
+                exported < ids.length ? 'info' : 'success');
+        }
     },
 };
