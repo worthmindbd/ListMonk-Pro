@@ -17,7 +17,9 @@ Pins the contracts the UI relies on:
   (every router test patches auth out, so the crypto itself was untested).
 """
 
+import json
 import time
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -25,6 +27,8 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.main import app
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
@@ -353,3 +357,332 @@ def test_create_session_sets_httponly_samesite_cookie():
     assert auth.COOKIE_NAME in header
     assert "HttpOnly" in header
     assert "SameSite=lax" in header.lower() or "samesite=lax" in header.lower()
+
+
+# ── Supplement: exact query strings the endpoints hand ListMonk ──────────────
+
+def test_search_endpoint_sends_exact_ilike_clause(client):
+    with patch("app.routers.subscribers.listmonk") as lm:
+        lm.get_subscribers = AsyncMock(
+            return_value={"data": {"results": [], "total": 0}})
+        r = client.get("/api/subscribers", params={"search": "info@regen"})
+        assert r.status_code == 200
+        assert lm.get_subscribers.call_args[0][2] == (
+            "(subscribers.email ILIKE '%info@regen%' "
+            "OR subscribers.name ILIKE '%info@regen%')"
+        )
+
+
+def test_search_neutralizes_injection_attempt(client):
+    with patch("app.routers.subscribers.listmonk") as lm:
+        lm.get_subscribers = AsyncMock(
+            return_value={"data": {"results": [], "total": 0}})
+        client.get("/api/subscribers",
+                   params={"search": "'; DROP TABLE subscribers; --"})
+        sent = lm.get_subscribers.call_args[0][2]
+        # The term's quote is doubled, so it stays a string literal.
+        assert "''; DROP TABLE subscribers; --" in sent
+
+
+def test_search_composes_exactly_with_query_and_status(client):
+    from app.routers.subscribers import _compose_query
+
+    composed = _compose_query("name like 'a'", "x", "enabled")
+    assert composed == (
+        "((name like 'a') AND ((subscribers.email ILIKE '%x%' "
+        "OR subscribers.name ILIKE '%x%'))) AND subscribers.status = 'enabled'"
+    )
+    # The legacy query+status composition stays byte-identical.
+    assert _compose_query("name like 'a'", "", "blocklisted") == (
+        "(name like 'a') AND subscribers.status = 'blocklisted'"
+    )
+
+
+def test_export_all_honours_search(client):
+    captured = {}
+
+    async def _rows():
+        yield {"id": 1, "email": "info@regen.example", "name": "R",
+               "status": "enabled", "created_at": "2026-01-01",
+               "updated_at": "2026-01-01"}
+
+    def fake_iter_pages(fn, per_page=100, max_pages=0, **kwargs):
+        captured.update(kwargs)
+        return _rows()
+
+    with patch("app.routers.subscribers.listmonk") as lm:
+        lm.iter_pages = fake_iter_pages
+        r = client.get("/api/subscribers/export-all",
+                       params={"search": "info@regen"})
+    assert r.status_code == 200
+    assert "info@regen.example" in r.text
+    assert "ILIKE '%info@regen%'" in captured["query"]
+
+
+# ── Supplement: analytics traversal at the handler, dates at the endpoint ────
+
+@pytest.mark.asyncio
+async def test_analytics_traversal_segment_is_400_at_the_handler():
+    """The literal `..%2F..%2Fsettings` value from the review finding.
+
+    httpx/TestClient normalise dot-segments before routing can see them, so
+    the exact hostile value is asserted against the handlers directly — the
+    whitelist must reject it however it arrives.
+    """
+    from app.routers.campaigns import (
+        get_campaign_analytics, export_campaign_analytics,
+    )
+
+    for handler in (get_campaign_analytics, export_campaign_analytics):
+        with pytest.raises(HTTPException) as excinfo:
+            await handler("..%2F..%2Fsettings")
+        assert excinfo.value.status_code == 400
+
+
+def test_analytics_encoded_traversal_is_400_through_the_stack(client):
+    """A %2F-encoded value decodes into extra path segments before routing;
+    the analytics catch-all must reject it with an explicit 400 (never a
+    bare 404, and never a call upstream)."""
+    with patch("app.routers.campaigns.listmonk") as lm:
+        lm.get_campaign_analytics = AsyncMock(return_value={"data": []})
+        r = client.get("/api/campaigns/analytics/..%2F..%2Fsettings")
+        assert r.status_code == 400
+        lm.get_campaign_analytics.assert_not_awaited()
+
+
+def test_engagement_export_forwards_date_predicate_to_listmonk(client):
+    """The validated bounds must actually reach the ListMonk query."""
+    captured = {}
+
+    async def _rows():
+        yield {"id": 1, "email": "a@x.com", "name": "A", "status": "enabled",
+               "lists": [], "attribs": {}, "created_at": "2026-10-05"}
+
+    def fake_iter_pages(fn, per_page=100, **kwargs):
+        captured.update(kwargs)
+        return _rows()
+
+    with patch("app.routers.campaigns.listmonk") as lm:
+        lm.iter_pages = fake_iter_pages
+        resp = client.get(
+            "/api/campaigns/7/subscribers/clicks/export",
+            params={"from_date": "2026-10-01", "to_date": "2026-10-14"},
+        )
+
+    assert resp.status_code == 200
+    assert "a@x.com" in resp.text
+    assert "link_clicks" in captured["query"]
+    assert "created_at >= '2026-10-01'" in captured["query"]
+    assert "created_at < '2026-10-15'" in captured["query"]
+
+
+def test_bounce_export_filters_rows_by_date_window(client):
+    bounces = [
+        {"email": "before@x.com", "type": "hard", "source": "api",
+         "created_at": "2026-09-30T23:59:59+00:00"},
+        {"email": "inside@x.com", "type": "hard", "source": "api",
+         "created_at": "2026-10-05T08:00:00+00:00"},
+        {"email": "after@x.com", "type": "hard", "source": "api",
+         "created_at": "2026-10-15T00:00:01+00:00"},
+    ]
+
+    async def fake_iter(lm_client, bounce_type, campaign_id=None):
+        for b in bounces:
+            yield b
+
+    with patch("app.routers.campaigns.iter_filtered_bounces", fake_iter), \
+         patch("app.routers.campaigns.listmonk", AsyncMock()):
+        resp = client.get(
+            "/api/campaigns/7/subscribers/bounces/export",
+            params={"from_date": "2026-10-01", "to_date": "2026-10-14"},
+        )
+
+    assert resp.status_code == 200
+    assert "inside@x.com" in resp.text
+    assert "before@x.com" not in resp.text
+    assert "after@x.com" not in resp.text
+
+
+# ── Supplement: unsubscribe scan per-message errors & success contract ───────
+
+def test_unsub_scan_per_message_errors_return_502(client, monkeypatch):
+    """A configured mailbox whose scan counted errors is a failed scan."""
+    import app.routers.unsubscribes as ur
+
+    monkeypatch.setattr(ur.settings, "imap_host", "mail.example.com")
+    monkeypatch.setattr(ur.settings, "imap_user", "me@example.com")
+    monkeypatch.setattr(ur.settings, "imap_pass", "secret")
+    imap_result = {"scanned": 6, "matched": 3, "processed": 2, "errors": 1,
+                   "message": "Scan complete: 2 unsubscribed"}
+    with patch.object(ur, "scan_and_unsubscribe",
+                      AsyncMock(return_value=imap_result)), \
+         patch.object(ur, "scan_link_unsubscribes",
+                      AsyncMock(return_value={"processed": 1})):
+        r = client.post("/api/unsubscribes/scan")
+        assert r.status_code == 502
+        detail = r.json()["detail"]
+        assert "1 error(s)" in detail
+        assert "link scan processed 1" in detail
+
+
+def test_unsub_scan_success_keeps_response_contract(client, monkeypatch):
+    """The frontend reads `imap`, `link` and `message` — keep them intact."""
+    import app.routers.unsubscribes as ur
+
+    monkeypatch.setattr(ur.settings, "imap_host", "mail.example.com")
+    monkeypatch.setattr(ur.settings, "imap_user", "me@example.com")
+    monkeypatch.setattr(ur.settings, "imap_pass", "secret")
+    imap_result = {"scanned": 6, "matched": 3, "processed": 2, "errors": 0,
+                   "message": "Scan complete: 2 unsubscribed"}
+    link_result = {"processed": 1}
+    with patch.object(ur, "scan_and_unsubscribe",
+                      AsyncMock(return_value=imap_result)), \
+         patch.object(ur, "scan_link_unsubscribes",
+                      AsyncMock(return_value=link_result)):
+        r = client.post("/api/unsubscribes/scan")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["imap"] == imap_result
+        assert body["link"] == link_result
+        assert body["message"] == "Scan complete: 3 unsubscribed"
+
+
+# ── Supplement: login limiter counts non-string attempts end-to-end ──────────
+
+def test_login_limiter_trips_on_non_string_attempts(monkeypatch):
+    import app.auth as auth
+
+    monkeypatch.setenv("DASHBOARD_USER", "admin")
+    monkeypatch.setenv("DASHBOARD_PASS", "secret")
+    c = TestClient(app, raise_server_exceptions=False)
+    for _ in range(auth.LOGIN_MAX_ATTEMPTS):
+        assert c.post("/auth/login",
+                      json={"username": 123, "password": "x"}).status_code == 400
+    # Limiter tripped: even valid string credentials are refused until the
+    # window passes — the malformed attempts were counted, not skipped.
+    assert c.post("/auth/login",
+                  json={"username": "admin", "password": "secret"}).status_code == 429
+
+
+# ── Supplement: converter upload streaming ───────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_read_upload_aborts_oversized_stream_without_buffering_it(monkeypatch):
+    """A chunked upload (no declared size) must 413 before being drained."""
+    from app.routers import converter as conv
+
+    class EndlessUpload:
+        size = None  # chunked transfer: no declared size available
+
+        def __init__(self):
+            self.reads = 0
+
+        async def read(self, n=-1):
+            self.reads += 1
+            return b"x" * (n if n > 0 else 65536)
+
+    monkeypatch.setattr(conv, "MAX_UPLOAD_BYTES", 4096)
+    upload = EndlessUpload()
+    with pytest.raises(HTTPException) as excinfo:
+        await conv._read_upload(upload)
+    assert excinfo.value.status_code == 413
+    # 64 KiB chunks against a 4 KiB cap: the very first read already exceeds
+    # the limit, so the stream is aborted instead of fully buffered.
+    assert upload.reads == 1
+
+
+@pytest.mark.asyncio
+async def test_read_upload_rejects_empty_file():
+    from app.routers import converter as conv
+
+    class EmptyUpload:
+        size = 0
+
+        async def read(self, n=-1):
+            return b""
+
+    with pytest.raises(HTTPException) as excinfo:
+        await conv._read_upload(EmptyUpload())
+    assert excinfo.value.status_code == 400
+
+
+# ── Supplement: scheduler PUT goes through the locked service API ────────────
+
+def test_scheduler_put_persists_via_locked_service_api(client, tmp_path, monkeypatch):
+    import app.services.campaign_scheduler as sched
+
+    monkeypatch.setattr(sched, "SCHEDULE_FILE", tmp_path / "schedule.json")
+    with patch("app.main.run_scheduler_tick", AsyncMock()) as tick:
+        r = client.put("/api/scheduler", json={
+            "enabled": True, "start_hour": 9,
+            "auto_paused_campaigns": [99],  # runtime state: must be ignored
+        })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["schedule"]["enabled"] is True
+    assert body["schedule"]["start_hour"] == 9
+    assert body["schedule"]["auto_paused_campaigns"] == []
+    tick.assert_awaited_once()  # enabled schedules re-tick immediately
+    stored = json.loads((tmp_path / "schedule.json").read_text())
+    assert stored["start_hour"] == 9
+    assert stored["auto_paused_campaigns"] == []
+
+
+def test_scheduler_put_write_failure_is_500(client, monkeypatch):
+    import app.services.campaign_scheduler as sched
+
+    def read_only(schedule):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(sched, "save_schedule", read_only)
+    r = client.put("/api/scheduler", json={"enabled": False})
+    assert r.status_code == 500
+    assert "schedule file" in r.json()["detail"].lower()
+
+
+# ── Supplement: cache invalidation hook & bulk id dedupe ─────────────────────
+
+def test_invalidate_summary_cache_clears_cache_and_timestamp():
+    from app.routers import campaigns as C
+
+    C._summary_cache = {"total_campaigns": 42}
+    C._summary_cached_at = 123.0
+    C.invalidate_summary_cache()
+    assert C._summary_cache == {}
+    assert C._summary_cached_at == 0.0
+
+
+def test_conftest_resets_shared_state_between_tests():
+    """The autouse reset must leave every rule-11 cache empty at test start."""
+    from app import auth
+    from app.routers import campaigns as C
+    from app.services import hard_bounce_cache as hbc
+
+    assert C._summary_cache == {}
+    assert hbc._hard_bounce_counts == {}
+    assert hbc._pending_update is None
+    assert auth._login_failures == {}
+
+
+def test_bulk_blocklist_dedupes_ids(client):
+    with patch("app.routers.subscribers.listmonk") as lm:
+        lm.blocklist_subscribers = AsyncMock(return_value={"data": True})
+        r = client.put("/api/subscribers/blocklist", json={"ids": [3, "3", 4]})
+        assert r.status_code == 200
+        lm.blocklist_subscribers.assert_awaited_once_with([3, 4])
+
+
+# ── Supplement: packaging pins ────────────────────────────────────────────────
+
+def test_dockerignore_keeps_favicon_after_png_exclusion():
+    """`*.png` used to strip static/favicon.png → /favicon.ico 500'd in prod."""
+    lines = (REPO_ROOT / ".dockerignore").read_text().splitlines()
+    assert "!static/favicon.png" in lines
+    assert lines.index("!static/favicon.png") > lines.index("*.png")
+
+
+def test_deploy_workflow_gates_on_tests():
+    content = (REPO_ROOT / ".github" / "workflows" / "deploy.yml").read_text()
+    assert "needs: test" in content
+    assert "pytest tests/ -q" in content

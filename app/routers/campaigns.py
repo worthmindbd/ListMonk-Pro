@@ -157,6 +157,19 @@ async def export_campaign_analytics(analytics_type: str,
     )
 
 
+# Registered AFTER the two real analytics routes, so single-segment types and
+# .../export still match above. A %2F-encoded traversal value (e.g.
+# "..%2F..%2Fsettings") is percent-decoded into extra path segments before
+# routing, which the single-segment routes can never match — without this
+# catch-all it would be an anonymous 404 instead of an explicit rejection.
+@router.get("/analytics/{traversal:path}")
+async def reject_analytics_path_traversal(traversal: str):
+    raise HTTPException(
+        status_code=400,
+        detail=f"Invalid analytics type: {traversal}. Use views, clicks, bounces, or links",
+    )
+
+
 @router.get("/export-all")
 async def export_all_campaigns():
     """Stream the full campaign history as CSV, page by page."""
