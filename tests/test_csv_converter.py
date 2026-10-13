@@ -1,6 +1,6 @@
 import csv
 import json
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -429,3 +429,165 @@ def test_convert_endpoint_reports_invalid_emails(client):
     stats = json.loads(resp.headers["x-conversion-stats"])
     assert stats["converted"] == 1
     assert stats["invalid_emails"] == 1
+
+
+# ── Regression: silent attribute loss on import ────────────────────────────
+# An import that stores empty attributes used to report success while
+# throwing away every column of the source file. The converter now refuses
+# the mapping instead of producing a file of empty attributes.
+
+def test_selected_mode_with_no_attribute_columns_is_rejected():
+    csv_data = b"Email,Company,City\nalice@example.com,Acme,Oslo\n"
+    res = convert_csv(
+        csv_data,
+        email_column="Email",
+        attribute_columns=[],
+        auto_attributes=False,
+    )
+    assert "error" in res["stats"]
+    assert res["stats"]["code"] == "no_attributes"
+    assert res["csv_content"] == ""
+
+
+def test_selected_mode_with_unresolvable_columns_is_rejected():
+    csv_data = b"Email,Company,City\nalice@example.com,Acme,Oslo\n"
+    res = convert_csv(
+        csv_data,
+        email_column="Email",
+        attribute_columns=["ghost"],
+        auto_attributes=False,
+    )
+    assert "error" in res["stats"]
+    assert "ghost" in res["stats"]["error"]
+    assert res["stats"]["unresolved_columns"] == ["ghost"]
+
+
+def test_email_only_file_in_selected_mode_is_allowed():
+    # Nothing to drop: an email-only CSV legitimately has no attributes.
+    csv_data = b"Email\nalice@example.com\nbob@example.com\n"
+    res = convert_csv(csv_data, email_column="Email", auto_attributes=False)
+    assert "error" not in res["stats"]
+    assert res["stats"]["converted"] == 2
+    assert res["stats"]["attribute_count"] == 0
+    rows = list(csv.DictReader(res["csv_content"].splitlines()))
+    assert all(r["attributes"] == "{}" for r in rows)
+
+
+def test_stats_report_attribute_count_and_empty_attribute_rows():
+    csv_data = (
+        b"Email,Company,City\n"
+        b"alice@example.com,Acme,Oslo\n"
+        b"bob@example.com,,\n"
+    )
+    res = convert_csv(csv_data, email_column="Email")
+    stats = res["stats"]
+    assert stats["attribute_count"] == 2
+    assert stats["attributes_empty"] is False
+    # Bob's attribute columns are blank, so his row carries no attributes.
+    assert stats["empty_attributes"] == 1
+    assert stats["unresolved_columns"] == []
+
+
+def test_preview_endpoint_rejects_selected_empty_mapping(client):
+    csv_data = b"Email,Company,City\nalice@example.com,Acme,Oslo\n"
+    resp = client.post(
+        "/api/converter/preview",
+        files={"file": ("t.csv", csv_data, "text/csv")},
+        data={
+            "email_column": "Email",
+            "attribute_columns": json.dumps([]),
+            "attribute_mode": "selected",
+        },
+    )
+    assert resp.status_code == 400
+    assert "No attribute columns selected" in resp.json()["detail"]
+
+
+# ── Import options forwarded to ListMonk ───────────────────────────────────
+
+def _mock_listmonk():
+    lm = AsyncMock()
+    lm.import_subscribers = AsyncMock(return_value={"data": {"status": "importing"}})
+    return lm
+
+
+def test_import_defaults_to_confirmed_and_full_overwrite(client):
+    csv_data = b"Email,Company\nalice@example.com,Acme\n"
+    lm = _mock_listmonk()
+    with patch("app.routers.converter.listmonk", lm):
+        resp = client.post(
+            "/api/converter/convert-and-import",
+            files={"file": ("t.csv", csv_data, "text/csv")},
+            data={"email_column": "Email", "attribute_mode": "auto", "list_ids": "[1]"},
+        )
+    assert resp.status_code == 200
+    params = lm.import_subscribers.await_args.args[2]
+    assert params["lists"] == [1]
+    assert params["subscription_status"] == "confirmed"
+    assert params["overwrite_userinfo"] is True
+    assert params["overwrite_subscription_status"] is True
+    assert params["overwrite"] is True
+
+
+def test_import_forwards_granular_overwrite_and_status(client):
+    csv_data = b"Email,Company\nalice@example.com,Acme\n"
+    lm = _mock_listmonk()
+    with patch("app.routers.converter.listmonk", lm):
+        resp = client.post(
+            "/api/converter/convert-and-import",
+            files={"file": ("t.csv", csv_data, "text/csv")},
+            data={
+                "email_column": "Email",
+                "attribute_mode": "auto",
+                "list_ids": "[2]",
+                "subscription_status": "unconfirmed",
+                "overwrite_userinfo": "false",
+                "overwrite_subscription_status": "true",
+            },
+        )
+    assert resp.status_code == 200
+    params = lm.import_subscribers.await_args.args[2]
+    assert params["subscription_status"] == "unconfirmed"
+    assert params["overwrite_userinfo"] is False
+    assert params["overwrite_subscription_status"] is True
+    # The legacy flag must not force-enable both granular switches.
+    assert params["overwrite"] is False
+
+
+def test_import_rejects_invalid_subscription_status(client):
+    csv_data = b"Email\nalice@example.com\n"
+    resp = client.post(
+        "/api/converter/convert-and-import",
+        files={"file": ("t.csv", csv_data, "text/csv")},
+        data={
+            "email_column": "Email",
+            "attribute_mode": "auto",
+            "list_ids": "[1]",
+            "subscription_status": "bogus",
+        },
+    )
+    assert resp.status_code == 400
+    assert "subscription_status" in resp.json()["detail"]
+
+
+def test_import_rejects_zero_row_conversion(client):
+    # Every row has a malformed e-mail, so nothing would be imported.
+    csv_data = b"Email\nnot-an-email\n"
+    resp = client.post(
+        "/api/converter/convert-and-import",
+        files={"file": ("t.csv", csv_data, "text/csv")},
+        data={"email_column": "Email", "attribute_mode": "auto", "list_ids": "[1]"},
+    )
+    assert resp.status_code == 400
+    assert "Nothing to import" in resp.json()["detail"]
+
+
+def test_import_rejects_empty_list_selection(client):
+    csv_data = b"Email\nalice@example.com\n"
+    resp = client.post(
+        "/api/converter/convert-and-import",
+        files={"file": ("t.csv", csv_data, "text/csv")},
+        data={"email_column": "Email", "attribute_mode": "auto", "list_ids": "[]"},
+    )
+    assert resp.status_code == 400
+    assert "at least one list" in resp.json()["detail"].lower()

@@ -69,6 +69,60 @@ def _parse_list_ids(list_ids: str) -> list:
     return [int(i) for i in parsed]
 
 
+# ListMonk's importer accepts exactly these subscription statuses; anything
+# else is rejected before the upload is even converted.
+VALID_SUB_STATUSES = ("confirmed", "unconfirmed", "unsubscribed")
+VALID_IMPORT_MODES = ("subscribe", "blocklist")
+
+
+def _parse_import_options(
+    mode: str,
+    subscription_status: Optional[str],
+    overwrite: bool,
+    overwrite_userinfo: Optional[bool],
+    overwrite_subscription_status: Optional[bool],
+) -> dict:
+    """Build ListMonk's import ``params`` payload.
+
+    ListMonk >= 4.1 understands ``overwrite_userinfo`` /
+    ``overwrite_subscription_status`` separately, but a legacy ``overwrite:
+    true`` force-enables both, so the legacy flag is only sent when the
+    granular intent matches it — older ListMonk versions then still behave as
+    before while new ones honour the individual switches.
+
+    ``subscription_status`` defaults to ``confirmed`` for subscribe imports:
+    a double-opt-in list only mails confirmed subscriptions, and silently
+    importing a whole lead list as ``unconfirmed`` (ListMonk's own default)
+    leaves it unmailable with no visible error.
+    """
+    mode = (mode or "").strip().lower()
+    if mode not in VALID_IMPORT_MODES:
+        raise HTTPException(status_code=400, detail=f"Invalid import mode '{mode}' (use 'subscribe' or 'blocklist')")
+
+    status = (subscription_status or "").strip().lower() or None
+    if status and status not in VALID_SUB_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid subscription_status '{status}' (use one of {', '.join(VALID_SUB_STATUSES)})",
+        )
+    if not status:
+        status = "confirmed" if mode == "subscribe" else None
+
+    ow_user = overwrite if overwrite_userinfo is None else overwrite_userinfo
+    ow_status = overwrite if overwrite_subscription_status is None else overwrite_subscription_status
+
+    params = {
+        "mode": mode,
+        "delim": ",",
+        "overwrite_userinfo": bool(ow_user),
+        "overwrite_subscription_status": bool(ow_status),
+        "overwrite": bool(ow_user and ow_status),
+    }
+    if status:
+        params["subscription_status"] = status
+    return params
+
+
 @router.post("/detect-columns")
 async def detect_csv_columns(file: UploadFile = File(...)):
     """Upload a CSV and detect its columns + preview rows."""
@@ -139,8 +193,18 @@ async def convert_and_import(
     attribute_mode: Optional[str] = Form(None),
     list_ids: str = Form(...),
     mode: str = Form("subscribe"),
+    subscription_status: Optional[str] = Form(None),
+    overwrite: bool = Form(True),
+    overwrite_userinfo: Optional[bool] = Form(None),
+    overwrite_subscription_status: Optional[bool] = Form(None),
 ):
-    """Convert CSV to ListMonk format and immediately import to ListMonk."""
+    """Convert CSV to ListMonk format and immediately import to ListMonk.
+
+    ``subscription_status`` controls how new subscriptions are created on
+    double-opt-in lists (``confirmed`` by default so an imported lead list is
+    actually mailable); the two ``overwrite_*`` switches map onto ListMonk's
+    granular upsert flags.
+    """
     content = await _read_upload(file)
     attrs, auto_attributes = _parse_mapping(attribute_mode, attribute_columns)
 
@@ -149,19 +213,28 @@ async def convert_and_import(
     if "error" in result.get("stats", {}):
         raise HTTPException(status_code=400, detail=result["stats"]["error"])
 
+    stats = result.get("stats", {})
+    if not stats.get("converted"):
+        raise HTTPException(
+            status_code=400,
+            detail="Nothing to import: every row was skipped (missing or malformed e-mail addresses).",
+        )
+
+    import_params = _parse_import_options(
+        mode, subscription_status, overwrite, overwrite_userinfo, overwrite_subscription_status,
+    )
+    import_params["lists"] = _parse_list_ids(list_ids)
+    if not import_params["lists"]:
+        raise HTTPException(status_code=400, detail="Select at least one list to import into")
+
     # Import to ListMonk
-    import_params = {
-        "mode": mode,
-        "delim": ",",
-        "lists": _parse_list_ids(list_ids),
-        "overwrite": True,
-    }
     import_result = await listmonk.import_subscribers(
         result["csv_content"].encode("utf-8"),
         "listmonk_import.csv",
         import_params,
     )
     return {
-        "conversion_stats": result["stats"],
+        "conversion_stats": stats,
+        "import_params": import_params,
         "import_result": import_result,
     }

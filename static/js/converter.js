@@ -1,5 +1,12 @@
 /**
  * CSV Converter page - Upload, map columns, convert, import.
+ *
+ * The converter maps an arbitrary CSV onto ListMonk's three import columns
+ * (email, name, attributes). Because an import that silently stores empty
+ * attributes looks exactly like a successful one, every step here states what
+ * will be stored: the mapping step counts the attribute columns, the preview
+ * shows the real converted rows, and the import dialog refuses to start when
+ * the mapping would throw the file's data away.
  */
 const Converter = {
     fileContent: null,
@@ -12,6 +19,7 @@ const Converter = {
     _autoAttributes: true,
     _previewStats: null,
     _importing: false,
+    _lists: [],
     step: 1,
 
     render() {
@@ -26,6 +34,7 @@ const Converter = {
         this._autoAttributes = true;
         this._previewStats = null;
         this._importing = false;
+        this._lists = [];
         this.renderStep();
     },
 
@@ -83,6 +92,7 @@ const Converter = {
                 emailCol: this.suggested.email || '',
                 nameCol: this.suggested.name || '',
                 attrCols: [],
+                auto: this._autoAttributes,
                 _initialized: true,
             };
         }
@@ -100,36 +110,53 @@ const Converter = {
             `<label class="checkbox-label"><input type="checkbox" name="attrCols" value="${App.escapeHtml(c)}"${checkedAttrs.has(c) ? ' checked' : ''}><span>${App.escapeHtml(c)}</span></label>`
         ).join('');
 
-        // Sample data table
+        // Sample data table: wide lead files (40+ columns) are unreadable as a
+        // full grid, so the preview shows the first columns and reports how
+        // many more exist. Cells are truncated instead of wrapped.
+        const SAMPLE_COLS = 8;
+        const shownCols = this.columns.slice(0, SAMPLE_COLS);
+        const hiddenCols = this.columns.length - shownCols.length;
         let sampleHtml = '';
         if (this.sampleRows.length) {
-            sampleHtml = '<div class="table-wrapper" style="margin-top:16px"><table><thead><tr>';
-            this.columns.forEach(c => { sampleHtml += `<th>${App.escapeHtml(c)}</th>`; });
+            sampleHtml = `
+                <div class="form-group" style="margin-top:4px">
+                    <label>Sample data <span style="font-weight:400;color:var(--text-muted)">(first ${this.sampleRows.length} rows${hiddenCols > 0 ? `, ${shownCols.length} of ${this.columns.length} columns` : ''})</span></label>
+                    <div class="table-wrapper sample-table-wrap"><table class="sample-table"><thead><tr>`;
+            shownCols.forEach(c => { sampleHtml += `<th>${App.escapeHtml(c)}</th>`; });
+            if (hiddenCols > 0) sampleHtml += `<th class="more-cols">+${hiddenCols} more</th>`;
             sampleHtml += '</tr></thead><tbody>';
             this.sampleRows.forEach(row => {
                 sampleHtml += '<tr>';
-                this.columns.forEach(c => { sampleHtml += `<td>${App.escapeHtml(row[c] || '')}</td>`; });
+                shownCols.forEach(c => { sampleHtml += `<td title="${App.escapeHtml(row[c] || '')}">${App.escapeHtml(row[c] || '')}</td>`; });
+                if (hiddenCols > 0) sampleHtml += '<td class="more-cols">…</td>';
                 sampleHtml += '</tr>';
             });
-            sampleHtml += '</tbody></table></div>';
+            sampleHtml += '</tbody></table></div></div>';
         }
 
         // In auto mode ListMonk receives one attribute per unmapped column, so
-        // say exactly which columns that will be before the preview.
+        // say exactly which columns that will be - as a count plus a scrollable
+        // list, not a wall of text.
         const auto = this._autoAttributes;
         const skipped = new Set([emailSel, nameSel].filter(Boolean));
         const autoCols = auto ? this.columns.filter(c => !skipped.has(c)) : [];
+        const pickedCount = checkedAttrs.size;
+        const attrCount = auto ? autoCols.length : pickedCount;
+        const nothingPicked = !auto && pickedCount === 0 && this.columns.length > skipped.size;
+
         const autoHint = auto
             ? (autoCols.length
-                ? `All other columns will be stored as JSON attributes: <strong>${autoCols.map(c => App.escapeHtml(c)).join(', ')}</strong>`
-                : 'No extra columns found - every column is already mapped.')
-            : 'Only the columns checked below will be stored as JSON attributes; unchecked columns are dropped.';
+                ? `Every column except <strong>${App.escapeHtml(emailSel || 'the email column')}${nameSel ? ` and ${App.escapeHtml(nameSel)}` : ''}</strong> is stored as a JSON attribute.`
+                : 'No extra columns found - every column is already mapped to email/name.')
+            : (pickedCount
+                ? `Only the ${pickedCount} checked column${pickedCount === 1 ? '' : 's'} will be stored; the other ${Math.max(0, this.columns.length - skipped.size - pickedCount)} are dropped.`
+                : 'No attribute columns are checked - every column except email/name would be dropped.');
 
         return `
             <div class="card">
                 <div class="card-header">
                     <h3 class="card-title">Map Columns</h3>
-                    <span style="color:var(--text-muted);font-size:0.85rem">${this.fileName} - ${this.columns.length} columns detected</span>
+                    <span style="color:var(--text-muted);font-size:0.85rem">${App.escapeHtml(this.fileName)} - ${this.columns.length} columns detected</span>
                 </div>
                 ${this.renderWarnings()}
                 <div class="form-grid">
@@ -142,17 +169,35 @@ const Converter = {
                         <select id="nameCol" onchange="Converter.preserveMapping()"><option value="">-- None --</option>${nameOptions}</select>
                     </div>
                 </div>
-                <div class="form-group">
-                    <label class="checkbox-label ${auto ? 'toggle-on' : ''}" style="font-size:0.95rem;padding:10px 14px">
+
+                <label class="switch-row ${auto ? 'on' : ''}" id="autoRow">
+                    <span class="switch">
                         <input type="checkbox" id="autoAttrs" ${auto ? 'checked' : ''} onchange="Converter.showAutoAttrs(this.checked)">
-                        <span style="font-weight:600">Convert all other columns to attributes (recommended)</span>
+                        <span class="slider"></span>
+                    </span>
+                    <span class="switch-text">
+                        <span class="switch-title">Convert all other columns to attributes
+                            <span class="chip ${auto ? 'ok' : ''}">${attrCount} attribute${attrCount === 1 ? '' : 's'}</span>
+                        </span>
+                        <span class="switch-desc">Recommended. Keeps every column of your file inside ListMonk's attributes JSON, so no lead data is lost. Turn it off to hand-pick the columns to keep.</span>
+                    </span>
+                </label>
+
+                <div class="form-group" id="attrPicker" style="display:${auto ? 'none' : 'block'};margin-top:14px">
+                    <label>Attribute Columns (stored as JSON in ListMonk)
+                        <span style="float:right;font-weight:400">
+                            <button type="button" class="btn btn-sm btn-secondary" onclick="Converter.toggleAllAttrs(true)">Select all</button>
+                            <button type="button" class="btn btn-sm btn-secondary" onclick="Converter.toggleAllAttrs(false)">Clear</button>
+                        </span>
                     </label>
-                    <p style="font-size:0.85rem;color:var(--text-muted);margin-top:8px">${autoHint}</p>
+                    <div class="attr-picker"><div class="checkbox-group">${attrCheckboxes}</div></div>
+                    ${nothingPicked ? `
+                    <div class="notice notice-danger" style="margin-top:10px">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                        <div>No attribute columns selected. Continuing would import e-mail and name only and <strong>drop every other column</strong>. Check the columns to keep, or turn the switch above back on.</div>
+                    </div>` : ''}
                 </div>
-                <div class="form-group" id="attrPicker" style="display:${auto ? 'none' : 'block'}">
-                    <label>Attribute Columns (stored as JSON in ListMonk)</label>
-                    <div class="checkbox-group">${attrCheckboxes}</div>
-                </div>
+                <p style="font-size:0.83rem;color:var(--text-muted);margin:10px 0 0">${autoHint}</p>
                 ${sampleHtml}
                 <div class="form-actions">
                     <button class="btn btn-primary" onclick="Converter.processMapping()">Next: Preview</button>
@@ -169,7 +214,7 @@ const Converter = {
         const picker = document.getElementById('attrPicker');
         const pickerVisible = !!picker && picker.style.display !== 'none';
         if (!this._mapping) {
-            this._mapping = { emailCol: '', nameCol: '', attrCols: [], _initialized: true };
+            this._mapping = { emailCol: '', nameCol: '', attrCols: [], auto: this._autoAttributes, _initialized: true };
         }
         if (emailEl) this._mapping.emailCol = emailEl.value;
         if (nameEl) this._mapping.nameCol = nameEl.value;
@@ -185,7 +230,7 @@ const Converter = {
     // Toggle between "keep every column" and hand-picked attributes.
     showAutoAttrs(checked) {
         if (!this._mapping) {
-            this._mapping = { emailCol: '', nameCol: '', attrCols: [], _initialized: true };
+            this._mapping = { emailCol: '', nameCol: '', attrCols: [], auto: checked, _initialized: true };
         }
         // When the picker is visible the user may have just changed it; snapshot
         // the checked columns before the mode switch hides them again.
@@ -194,6 +239,16 @@ const Converter = {
             this._mapping.attrCols = Array.from(document.querySelectorAll('input[name="attrCols"]:checked')).map(cb => cb.value);
         }
         this._autoAttributes = checked;
+        this._mapping.auto = checked;
+        this.renderStep();
+    },
+
+    // Select / clear every attribute checkbox in one go (lead files easily
+    // have 40+ columns, so ticking them by hand is not an option).
+    toggleAllAttrs(on) {
+        const boxes = Array.from(document.querySelectorAll('input[name="attrCols"]'));
+        boxes.forEach(cb => { cb.checked = on; });
+        this._mapping.attrCols = on ? boxes.map(cb => cb.value) : [];
         this.renderStep();
     },
 
@@ -213,7 +268,9 @@ const Converter = {
             <div class="card" style="margin-bottom:20px">
                 <div class="card-header">
                     <h3 class="card-title">Conversion Preview</h3>
+                    <span style="color:var(--text-muted);font-size:0.85rem">${App.escapeHtml(this.fileName)}</span>
                 </div>
+                <div id="previewChips" class="chip-row" style="margin-bottom:12px"></div>
                 <p id="previewStats" style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:12px"></p>
                 <div id="previewNotice"></div>
                 <div id="previewTable"><p style="color:var(--text-muted)">Converting a sample...</p></div>
@@ -274,7 +331,6 @@ const Converter = {
 
         // A new file invalidates every mapping choice made for the previous one.
         this._mapping = null;
-        this._attrCols = [];
         this._previewStats = null;
 
         const formData = new FormData();
@@ -315,9 +371,17 @@ const Converter = {
 
         if (!emailCol) { App.toast('Email column is required', 'error'); return; }
 
+        // Stop an import that would throw the whole file away before it even
+        // reaches the server: selected mode with nothing checked.
+        if (!auto && !attrCols.length && this.columns.length > [emailCol, nameCol].filter(Boolean).length) {
+            App.toast('Select the columns to store as attributes, or turn auto-attributes back on', 'error');
+            this.step = 2;
+            this.renderStep();
+            return;
+        }
+
         // Store mapping for later
         this._mapping = { emailCol, nameCol, attrCols, auto, _initialized: true };
-        this._attrCols = attrCols;
         this._autoAttributes = auto;
         this._previewStats = null;
 
@@ -340,8 +404,10 @@ const Converter = {
 
     renderPreviewError() {
         const statEl = document.getElementById('previewStats');
+        const chipsEl = document.getElementById('previewChips');
         const tableEl = document.getElementById('previewTable');
         if (statEl) statEl.textContent = '';
+        if (chipsEl) chipsEl.innerHTML = '';
         if (tableEl) {
             tableEl.innerHTML = '<p style="color:var(--text-muted)">Preview failed - adjust the mapping and try again.</p>';
         }
@@ -350,20 +416,37 @@ const Converter = {
     // The attribute mapping shared by preview, download and import.
     buildMappingFormData() {
         const formData = new FormData();
+        // `auto` may be missing from mappings created before this field
+        // existed; fall back to the live switch state so the request never
+        // silently downgrades to "selected" mode with no columns.
+        const auto = this._mapping.auto ?? this._autoAttributes;
         formData.append('file', this.fileContent);
         formData.append('email_column', this._mapping.emailCol);
         if (this._mapping.nameCol) formData.append('name_column', this._mapping.nameCol);
-        formData.append('attribute_columns', JSON.stringify(this._mapping.attrCols));
-        formData.append('attribute_mode', this._mapping.auto ? 'auto' : 'selected');
+        formData.append('attribute_columns', JSON.stringify(this._mapping.attrCols || []));
+        formData.append('attribute_mode', auto ? 'auto' : 'selected');
         return formData;
     },
 
     // Renders the converted rows returned by /api/converter/preview.
     renderPreviewResult(rows, stats) {
         const statEl = document.getElementById('previewStats');
+        const chipsEl = document.getElementById('previewChips');
         const noticeEl = document.getElementById('previewNotice');
         const tableEl = document.getElementById('previewTable');
         if (!tableEl) return;
+
+        if (chipsEl) {
+            const attrCount = stats?.attribute_count ?? 0;
+            const chips = [
+                `<span class="chip"><strong>${stats?.converted ?? 0}</strong> rows converted</span>`,
+                stats?.skipped ? `<span class="chip warn"><strong>${stats.skipped}</strong> skipped</span>` : '',
+                `<span class="chip ${attrCount ? 'ok' : 'danger'}"><strong>${attrCount}</strong> attribute${attrCount === 1 ? '' : 's'} per row</span>`,
+                stats?.delimiter ? `<span class="chip">delimiter: ${App.escapeHtml(stats.delimiter)}</span>` : '',
+                stats?.encoding_detected ? `<span class="chip">${App.escapeHtml(stats.encoding_detected)}</span>` : '',
+            ].filter(Boolean);
+            chipsEl.innerHTML = chips.join('');
+        }
 
         if (statEl) {
             const skipped = stats?.skipped || 0;
@@ -374,17 +457,35 @@ const Converter = {
 
         if (noticeEl) {
             const notices = [];
+            if (stats?.attributes_empty) {
+                notices.push({
+                    kind: 'danger',
+                    text: 'This mapping stores NO attributes: ListMonk will receive e-mail and name only, and every other column of your file is dropped. Go back and enable attributes (or pick columns) unless that is exactly what you want.',
+                });
+            }
+            if (stats?.empty_attributes && !stats?.attributes_empty) {
+                notices.push({
+                    kind: 'warning',
+                    text: `${stats.empty_attributes} of ${stats.converted} rows have no values in any attribute column - they will be imported with empty attributes.`,
+                });
+            }
             if (stats?.invalid_emails) {
-                notices.push(`${stats.invalid_emails} row(s) have a malformed e-mail address and will be skipped (ListMonk would reject them too).`);
+                notices.push({ kind: 'warning', text: `${stats.invalid_emails} row(s) have a malformed e-mail address and will be skipped (ListMonk would reject them too).` });
             }
             if (stats?.empty_emails) {
-                notices.push(`${stats.empty_emails} row(s) have no e-mail address and will be skipped.`);
+                notices.push({ kind: 'warning', text: `${stats.empty_emails} row(s) have no e-mail address and will be skipped.` });
             }
             if (stats?.ragged_rows) {
-                notices.push(`${stats.ragged_rows} row(s) have a field-count mismatch with the header - verify the preview below.`);
+                notices.push({ kind: 'warning', text: `${stats.ragged_rows} row(s) have a field-count mismatch with the header - verify the preview below.` });
+            }
+            if (stats?.unresolved_columns?.length) {
+                notices.push({ kind: 'warning', text: `These selected attribute columns were not found in the file and are ignored: ${stats.unresolved_columns.join(', ')}.` });
             }
             noticeEl.innerHTML = notices.length
-                ? `<div class="notice notice-warning" style="margin-bottom:16px"><div>${notices.map(n => App.escapeHtml(n)).join('<br>')}</div></div>`
+                ? notices.map(n => `<div class="notice notice-${n.kind}" style="margin-bottom:10px">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                    <div>${App.escapeHtml(n.text)}</div>
+                  </div>`).join('')
                 : '';
         }
 
@@ -393,9 +494,19 @@ const Converter = {
             return;
         }
 
-        let tableHtml = '<div class="table-wrapper"><table><thead><tr><th>email</th><th>name</th><th>attributes</th></tr></thead><tbody>';
-        rows.forEach(r => {
-            tableHtml += `<tr><td>${App.escapeHtml(r.email)}</td><td>${App.escapeHtml(r.name)}</td><td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;font-size:0.8rem">${App.escapeHtml(r.attributes)}</td></tr>`;
+        let tableHtml = '<div class="table-wrapper sample-table-wrap"><table class="sample-table"><thead><tr><th>email</th><th>name</th><th>attributes</th></tr></thead><tbody>';
+        rows.forEach((r, i) => {
+            let attrCell;
+            try {
+                const obj = JSON.parse(r.attributes || '{}');
+                const keys = Object.keys(obj);
+                attrCell = keys.length
+                    ? `<span class="chip ok" style="margin-right:6px">${keys.length} keys</span><details style="display:inline"><summary style="display:inline;cursor:pointer;color:var(--primary-soft);font-size:0.8rem">view</summary><pre class="attr-json">${App.escapeHtml(JSON.stringify(obj, null, 2))}</pre></details>`
+                    : '<span class="chip danger">empty</span>';
+            } catch {
+                attrCell = `<span title="${App.escapeHtml(r.attributes)}">${App.escapeHtml(r.attributes)}</span>`;
+            }
+            tableHtml += `<tr><td>${App.escapeHtml(r.email)}</td><td>${App.escapeHtml(r.name)}</td><td>${attrCell}</td></tr>`;
         });
         tableHtml += '</tbody></table></div>';
         tableEl.innerHTML = tableHtml;
@@ -409,6 +520,7 @@ const Converter = {
             parts.push(`${stats.skipped} skipped${stats.invalid_emails ? ` (${stats.invalid_emails} invalid e-mail)` : ''}`);
         }
         if (stats.ragged_rows) parts.push(`${stats.ragged_rows} ragged row(s)`);
+        if (stats.attribute_count) parts.push(`${stats.attribute_count} attributes/row`);
         return parts.join(' - ');
     },
 
@@ -435,35 +547,91 @@ const Converter = {
     async showImportDialog() {
         const dialog = document.getElementById('importDialog');
 
-        // Fetch lists
+        // Fetch lists (with their opt-in mode: double-opt-in lists only mail
+        // confirmed subscriptions, so the status choice below matters).
         let lists = [];
         try {
             const res = await API.get('/api/lists?per_page=100&minimal=true');
             lists = res?.data?.results || [];
         } catch {}
+        this._lists = lists;
 
+        const stats = this._previewStats || {};
+        const attrsEmpty = !!stats.attributes_empty;
+        const optinLabel = { double: 'double opt-in', single: 'single opt-in', none: 'no opt-in' };
         let listOptions = lists.map(l =>
-            `<label class="checkbox-label"><input type="checkbox" name="importLists" value="${l.id}"><span>${App.escapeHtml(l.name)}</span></label>`
+            `<label class="checkbox-label"><input type="checkbox" name="importLists" value="${l.id}" onchange="Converter.updateImportButton()"><span>${App.escapeHtml(l.name)}${l.optin ? ` <em style="opacity:.65;font-style:normal;font-size:.75rem">(${optinLabel[l.optin] || l.optin})</em>` : ''}</span></label>`
         ).join('');
 
         dialog.style.display = 'block';
         dialog.innerHTML = `
             <div style="border-top:1px solid var(--glass-border);padding-top:16px">
                 <h4 style="margin-bottom:12px">Import to ListMonk</h4>
+                <div class="import-summary">
+                    <div class="cell"><div class="k">Rows</div><div class="v">${stats.converted ?? 0}</div></div>
+                    <div class="cell"><div class="k">Skipped</div><div class="v">${stats.skipped ?? 0}</div></div>
+                    <div class="cell"><div class="k">Attributes / row</div><div class="v">${stats.attribute_count ?? 0}</div></div>
+                    <div class="cell"><div class="k">Email column</div><div class="v">${App.escapeHtml(this._mapping?.emailCol || '-')}</div></div>
+                    <div class="cell"><div class="k">Name column</div><div class="v">${App.escapeHtml(this._mapping?.nameCol || '-')}</div></div>
+                </div>
+                ${attrsEmpty ? `
+                <div class="notice notice-danger" style="margin-bottom:14px">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                    <div>This mapping stores <strong>no attributes</strong> - only e-mail and name will be imported.
+                        <label class="checkbox-label" style="margin-top:8px;display:inline-flex"><input type="checkbox" id="ackEmptyAttrs" onchange="Converter.updateImportButton()"><span>I understand the other columns will not be imported</span></label>
+                    </div>
+                </div>` : ''}
                 <div class="form-group">
                     <label>Select Lists *</label>
                     <div class="checkbox-group">${listOptions || '<span style="color:var(--text-muted)">No lists available</span>'}</div>
                 </div>
-                <div class="form-group">
-                    <label>Mode</label>
-                    <select id="importMode">
-                        <option value="subscribe">Subscribe (add to lists)</option>
-                        <option value="blocklist">Blocklist</option>
-                    </select>
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label>Mode</label>
+                        <select id="importMode">
+                            <option value="subscribe">Subscribe (add to lists)</option>
+                            <option value="blocklist">Blocklist</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Subscription status</label>
+                        <select id="importStatus">
+                            <option value="confirmed" selected>Confirmed (mailable)</option>
+                            <option value="unconfirmed">Unconfirmed (needs opt-in)</option>
+                            <option value="unsubscribed">Unsubscribed</option>
+                        </select>
+                        <p style="font-size:0.78rem;color:var(--text-muted);margin-top:6px">
+                            Double opt-in lists only send to <strong>confirmed</strong> subscriptions. Use "Confirmed" for lists whose contacts already opted in.
+                        </p>
+                    </div>
                 </div>
-                <button class="btn btn-success" onclick="Converter.executeImport()">Start Import</button>
+                <div class="form-group">
+                    <label class="checkbox-label" style="display:inline-flex;margin-right:8px"><input type="checkbox" id="owUserInfo" checked><span>Overwrite name &amp; attributes of existing subscribers</span></label>
+                    <label class="checkbox-label" style="display:inline-flex"><input type="checkbox" id="owSubStatus" checked><span>Overwrite subscription status</span></label>
+                </div>
+                <button class="btn btn-success" id="startImportBtn" onclick="Converter.executeImport()" disabled>Select a list to continue</button>
             </div>
         `;
+        this.updateImportButton();
+    },
+
+    // Keep the import button honest about why it is (not) clickable.
+    updateImportButton() {
+        const btn = document.getElementById('startImportBtn');
+        if (!btn) return;
+        const selected = document.querySelectorAll('input[name="importLists"]:checked').length;
+        const ack = document.getElementById('ackEmptyAttrs');
+        const needsAck = !!ack && !ack.checked;
+        if (!selected) {
+            btn.disabled = true;
+            btn.textContent = 'Select a list to continue';
+        } else if (needsAck) {
+            btn.disabled = true;
+            btn.textContent = 'Confirm the empty-attributes warning to continue';
+        } else {
+            btn.disabled = false;
+            btn.textContent = 'Start Import';
+        }
     },
 
     async executeImport() {
@@ -482,10 +650,17 @@ const Converter = {
 
         const modeEl = document.getElementById('importMode');
         const mode = modeEl ? modeEl.value : 'subscribe';
+        const statusEl = document.getElementById('importStatus');
+        const subStatus = statusEl ? statusEl.value : 'confirmed';
+        const owUser = document.getElementById('owUserInfo')?.checked ?? true;
+        const owStatus = document.getElementById('owSubStatus')?.checked ?? true;
 
         const formData = this.buildMappingFormData();
         formData.append('list_ids', JSON.stringify(selectedLists));
         formData.append('mode', mode);
+        formData.append('subscription_status', subStatus);
+        formData.append('overwrite_userinfo', String(owUser));
+        formData.append('overwrite_subscription_status', String(owStatus));
 
         this._importing = true;
         try {

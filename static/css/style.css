@@ -2168,6 +2168,242 @@ td .tag {
     color: var(--accent);
 }
 
+.notice-danger {
+    border-left-color: var(--danger);
+    background: var(--danger-bg);
+    color: var(--text-primary);
+}
+
+.notice-danger svg {
+    color: var(--danger);
+}
+
+/* ── Converter: switches, chips, pickers & summaries ──────── */
+/* A full-width toggle row. Deliberately not a .checkbox-label: those are pill
+   buttons, and .form-group label forces them to display:block, which turned
+   the attribute switch into a solid banner. */
+.switch-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 14px 16px;
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    background: var(--bg-surface-elevated);
+    cursor: pointer;
+    transition: border-color 0.2s ease, background 0.2s ease;
+    user-select: none;
+}
+
+.switch-row:hover {
+    border-color: var(--glass-border-hover);
+}
+
+.switch-row.on {
+    border-color: rgba(16, 185, 129, 0.45);
+    background: var(--emerald-bg);
+}
+
+.switch-row .switch-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.switch-row .switch-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 0.92rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.switch-row .switch-desc {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-top: 4px;
+    line-height: 1.5;
+}
+
+.switch {
+    position: relative;
+    flex-shrink: 0;
+    width: 40px;
+    height: 22px;
+    margin-top: 2px;
+}
+
+.switch input {
+    display: none;
+}
+
+.switch .slider {
+    position: absolute;
+    inset: 0;
+    border-radius: var(--radius-pill);
+    background: var(--bg-input);
+    border: 1px solid var(--glass-border);
+    transition: all 0.2s ease;
+}
+
+.switch .slider::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    transition: all 0.2s ease;
+}
+
+.switch input:checked + .slider {
+    background: var(--emerald);
+    border-color: var(--emerald);
+}
+
+.switch input:checked + .slider::after {
+    left: 20px;
+    background: #ffffff;
+}
+
+.chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--glass-border);
+    background: var(--bg-surface-elevated);
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.chip strong {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-feature-settings: "tnum";
+}
+
+.chip.ok {
+    border-color: rgba(16, 185, 129, 0.4);
+    color: var(--emerald);
+}
+
+.chip.ok strong {
+    color: var(--emerald);
+}
+
+.chip.warn {
+    border-color: rgba(245, 158, 11, 0.4);
+    color: var(--warning);
+}
+
+.chip.warn strong {
+    color: var(--warning);
+}
+
+.chip.danger {
+    border-color: rgba(234, 34, 97, 0.45);
+    color: var(--ruby);
+}
+
+.chip.danger strong {
+    color: var(--ruby);
+}
+
+.attr-picker {
+    max-height: 240px;
+    overflow-y: auto;
+    padding: 12px;
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    background: var(--bg-input);
+}
+
+.attr-picker .checkbox-group {
+    gap: 6px;
+}
+
+/* Wide lead files (40+ columns) must scroll, never wrap into tall ribbons. */
+.sample-table-wrap {
+    max-height: 340px;
+    overflow: auto;
+}
+
+.sample-table td {
+    white-space: nowrap;
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.sample-table th.more-cols,
+.sample-table td.more-cols {
+    color: var(--text-muted);
+    font-style: italic;
+    white-space: nowrap;
+}
+
+.attr-json {
+    max-height: 260px;
+    max-width: 480px;
+    overflow: auto;
+    margin: 8px 0 0;
+    padding: 10px 12px;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    background: var(--bg-input);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.import-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 10px;
+    margin-bottom: 16px;
+}
+
+.import-summary .cell {
+    padding: 10px 12px;
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    background: var(--bg-input);
+    min-width: 0;
+}
+
+.import-summary .cell .k {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+}
+
+.import-summary .cell .v {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-top: 2px;
+    font-feature-settings: "tnum";
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .preview-frame {
     width: 100%;
     height: 520px;

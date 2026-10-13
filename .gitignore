@@ -24,6 +24,7 @@ reply_log.json.bak
 reply_settings.json
 reply_processed.json
 bounce_processed.json
+app_settings.json
 bounce_processed.json*.tmp
 blocklist_restore_backup.json
 session_secret.key

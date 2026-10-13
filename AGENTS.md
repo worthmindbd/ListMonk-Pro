@@ -217,6 +217,15 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
   send `attribute_mode=selected` plus an explicit `attribute_columns` list to convert only
   the checked columns; a bare `attribute_columns` list without a mode is treated as
   `selected` for backwards compatibility.
+- **A mapping that would drop every unmapped column is rejected, not converted.**
+  `attribute_mode=selected` with no usable attribute column (nothing checked, or every
+  picked name absent from the file — `unresolved_columns` in stats) returns a
+  `no_attributes` error instead of producing a file of empty attributes: ListMonk imports
+  that "successfully" while silently storing `{}` for every subscriber. An e-mail-only
+  source file is the one legitimate empty-attributes case and is allowed.
+- Stats carry what the UI needs to state the outcome honestly: `attribute_count`
+  (attributes per row), `attributes_empty`, `empty_attributes` (rows whose attribute
+  columns were all blank) and `unresolved_columns`.
 - Cell values that are themselves JSON objects (`{"age": 30}`) are merged into the row's
   attributes rather than stringified, so nested attribute paths keep working.
 - Rows with a missing or malformed e-mail are skipped and counted
@@ -283,7 +292,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | **CSV Converter** | `/api/converter/detect-columns` | POST | Detect CSV headers & preview rows |
 | | `/api/converter/preview` | POST | Convert and return the first rows as JSON (exact ListMonk output preview) |
 | | `/api/converter/convert` | POST | Convert CSV to ListMonk schema (download) |
-| | `/api/converter/convert-and-import` | POST | Convert and import directly into ListMonk |
+| | `/api/converter/convert-and-import` | POST | Convert and import directly into ListMonk (`subscription_status` defaults to `confirmed` so double-opt-in lists are mailable; `overwrite_userinfo` / `overwrite_subscription_status` map onto ListMonk's granular upsert flags; rejects `no_attributes` mappings and empty conversions) |
 | **Scheduler** | `/api/scheduler` | GET / PUT | Get / update send window settings |
 | | `/api/scheduler/run` | POST | Manually trigger scheduler tick |
 | **Auto-Unblock** | `/api/auto-unblock/status` | GET | Get count of blocklisted engaged contacts |

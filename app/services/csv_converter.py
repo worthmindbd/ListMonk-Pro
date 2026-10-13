@@ -250,20 +250,27 @@ def _attribute_plan(
     name_idx: Optional[int],
     attribute_columns: Optional[list[str]],
     auto_attributes: bool,
-) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
+) -> tuple[list[tuple[str, int]], list[tuple[str, int]], list[str]]:
     """Work out which columns become attributes.
 
-    Returns ``(selected, auto)`` pairs of ``(attribute key, column index)``.
-    ``selected`` holds the user's explicit picks (always applied). ``auto``
-    holds every remaining column, so nothing in the file is dropped. Keys are
-    deduplicated case-insensitively, which also keeps a picked column out of
-    the auto list.
+    Returns ``(selected, auto, unresolved)`` where ``selected``/``auto`` are
+    pairs of ``(attribute key, column index)`` and ``unresolved`` holds the
+    requested column names that do not exist in this file. ``selected`` holds
+    the user's explicit picks (always applied). ``auto`` holds every remaining
+    column, so nothing in the file is dropped. Keys are deduplicated
+    case-insensitively, which also keeps a picked column out of the auto list.
+
+    Unresolved picks are reported instead of being skipped silently: a stale
+    selection (mapping carried over from another file) that quietly resolves to
+    nothing is exactly how an import ends up storing empty attributes.
     """
     selected: list[tuple[str, int]] = []
+    unresolved: list[str] = []
     seen: set[str] = set()
     for attr in attribute_columns or []:
         idx = _resolve_column(attr, index_map, headers)
         if idx is None:
+            unresolved.append(str(attr))
             continue
         key = str(attr).strip()
         if key.lower() in seen:
@@ -285,7 +292,20 @@ def _attribute_plan(
             seen.add(header.lower())
             auto.append((header, idx))
 
-    return selected, auto
+    return selected, auto, unresolved
+
+
+def _droppable_columns(headers: list[str], email_idx: int, name_idx: Optional[int]) -> list[str]:
+    """Columns that carry data but are not mapped to email/name.
+
+    In ``selected`` attribute mode these are the columns the user is choosing
+    to throw away; the converter refuses to do that silently when the choice
+    is "none of them".
+    """
+    skip = {email_idx}
+    if name_idx is not None:
+        skip.add(name_idx)
+    return [h for idx, h in enumerate(headers) if idx not in skip]
 
 
 def detect_columns(file_bytes: bytes) -> dict:
@@ -375,7 +395,7 @@ def _iter_converted_rows(
     is drained. That lets ``convert_csv`` write rows while ``preview_conversion``
     only keeps the first few, both from one conversion implementation.
     """
-    counts = {"converted": 0, "empty_emails": 0, "invalid_emails": 0, "ragged_rows": 0}
+    counts = {"converted": 0, "empty_emails": 0, "invalid_emails": 0, "ragged_rows": 0, "empty_attributes": 0}
     stats = {
         "converted": 0,
         "skipped": 0,
@@ -383,8 +403,11 @@ def _iter_converted_rows(
         "empty_emails": 0,
         "invalid_emails": 0,
         "ragged_rows": 0,
+        "empty_attributes": 0,
         "delimiter": delimiter_label,
         "attribute_columns": [key for key, _ in selected_attribs + auto_attribs],
+        "attribute_count": len(selected_attribs) + len(auto_attribs),
+        "attributes_empty": not (selected_attribs or auto_attribs),
         "auto_attributes": bool(auto_attribs),
     }
 
@@ -396,6 +419,7 @@ def _iter_converted_rows(
             empty_emails=counts["empty_emails"],
             invalid_emails=counts["invalid_emails"],
             ragged_rows=counts["ragged_rows"],
+            empty_attributes=counts["empty_attributes"],
         )
 
     row_reader = csv.reader(io.StringIO(text), delimiter=delimiter)
@@ -429,6 +453,11 @@ def _iter_converted_rows(
             if value:
                 attribs[key] = value
                 _merge_json_attr(attribs, value)
+        # A row can be converted and still carry no attribute values at all
+        # (every mapped column blank). Counting them lets the UI warn that the
+        # import will store email/name only, instead of claiming full fidelity.
+        if not attribs:
+            counts["empty_attributes"] += 1
 
         counts["converted"] += 1
         flush_stats()
@@ -447,13 +476,20 @@ def _conversion_context(
     name_column: Optional[str],
     attribute_columns: Optional[list[str]],
     auto_attributes: bool,
-) -> tuple[Optional[dict], Optional[tuple]]:
+) -> tuple[Optional[dict], Optional[dict]]:
     """Validate the mapping and prepare the row generator.
 
     Returns ``(error, context)``: an ``{"error": ...}`` stats dict when the
-    mapping is unusable (or the file has no columns), otherwise ``None`` and
-    the ``(text, delimiter, headers, email_idx, name_idx, selected, auto)``
-    tuple ``_iter_converted_rows`` needs.
+    mapping is unusable (or the file has no columns), otherwise ``None`` and a
+    context dict with ``text``, ``delimiter``, ``headers``, ``email_idx``,
+    ``name_idx``, ``selected``, ``auto`` and ``unresolved`` — everything
+    ``_iter_converted_rows`` and the stats reporting need.
+
+    A mapping that would throw every unmapped column away (``selected`` mode
+    with no usable attribute column while the file still holds data columns)
+    is rejected here rather than converted into a file of empty attributes:
+    that failure used to import "successfully" while silently dropping all
+    of the source data.
     """
     text, delimiter, headers, _ = _prepare_reader(file_bytes)
     if not headers:
@@ -465,10 +501,42 @@ def _conversion_context(
         return {"error": f"Email column '{email_column}' not found"}, None
 
     name_idx = _resolve_column(name_column, index_map, headers)
-    selected, auto = _attribute_plan(
+    selected, auto, unresolved = _attribute_plan(
         headers, index_map, email_idx, name_idx, attribute_columns, auto_attributes,
     )
-    return None, (text, delimiter, headers, email_idx, name_idx, selected, auto)
+
+    if not auto_attributes and not selected:
+        droppable = _droppable_columns(headers, email_idx, name_idx)
+        if attribute_columns and unresolved:
+            return {
+                "error": (
+                    f"None of the selected attribute columns exist in this file: "
+                    f"{', '.join(unresolved[:10])}. Re-map the columns for this upload."
+                ),
+                "unresolved_columns": unresolved,
+            }, None
+        if droppable:
+            shown = ", ".join(droppable[:6]) + ("…" if len(droppable) > 6 else "")
+            return {
+                "error": (
+                    f"No attribute columns selected: {len(droppable)} column(s) would be "
+                    f"dropped ({shown}). Pick the columns to store as attributes, or turn "
+                    "'convert all other columns to attributes' back on."
+                ),
+                "code": "no_attributes",
+                "unresolved_columns": unresolved,
+            }, None
+
+    return None, {
+        "text": text,
+        "delimiter": delimiter,
+        "headers": headers,
+        "email_idx": email_idx,
+        "name_idx": name_idx,
+        "selected": selected,
+        "auto": auto,
+        "unresolved": unresolved,
+    }
 
 
 def convert_csv(
@@ -497,13 +565,12 @@ def convert_csv(
     Returns:
         dict with 'csv_content' (converted CSV as string), 'stats' (conversion stats)
     """
-    error, context = _conversion_context(
+    error, ctx = _conversion_context(
         file_bytes, email_column, name_column, attribute_columns, auto_attributes,
     )
     if error:
         return {"csv_content": "", "stats": error}
 
-    text, delimiter, headers, email_idx, name_idx, selected, auto = context
     encoding = detect_encoding(file_bytes)
 
     output = io.StringIO()
@@ -512,8 +579,8 @@ def convert_csv(
 
     stats: dict = {}
     for email, name, attributes, row_stats in _iter_converted_rows(
-        text, delimiter, _delimiter_label(delimiter), headers,
-        email_idx, name_idx, selected, auto,
+        ctx["text"], ctx["delimiter"], _delimiter_label(ctx["delimiter"]), ctx["headers"],
+        ctx["email_idx"], ctx["name_idx"], ctx["selected"], ctx["auto"],
     ):
         stats = row_stats
         # The empty email marks the final stats-only sentinel.
@@ -522,6 +589,7 @@ def convert_csv(
         writer.writerow({"email": email, "name": name, "attributes": attributes})
 
     stats["encoding_detected"] = encoding
+    stats["unresolved_columns"] = ctx["unresolved"]
     return {"csv_content": output.getvalue(), "stats": stats}
 
 
@@ -540,21 +608,20 @@ def preview_conversion(
     conversion, not just the previewed slice: enough rows are collected for the
     preview while the rest of the file is still scanned to keep stats honest.
     """
-    error, context = _conversion_context(
+    error, ctx = _conversion_context(
         file_bytes, email_column, name_column, attribute_columns, auto_attributes,
     )
     if error:
         return {"rows": [], "stats": error}
 
-    text, delimiter, headers, email_idx, name_idx, selected, auto = context
     encoding = detect_encoding(file_bytes)
 
     take = max(0, limit)
     rows: list[dict] = []
     stats: dict = {}
     for email, name, attributes, row_stats in _iter_converted_rows(
-        text, delimiter, _delimiter_label(delimiter), headers,
-        email_idx, name_idx, selected, auto,
+        ctx["text"], ctx["delimiter"], _delimiter_label(ctx["delimiter"]), ctx["headers"],
+        ctx["email_idx"], ctx["name_idx"], ctx["selected"], ctx["auto"],
     ):
         stats = row_stats
         # The empty email marks the final stats-only sentinel.
@@ -564,4 +631,5 @@ def preview_conversion(
             rows.append({"email": email, "name": name, "attributes": attributes})
 
     stats["encoding_detected"] = encoding
+    stats["unresolved_columns"] = ctx["unresolved"]
     return {"rows": rows, "stats": stats}
