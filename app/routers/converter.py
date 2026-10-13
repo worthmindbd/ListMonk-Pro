@@ -12,21 +12,33 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 
 
 async def _read_upload(file: UploadFile) -> bytes:
-    """Read an uploaded file, rejecting oversized payloads before buffering."""
+    """Read an uploaded file, rejecting oversized payloads before buffering.
+
+    The size is enforced incrementally: a client that does not declare
+    `file.size` (chunked multipart) must not be able to make the worker
+    allocate the whole upload before the 413 fires.
+    """
     if file.size is not None and file.size > MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=413,
             detail=f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)",
         )
-    content = await file.read()
-    if not content:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(64 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)",
+            )
+        chunks.append(chunk)
+    if not total:
         raise HTTPException(status_code=400, detail="Empty file uploaded")
-    if len(content) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)",
-        )
-    return content
+    return b"".join(chunks)
 
 
 def _parse_mapping(
@@ -66,7 +78,11 @@ def _parse_list_ids(list_ids: str) -> list:
         raise HTTPException(status_code=400, detail="Invalid JSON in list_ids")
     if not isinstance(parsed, list):
         raise HTTPException(status_code=400, detail="list_ids must be a JSON array")
-    return [int(i) for i in parsed]
+    try:
+        return [int(i) for i in parsed]
+    except (TypeError, ValueError):
+        # A 500 here would hide a plain client error (["abc"], [{"id":1}]).
+        raise HTTPException(status_code=400, detail="list_ids must contain only numbers")
 
 
 # ListMonk's importer accepts exactly these subscription statuses; anything

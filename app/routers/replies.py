@@ -68,7 +68,10 @@ async def update_reply_settings(request: Request):
         raise HTTPException(status_code=400, detail="Invalid JSON body")
     if not isinstance(data, dict):
         raise HTTPException(status_code=400, detail="Settings must be a JSON object")
-    save_settings(data)
+    # Only merge keys this tracker actually owns: an arbitrary client dict
+    # (including multi-megabyte junk) must not be persisted to DATA_DIR.
+    allowed = set(load_settings().keys())
+    save_settings({k: v for k, v in data.items() if k in allowed})
     return load_settings()
 
 
@@ -191,10 +194,16 @@ async def scan_replies():
     """Trigger an immediate IMAP scan for prospect replies."""
     try:
         stats = await scan_and_track_replies(listmonk)
-        return {"status": "ok", "stats": stats}
     except Exception as e:
         logger.error(f"Reply scan failed: {e}", exc_info=True)
         raise HTTPException(status_code=502, detail=f"IMAP scan failed: {e}")
+    # The service catches its own IMAP errors and returns them in the body;
+    # rule 7 says a failed scan must not answer 200 "ok" — the UI used to
+    # toast "Scan complete! Found 0 replies" during a full IMAP outage.
+    # ("already in progress" carries error=None and stays a 200.)
+    if stats.get("error"):
+        raise HTTPException(status_code=502, detail=f"IMAP scan failed: {stats['error']}")
+    return {"status": "ok", "stats": stats}
 
 
 @router.put("/status")

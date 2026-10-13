@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, HTTPException
 from app.services.listmonk_client import listmonk
-from app.services.bulk_ops import run_bulk
+from app.services.bulk_ops import parse_ids, run_bulk
 
 router = APIRouter()
 
@@ -35,9 +35,16 @@ async def delete_templates(ids: list[int] = Query(...)):
     """Delete several templates in one request.
 
     ListMonk deletes one template per call; the bounded loop keeps a page-wide
-    selection from opening every request at once.
+    selection from opening every request at once. parse_ids enforces the
+    shared cap and rejects non-positive ids (rule 14).
     """
-    result = await run_bulk(ids, listmonk.delete_template)
+    try:
+        parsed = parse_ids(ids)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not parsed:
+        raise HTTPException(status_code=400, detail="No template ids provided")
+    result = await run_bulk(parsed, listmonk.delete_template)
     return {
         "deleted": result["ok"],
         "errors": result["errors"],

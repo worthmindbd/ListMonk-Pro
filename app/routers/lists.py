@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, HTTPException
 from app.services.listmonk_client import listmonk
-from app.services.bulk_ops import run_bulk
+from app.services.bulk_ops import parse_ids, run_bulk
 
 router = APIRouter()
 
@@ -40,8 +40,15 @@ async def delete_lists(ids: list[int] = Query(...)):
 
     ListMonk deletes one list per call, so the loop happens here — bounded so
     selecting a page of lists cannot open one upstream request per row at once.
+    parse_ids enforces the shared cap and rejects non-positive ids (rule 14).
     """
-    result = await run_bulk(ids, listmonk.delete_list)
+    try:
+        parsed = parse_ids(ids)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not parsed:
+        raise HTTPException(status_code=400, detail="No list ids provided")
+    result = await run_bulk(parsed, listmonk.delete_list)
     return {
         "deleted": result["ok"],
         "errors": result["errors"],

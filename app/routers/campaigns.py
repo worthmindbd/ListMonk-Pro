@@ -1,12 +1,13 @@
 import json
+import re
 import time
+from datetime import date, timedelta
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from typing import Optional
 from app.services.listmonk_client import listmonk
 from app.services.bulk_ops import parse_ids, run_bulk
 from app.services.export_service import dict_list_to_csv, aiter_dicts_to_csv
-from app.services.bounce_filters import campaign_views_query
 from app.services.bounce_list import fetch_filtered_bounces_page, iter_filtered_bounces
 from app.services.hard_bounce_cache import (
     get_all_hard_bounce_counts, get_last_updated,
@@ -23,6 +24,12 @@ MAX_PER_PAGE = 500
 # the connection open indefinitely. 100 pages x 100 rows = 10k campaigns.
 EXPORT_MAX_PAGES = 100
 
+# The analytics type is interpolated into the upstream ListMonk URL, so it
+# must never be an arbitrary (e.g. %2F-encoded path-traversal) segment.
+VALID_ANALYTICS_TYPES = {"views", "clicks", "bounces", "links"}
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 # Short-lived cache for the all-campaigns summary (paginates the entire
 # campaign history, so avoid repeating it on every dashboard/analytics load).
 _SUMMARY_TTL = 60
@@ -30,16 +37,61 @@ _summary_cache: dict = {}
 _summary_cached_at = 0.0
 
 
+def invalidate_summary_cache() -> None:
+    """Drop the cached summary so the next request re-aggregates.
+
+    Module-level caches need an invalidation hook (AGENTS.md rule 11);
+    tests/conftest.py calls this between tests.
+    """
+    global _summary_cache, _summary_cached_at
+    _summary_cache = {}
+    _summary_cached_at = 0.0
+
+
+def _validate_date(value: str, name: str) -> str:
+    """Validate an optional YYYY-MM-DD filter bound (400 on anything else).
+
+    The value is interpolated into a ListMonk SQL query, so the strict format
+    check is what makes that safe.
+    """
+    if not value:
+        return ""
+    if not _DATE_RE.match(value):
+        raise HTTPException(status_code=400, detail=f"{name} must be YYYY-MM-DD")
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{name} is not a valid date")
+    return value
+
+
 def _hard_counts_ready() -> bool:
     """True once the hard-bounce cache has completed at least one refresh."""
     return bool(get_last_updated())
 
 
-def _engagement_query(campaign_id: int, engagement_type: str) -> str | None:
-    return {
-        "views": campaign_views_query(campaign_id),
-        "clicks": f"subscribers.id IN (SELECT subscriber_id FROM link_clicks WHERE campaign_id={campaign_id})",
-    }.get(engagement_type)
+def _engagement_query(campaign_id: int, engagement_type: str,
+                      from_date: str = "", to_date: str = "") -> str | None:
+    """SQL clause matching subscribers with a view/click row for the campaign.
+
+    Optional YYYY-MM-DD bounds (already validated) narrow the subquery to the
+    same window the analytics charts show, so "Export Who Opened" next to a
+    date-filtered chart exports exactly what the chart counts.
+    """
+    table = {"views": "campaign_views", "clicks": "link_clicks"}.get(engagement_type)
+    if not table:
+        return None
+    bounds = ""
+    if from_date:
+        bounds += f" AND created_at >= '{from_date}'"
+    if to_date:
+        # Inclusive end date: bounded by the following midnight.
+        next_day = (date.fromisoformat(to_date) + timedelta(days=1)).isoformat()
+        bounds += f" AND created_at < '{next_day}'"
+    return (
+        f"subscribers.id IN (SELECT subscriber_id FROM {table} "
+        f"WHERE campaign_id={campaign_id}{bounds})"
+    )
 
 
 @router.get("")
@@ -72,6 +124,11 @@ async def get_running_stats(campaign_id: Optional[int] = None):
 async def get_campaign_analytics(analytics_type: str,
                                  campaign_id: int = 0,
                                  from_date: str = "", to_date: str = ""):
+    if analytics_type not in VALID_ANALYTICS_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid analytics type: {analytics_type}. Use views, clicks, bounces, or links",
+        )
     return await listmonk.get_campaign_analytics(analytics_type, campaign_id,
                                                  from_date, to_date)
 
@@ -81,6 +138,11 @@ async def export_campaign_analytics(analytics_type: str,
                                     campaign_id: int = 0,
                                     from_date: str = "", to_date: str = ""):
     """Export campaign analytics as CSV."""
+    if analytics_type not in VALID_ANALYTICS_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid analytics type: {analytics_type}. Use views, clicks, bounces, or links",
+        )
     result = await listmonk.get_campaign_analytics(analytics_type, campaign_id,
                                                    from_date, to_date)
     data = result.get("data", [])
@@ -189,16 +251,35 @@ async def get_campaign_subscribers(campaign_id: int, engagement_type: str,
 
 
 @router.get("/{campaign_id}/subscribers/{engagement_type}/export")
-async def export_campaign_subscribers(campaign_id: int, engagement_type: str):
+async def export_campaign_subscribers(campaign_id: int, engagement_type: str,
+                                      from_date: str = "", to_date: str = ""):
     """Export subscribers who viewed/clicked/bounced a campaign as CSV.
 
     Every branch streams one page at a time, so a campaign with a huge
     audience does not have to be buffered in memory to be exported.
+    Optional YYYY-MM-DD bounds narrow the export to the same window the
+    analytics charts are showing.
     """
+    from_date = _validate_date(from_date, "from_date")
+    to_date = _validate_date(to_date, "to_date")
+
+    def _in_range(created_at) -> bool:
+        if not from_date and not to_date:
+            return True
+        day = str(created_at or "")[:10]
+        if not day:
+            return False
+        if from_date and day < from_date:
+            return False
+        if to_date and day > to_date:
+            return False
+        return True
+
     if engagement_type == "bounces":
         async def bounce_rows():
             async for b in iter_filtered_bounces(listmonk, "hard", campaign_id):
-                yield b
+                if _in_range(b.get("created_at")):
+                    yield b
 
         stream = bounce_rows()
         try:
@@ -218,7 +299,7 @@ async def export_campaign_subscribers(campaign_id: int, engagement_type: str):
             headers={"Content-Disposition": f"attachment; filename=campaign_{campaign_id}_hard_bounces.csv"},
         )
 
-    query = _engagement_query(campaign_id, engagement_type)
+    query = _engagement_query(campaign_id, engagement_type, from_date, to_date)
     if not query:
         raise HTTPException(status_code=400, detail=f"Invalid type: {engagement_type}. Use views, clicks, or bounces")
 
@@ -313,7 +394,13 @@ async def archive_campaigns(data: dict):
 @router.delete("")
 async def delete_campaigns(ids: list[int] = Query(...)):
     """Delete several campaigns in one request."""
-    return await listmonk.delete_campaigns(ids)
+    try:
+        parsed = parse_ids(ids)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not parsed:
+        raise HTTPException(status_code=400, detail="No campaign ids provided")
+    return await listmonk.delete_campaigns(parsed)
 
 
 @router.post("/{campaign_id}/test")

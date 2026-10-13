@@ -20,8 +20,8 @@ from app.services.auto_unblock import (
     QUERY_BLOCKLISTED_ENGAGED,
 )
 from app.services.campaign_scheduler import (
-    load_schedule, save_schedule, is_within_send_window,
-    scheduler_loop, run_scheduler_tick,
+    load_schedule, is_within_send_window,
+    scheduler_loop, run_scheduler_tick, update_schedule_settings,
 )
 from app.services.imap_unsubscribe import scan_and_unsubscribe
 from app.services.link_unsubscribe import scan_link_unsubscribes
@@ -302,6 +302,14 @@ async def login(request: Request):
     username = data.get("username", "")
     password = data.get("password", "")
 
+    # Non-string JSON values (numbers, arrays, objects) used to reach the
+    # constant-time compare and raise AttributeError → 500, skipping the
+    # rate limiter entirely. Reject them as a normal client error and still
+    # count the attempt.
+    if not isinstance(username, str) or not isinstance(password, str):
+        record_login_failure(client_ip)
+        raise HTTPException(status_code=400, detail="username and password must be strings")
+
     if not check_credentials(username, password):
         record_login_failure(client_ip)
         raise HTTPException(status_code=401, detail="Invalid username or password")
@@ -443,13 +451,11 @@ async def update_schedule(data: dict):
     if "enabled" in data and not isinstance(data["enabled"], bool):
         raise HTTPException(status_code=400, detail="enabled must be a boolean")
 
-    schedule = load_schedule()
-    for key in ["enabled", "timezone", "start_hour", "start_minute",
-                "end_hour", "end_minute", "days"]:
-        if key in data:
-            schedule[key] = data[key]
+    # Persist through the scheduler's locked service API: a raw
+    # load → merge → save here could be clobbered by (or clobber) a tick
+    # running concurrently with this request.
     try:
-        save_schedule(schedule)
+        schedule = await update_schedule_settings(data)
     except OSError as e:
         logger.error(f"Could not persist schedule: {e}")
         raise HTTPException(

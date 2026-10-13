@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse
 from typing import Optional
 from app.services.listmonk_client import listmonk
 from app.services.export_service import aiter_dicts_to_csv
+from app.services.bulk_ops import parse_ids
 
 router = APIRouter()
 
@@ -33,18 +34,53 @@ def _with_status_filter(query: str, status: str) -> str:
     return f"({query}) AND {clause}" if query else clause
 
 
+def _search_to_query(search: str) -> str:
+    """Turn free text from the search box into a safe ListMonk query clause.
+
+    ListMonk's subscriber `query` parameter is a raw SQL expression, so the
+    UI's plain search terms ("info@acme") used to reach Postgres unparsed and
+    400 with `column "info" does not exist`. The term is wrapped in an ILIKE
+    match on email/name instead: single quotes are doubled, and LIKE
+    wildcards plus backslashes are stripped so the value can only ever be a
+    literal substring.
+    """
+    term = (search or "").strip()
+    if not term:
+        return ""
+    for ch in ("%", "_", "\\"):
+        term = term.replace(ch, "")
+    if not term:
+        return ""
+    term = term.replace("'", "''")
+    return (
+        f"(subscribers.email ILIKE '%{term}%' "
+        f"OR subscribers.name ILIKE '%{term}%')"
+    )
+
+
+def _compose_query(query: str, search: str, status: str) -> str:
+    """Combine the raw-SQL passthrough, the free-text search and the status
+    shortcut into one ListMonk query expression."""
+    clauses = [c for c in (query.strip(), _search_to_query(search)) if c]
+    combined = " AND ".join(f"({c})" for c in clauses) if len(clauses) > 1 \
+        else (clauses[0] if clauses else "")
+    return _with_status_filter(combined, status)
+
+
 @router.get("")
 async def get_subscribers(page: int = Query(1, ge=1, le=MAX_PAGE),
                           per_page: int = Query(50, ge=1, le=MAX_PER_PAGE),
-                          query: str = "", list_id: Optional[int] = None,
+                          query: str = "", search: str = "",
+                          list_id: Optional[int] = None,
                           status: str = ""):
     return await listmonk.get_subscribers(
-        page, per_page, _with_status_filter(query, status), list_id,
+        page, per_page, _compose_query(query, search, status), list_id,
     )
 
 
 @router.get("/export-all")
-async def export_all_subscribers(query: str = "", list_id: Optional[int] = None,
+async def export_all_subscribers(query: str = "", search: str = "",
+                                 list_id: Optional[int] = None,
                                  status: str = ""):
     """Stream every subscriber as CSV, page by page.
 
@@ -52,7 +88,7 @@ async def export_all_subscribers(query: str = "", list_id: Optional[int] = None,
     regardless of list size. 404 when the filter matches nothing.
     """
     columns = ["id", "email", "name", "status", "created_at", "updated_at"]
-    query = _with_status_filter(query, status)
+    query = _compose_query(query, search, status)
 
     async def rows():
         async for sub in listmonk.iter_pages(
@@ -121,7 +157,15 @@ async def modify_list_memberships(data: dict):
 
 @router.put("/blocklist")
 async def blocklist_subscribers(data: dict):
-    return await listmonk.blocklist_subscribers(data.get("ids", []))
+    # parse_ids: reject junk, dedupe, and cap the batch (rule 14) instead of
+    # forwarding an arbitrary client payload straight upstream.
+    try:
+        ids = parse_ids(data.get("ids"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not ids:
+        raise HTTPException(status_code=400, detail="ids must be a non-empty list of subscriber ids")
+    return await listmonk.blocklist_subscribers(ids)
 
 
 @router.put("/{subscriber_id}")
@@ -141,4 +185,10 @@ async def delete_subscriber(subscriber_id: int):
 
 @router.delete("")
 async def delete_subscribers(ids: list[int] = Query(...)):
-    return await listmonk.delete_subscribers(ids)
+    try:
+        parsed = parse_ids(ids)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not parsed:
+        raise HTTPException(status_code=400, detail="ids must be a non-empty list of subscriber ids")
+    return await listmonk.delete_subscribers(parsed)

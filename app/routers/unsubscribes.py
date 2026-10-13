@@ -2,6 +2,7 @@ import asyncio
 import logging
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from app.config import settings
 from app.services.imap_unsubscribe import (
     get_stats, check_imap_status, scan_and_unsubscribe,
 )
@@ -44,7 +45,10 @@ async def update_unsub_settings(request: Request):
         raise HTTPException(status_code=400, detail="Settings must be a JSON object")
     if "blocklist_enabled" in data and not isinstance(data["blocklist_enabled"], bool):
         raise HTTPException(status_code=400, detail="blocklist_enabled must be a boolean")
-    save_settings(data)
+    # Only merge keys this scanner actually owns: an arbitrary client dict
+    # (including multi-megabyte junk) must not be persisted to DATA_DIR.
+    allowed = set(load_settings().keys())
+    save_settings({k: v for k, v in data.items() if k in allowed})
     return load_settings()
 
 
@@ -229,6 +233,42 @@ async def trigger_scan():
     except Exception as e:
         logging.getLogger("unsubscribes").error(f"unsubscribe scan failed: {e}", exc_info=True)
         raise HTTPException(status_code=502, detail=f"Scan failed: {e}")
+
+    # Rule 7: a mailbox that was supposed to be scanned but wasn't must not
+    # ride home on a 200 "Scan complete". The service reports both "not
+    # configured" and "connection failed" with the same message, so the
+    # environment decides which one it was.
+    if imap_result.get("message") == "IMAP not configured or connection failed":
+        if settings.imap_configured:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "IMAP unsubscribe scan failed (mailbox unreachable); "
+                    f"link scan still processed {link_result.get('processed', 0)} record(s)"
+                ),
+            )
+        return {
+            "imap": imap_result,
+            "link": link_result,
+            "message": (
+                "IMAP monitor not configured — link scan only: "
+                f"{link_result.get('processed', 0)} unsubscribed"
+            ),
+        }
+
+    # The scanner also counts per-message failures (`errors`) while still
+    # returning its normal summary — a configured mailbox that hit errors is a
+    # failed scan too, so it must not ride home on a clean "Scan complete".
+    if settings.imap_configured and imap_result.get("errors", 0) > 0:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"IMAP unsubscribe scan hit {imap_result['errors']} error(s) "
+                f"after processing {imap_result.get('processed', 0)} record(s); "
+                f"link scan processed {link_result.get('processed', 0)} record(s)"
+            ),
+        )
+
     total_processed = imap_result.get("processed", 0) + link_result.get("processed", 0)
     return {
         "imap": imap_result,
