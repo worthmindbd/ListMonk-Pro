@@ -66,17 +66,37 @@ const App = {
             if (e.target === e.currentTarget) this.closeModal();
         });
 
-        // Initialize mode
+        // Initialize mode. localStorage is only an instant-render hint for
+        // this browser: the server-persisted choice decides whether the
+        // onboarding modal still needs to show, so "pick a mode" appears once
+        // per installation instead of once per browser / cleared cookie jar.
         const savedMode = localStorage.getItem('listmonk_pro_mode');
-        if (!savedMode) {
-            this.setMode('newsletter', false);
-            setTimeout(() => this.showModeOnboarding(), 200);
-        } else {
-            this.setMode(savedMode, false);
-        }
+        this.setMode(savedMode || 'newsletter', false);
+        this.reconcileMode();
 
         this.checkConnection();
         this.route();
+    },
+
+    // Ask the server whether this installation has already picked a mode.
+    // localStorage alone would re-ask on every new browser, device, private
+    // window, or after the user clears site data to log out.
+    async reconcileMode() {
+        try {
+            const state = await API.get('/api/app-settings');
+            if (state.mode_selected) {
+                localStorage.setItem('listmonk_pro_mode', state.mode);
+                this.setMode(state.mode, false);
+            } else {
+                this.showModeOnboarding();
+            }
+        } catch {
+            // API.request already toasted the error; fall back to the
+            // localStorage-only behavior so the dashboard stays usable.
+            if (!localStorage.getItem('listmonk_pro_mode')) {
+                this.showModeOnboarding();
+            }
+        }
     },
 
     showModeOnboarding() {
@@ -93,7 +113,14 @@ const App = {
 
     setMode(mode, save = true) {
         this.currentMode = mode;
-        if (save) localStorage.setItem('listmonk_pro_mode', mode);
+        if (save) {
+            localStorage.setItem('listmonk_pro_mode', mode);
+            // Mirror the choice server-side so other browsers and devices
+            // (and any later login after cleared site data) skip onboarding.
+            // API.request already toasts failures; a rejected promise here
+            // must still be caught to stay unhandled-free.
+            API.put('/api/app-settings', { mode }).catch(() => {});
+        }
         document.documentElement.setAttribute('data-mode', mode);
 
         // Update mode switcher buttons

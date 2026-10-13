@@ -36,7 +36,7 @@ from app.services.task_utils import shutdown as shutdown_tasks
 from app.services.imap_reply_tracker import scan_and_track_replies
 from app.routers import (
     subscribers, lists, campaigns, templates, bounces, converter, unsubscribes,
-    replies, deliverability,
+    replies, deliverability, appsettings,
 )
 
 logger = logging.getLogger("listmonk-dashboard")
@@ -264,6 +264,7 @@ app.include_router(converter.router, prefix="/api/converter", tags=["CSV Convert
 app.include_router(unsubscribes.router, prefix="/api/unsubscribes", tags=["Unsubscribes"])
 app.include_router(replies.router, prefix="/api/replies", tags=["Replies"])
 app.include_router(deliverability.router, prefix="/api/deliverability", tags=["Deliverability"])
+app.include_router(appsettings.router, prefix="/api/app-settings", tags=["App Settings"])
 
 
 # ── Template Helper ───────────────────────────────────────

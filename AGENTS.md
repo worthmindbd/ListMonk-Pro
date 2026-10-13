@@ -15,6 +15,7 @@ ListMonk-Pro/
 │   ├── main.py                    # FastAPI application, auth middleware, background task lifespan
 │   ├── routers/                   # API route handlers
 │   │   ├── __init__.py
+│   │   ├── appsettings.py         # Installation-wide mode selection state (onboarding gate)
 │   │   ├── bounces.py             # Bounce management, manual ingest, filtered exports, deletions
 │   │   ├── campaigns.py           # Campaign CRUD, stats, analytics, viewer/clicker/bounce exports
 │   │   ├── converter.py           # CSV column detection, conversion & direct ListMonk import
@@ -26,6 +27,7 @@ ListMonk-Pro/
 │   │   └── unsubscribes.py        # Unsubscribe log, campaign groupings, scan trigger, reset/undo
 │   └── services/                  # Core business logic & integrations
 │       ├── __init__.py
+│       ├── app_settings.py        # Installation-wide app settings (chosen mode persisted to DATA_DIR)
 │       ├── auto_unblock.py        # Auto-unblock engaged contacts (clickers/openers) from blocklist
 │       ├── bounce_filters.py      # Smart bounce filtering (excludes campaign openers as false positives)
 │       ├── bounce_ingest.py       # RFC 3463 DSN classifier, IMAP scanner & processed-ID state
@@ -227,7 +229,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
   first rows as JSON, so the UI previews the exact output ListMonk will receive.
 
 ### 7. Persistent Runtime State (`DATA_DIR`)
-- `app/config.py` provides `settings.data_path(filename)` to store mutable JSON state files (`schedule.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`, `reply_log.json`, `reply_processed.json`, `reply_settings.json`, `bounce_processed.json`).
+- `app/config.py` provides `settings.data_path(filename)` to store mutable JSON state files (`schedule.json`, `app_settings.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`, `reply_log.json`, `reply_processed.json`, `reply_settings.json`, `bounce_processed.json`).
 - `bounce_processed.json` is a capped list of handled DSN Message-IDs (newest first) that makes bounce ingestion idempotent independently of IMAP `\Seen`.
 - In Docker, `DATA_DIR` defaults to `/data` (backed by a named volume).
 - Automatically migrates legacy root JSON files into `DATA_DIR` on first run.
@@ -238,6 +240,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 
 | Category | Endpoint | Method | Description |
 |----------|----------|--------|-------------|
+| **App** | `/api/app-settings` | GET / PUT | Installation-wide mode state; `mode_selected` gates the onboarding modal (shows once per installation, not per browser) |
 | **Auth** | `/auth/login` | GET / POST | Login page / authenticate session |
 | | `/auth/logout` | POST | End session & redirect (POST-only: a GET would be a forced-logout CSRF) |
 | **Subscribers** | `/api/subscribers` | GET | Paginated subscribers with search/query/list/`status` filter |
