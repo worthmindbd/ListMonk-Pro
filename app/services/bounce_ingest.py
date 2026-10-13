@@ -45,6 +45,10 @@ from app.services.imap_helpers import (
 # unsubscribe_processed.json).
 PROCESSED_FILE = settings.data_path("bounce_processed.json")
 MAX_PROCESSED_IDS = 5000
+# Handled outcomes are flushed to the state file every this many messages (and
+# once more at the end of the scan). Persisting only at scan end meant a
+# mid-scan crash re-ingested every bounce created so far as a duplicate.
+PROCESSED_FLUSH_BATCH = 10
 
 # DSN "Action:" values (RFC 3464) that are not bounces at all. A delay notice
 # means the message is still in flight, so recording a bounce for it would be
@@ -53,15 +57,23 @@ _NON_BOUNCE_ACTIONS = ("delayed",)
 
 
 def _message_state_id(msg: email.message.EmailMessage) -> str:
-    """Stable identifier for a DSN, preferring the Message-ID header."""
+    """Stable identifier for a DSN, preferring the Message-ID header.
+
+    Returns "" when neither a Message-ID nor any fingerprint material
+    (From/Date/Subject) exists: such a message has no idempotency key, and
+    callers must leave it unprocessed rather than ingest it blindly.
+    """
     message_id = (msg.get("Message-ID") or "").strip()
     if message_id:
         return message_id
-    fingerprint = "|".join([
+    parts = [
         str(msg.get("From") or ""),
         str(msg.get("Date") or ""),
         str(msg.get("Subject") or ""),
-    ])
+    ]
+    if not any(p.strip() for p in parts):
+        return ""
+    fingerprint = "|".join(parts)
     return "fp:" + hashlib.sha256(fingerprint.encode("utf-8", "replace")).hexdigest()[:32]
 
 
@@ -124,9 +136,17 @@ def mark_processed_ids(ids: list[str]) -> None:
 
 
 def _fetch_state_id(conn: imaplib.IMAP4_SSL, msg_id: bytes) -> str:
-    """Fetch only the Message-ID header so processed DSNs need no full download."""
+    """Fetch only the identity headers so processed DSNs need no full download.
+
+    Besides MESSAGE-ID this must include FROM/DATE/SUBJECT: DSNs without a
+    Message-ID are identified by a fingerprint of those headers, and fetching
+    only MESSAGE-ID used to hash every such DSN to the same constant — after
+    the first one was processed, all the others were silently skipped forever.
+    Returns "" when no idempotency key can be derived.
+    """
+    spec = "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID FROM DATE SUBJECT)])"
     try:
-        status, data = conn.fetch(msg_id, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+        status, data = conn.fetch(msg_id, spec)
     except Exception as e:
         logger.warning(f"header fetch failed for {msg_id!r}: {e}")
         return ""
@@ -388,9 +408,15 @@ def connect_bounce_imap_rw() -> Optional[imaplib.IMAP4_SSL]:
         return None
     try:
         if settings.bounce_imap_use_ssl:
-            conn = imaplib.IMAP4_SSL(settings.bounce_imap_host, settings.bounce_imap_port)
+            conn = imaplib.IMAP4_SSL(
+                settings.bounce_imap_host, settings.bounce_imap_port,
+                timeout=settings.imap_timeout,
+            )
         else:
-            conn = imaplib.IMAP4(settings.bounce_imap_host, settings.bounce_imap_port)
+            conn = imaplib.IMAP4(
+                settings.bounce_imap_host, settings.bounce_imap_port,
+                timeout=settings.imap_timeout,
+            )
         conn.login(settings.bounce_imap_user, settings.bounce_imap_pass)
         return conn
     except Exception as e:
@@ -474,11 +500,29 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
                 f"{BOUNCE_SCAN_DAYS} days ({len(processed_set)} already processed)"
             )
 
+            async def _flush_handled() -> None:
+                """Persist the handled outcomes collected so far.
+
+                Called every PROCESSED_FLUSH_BATCH messages and once more at
+                the end of the scan, so a mid-scan crash cannot re-ingest
+                already-created bounces as duplicates on the next run.
+                """
+                if not handled_ids:
+                    return
+                await asyncio.to_thread(mark_processed_ids, handled_ids)
+                handled_ids.clear()
+
             async def _finish(msg_id: bytes, state_id: str) -> None:
-                """Record a terminal outcome so this DSN is never re-processed."""
+                """Record a terminal outcome so this DSN is never re-processed.
+
+                The batch flush runs before the \\Seen marking, so persistence
+                leads the (cosmetic) flag wherever the code path allows.
+                """
                 if state_id:
                     handled_ids.append(state_id)
                     processed_set.add(state_id)
+                    if len(handled_ids) >= PROCESSED_FLUSH_BATCH:
+                        await _flush_handled()
                 try:
                     await asyncio.to_thread(conn.store, msg_id, "+FLAGS", "\\Seen")
                 except Exception as e:
@@ -491,7 +535,18 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
                     # exactly once, and one already handled must not be
                     # re-downloaded.
                     state_id = await asyncio.to_thread(_fetch_state_id, conn, msg_id)
-                    if state_id and state_id in processed_set:
+                    if not state_id:
+                        # Without an idempotency key the DSN can neither be
+                        # recorded as handled nor recognised on a later scan,
+                        # so never create a bounce for it. Leave it unprocessed
+                        # (and unseen) for the next scan to retry.
+                        errors += 1
+                        logger.warning(
+                            "[BounceIngest] no state id derivable for message "
+                            f"{msg_id!r}; leaving it for the next scan"
+                        )
+                        continue
+                    if state_id in processed_set:
                         continue
 
                     status, data = await asyncio.to_thread(conn.fetch, msg_id, "(RFC822)")
@@ -629,10 +684,10 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
                     logger.error(f"error processing message {msg_id}: {e}")
                     errors += 1
 
-            # Persist every terminal outcome in one write (the reply scanner
-            # does the same) so the next scan skips them without downloading.
-            if handled_ids:
-                await asyncio.to_thread(mark_processed_ids, handled_ids)
+            # Persist any remaining terminal outcomes (earlier ones were
+            # flushed in batches mid-scan) so the next scan skips them
+            # without downloading.
+            await _flush_handled()
 
         finally:
             try:

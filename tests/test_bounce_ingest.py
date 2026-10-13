@@ -10,6 +10,7 @@ import email.message
 import email.policy
 import email.utils
 import os
+import re
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -38,9 +39,16 @@ class _FakeIMAP:
 
     def fetch(self, msg_id, spec):
         msg = self.messages[msg_id]
-        if "MESSAGE-ID" in spec.upper():
-            header = f"Message-ID: {msg.get('Message-ID')}\r\n".encode()
-            meta = f"1 (BODY[HEADER.FIELDS (MESSAGE-ID)] {{{len(header)}}}".encode()
+        upper = spec.upper()
+        if "HEADER.FIELDS" in upper:
+            # Honour the requested field list (MESSAGE-ID plus the FROM/DATE/
+            # SUBJECT the fingerprint fallback needs) like a real server does.
+            fields = re.search(r"HEADER\.FIELDS \(([^)]*)\)", upper).group(1).split()
+            wanted = {f.lower() for f in fields}
+            header = "".join(
+                f"{k}: {v}\r\n" for k, v in msg.items() if k.lower() in wanted
+            ).encode()
+            meta = f"1 (BODY[HEADER.FIELDS] {{{len(header)}}}".encode()
             return ("OK", [(meta, header)])
         self.full_fetches.append(msg_id)
         raw = msg.as_bytes(policy=email.policy.default)
@@ -147,6 +155,46 @@ def test_state_id_falls_back_to_fingerprint():
     first = bi._message_state_id(msg)
     assert first.startswith("fp:") and len(first) == 35
     assert first == bi._message_state_id(msg)
+
+
+def test_state_id_fingerprint_differentiates_headerless_dsns():
+    """Message-ID-less DSNs must not collapse onto one constant hash.
+
+    The header peek used to fetch only MESSAGE-ID, so every fingerprint fell
+    back to sha256("||") — after the first such DSN was processed, all the
+    others were silently skipped forever.
+    """
+    a = _dsn("", "a@example.com", subject="Delivery failure #1")
+    b = _dsn("", "b@example.com", subject="Delivery failure #2")
+    id_a, id_b = bi._message_state_id(a), bi._message_state_id(b)
+    assert id_a.startswith("fp:") and id_b.startswith("fp:")
+    assert id_a != id_b
+
+
+def test_state_id_is_empty_without_any_identity_headers():
+    """No Message-ID and no fingerprint material -> no idempotency key."""
+    msg = email.message.EmailMessage()
+    assert bi._message_state_id(msg) == ""
+
+
+def test_fetch_state_id_requests_fingerprint_headers():
+    """The cheap header peek must fetch the fallback fingerprint fields too."""
+    msg = _dsn("", "x@example.com", subject="Delivery failure")
+
+    class _OneShotIMAP(_FakeIMAP):
+        specs: list[str] = []
+
+        def fetch(self, msg_id, spec):
+            self.specs.append(spec)
+            return super().fetch(msg_id, spec)
+
+    conn = _OneShotIMAP({b"1": msg})
+    state_id = bi._fetch_state_id(conn, b"1")
+    upper = conn.specs[0].upper()
+    for field in ("MESSAGE-ID", "FROM", "DATE", "SUBJECT"):
+        assert field in upper, f"{field} missing from the header peek"
+    assert state_id == bi._message_state_id(msg)
+    assert state_id.startswith("fp:")
 
 
 def test_mark_processed_ids_is_idempotent(tmp_path, monkeypatch):
@@ -306,6 +354,92 @@ async def test_create_bounce_failure_is_retried_next_scan(monkeypatch, issuer_st
     assert result["ingested"] == 0
     # Not recorded as processed, so the next scan tries again.
     assert bi.load_processed_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_headerless_dsns_both_ingest_and_dedupe(monkeypatch, issuer_state):
+    """Two Message-ID-less DSNs get distinct state ids, both ingest once."""
+    msg1 = _dsn("", "one@example.com", subject="Delivery failure #1")
+    msg2 = _dsn("", "two@example.com", subject="Delivery failure #2")
+    fake_imap = _FakeIMAP({b"1": msg1, b"2": msg2})
+    client = _wire(monkeypatch, fake_imap, _FakeClient(_subscriber(), _campaign_list()))
+
+    first = await bi.ingest_bounce_mailbox(client)
+    second = await bi.ingest_bounce_mailbox(client)
+
+    assert first["ingested"] == 2
+    assert {c["email"] for c in client.created} == {"one@example.com", "two@example.com"}
+    processed = bi.load_processed_ids()
+    assert len(processed) == 2
+    assert len(set(processed)) == 2
+    assert all(p.startswith("fp:") for p in processed)
+    # The rescan skips both from the header peek alone — no duplicate bounces.
+    assert second["ingested"] == 0
+    assert second["scanned"] == 0
+    assert len(client.created) == 2
+    assert fake_imap.full_fetches == [b"1", b"2"]
+
+
+class _HeaderFailIMAP(_FakeIMAP):
+    """IMAP double whose header peek always fails (flaky connection)."""
+
+    def fetch(self, msg_id, spec):
+        if "HEADER.FIELDS" in spec.upper():
+            raise OSError("connection reset by peer")
+        return super().fetch(msg_id, spec)
+
+
+@pytest.mark.asyncio
+async def test_header_fetch_failure_leaves_message_unprocessed(monkeypatch, issuer_state):
+    """No derivable idempotency key -> never create a bounce for the DSN.
+
+    The message must stay unprocessed (and unseen) so the next scan retries it
+    instead of ingesting it without dedup protection.
+    """
+    msg = _dsn("<flaky@mail>", "bounced@example.com")
+    fake_imap = _HeaderFailIMAP({b"1": msg})
+    client = _wire(monkeypatch, fake_imap, _FakeClient(_subscriber(), _campaign_list()))
+
+    result = await bi.ingest_bounce_mailbox(client)
+
+    assert result["ingested"] == 0
+    assert result["errors"] == 1
+    assert client.created == []
+    assert bi.load_processed_ids() == []
+    assert fake_imap.seen_flags == {}
+    assert fake_imap.full_fetches == []
+
+
+@pytest.mark.asyncio
+async def test_processed_ids_persist_incrementally_before_seen(monkeypatch, issuer_state):
+    """Handled ids are flushed in batches, not only at the end of the scan.
+
+    A mid-scan crash used to re-ingest every already-created bounce as a
+    duplicate; with incremental flushes the window is bounded by the batch,
+    and persistence happens before the \\Seen marking.
+    """
+    monkeypatch.setattr(bi, "PROCESSED_FLUSH_BATCH", 1)
+    msgs = {
+        b"1": _dsn("<m1@mail>", "one@example.com", subject="Failure 1"),
+        b"2": _dsn("<m2@mail>", "two@example.com", subject="Failure 2"),
+    }
+    fake_imap = _FakeIMAP(msgs)
+    persisted_at_seen: list[list[str]] = []
+    original_store = fake_imap.store
+
+    def store(msg_id, op, flags):
+        persisted_at_seen.append(bi.load_processed_ids())
+        return original_store(msg_id, op, flags)
+
+    fake_imap.store = store
+    client = _wire(monkeypatch, fake_imap, _FakeClient(_subscriber(), _campaign_list()))
+
+    result = await bi.ingest_bounce_mailbox(client)
+
+    assert result["ingested"] == 2
+    # When each message was marked \Seen, its own id was already on disk.
+    assert persisted_at_seen[0] == ["<m1@mail>"]
+    assert persisted_at_seen[1] == ["<m1@mail>", "<m2@mail>"]
 
 
 # ── Unattributable DSNs: discard only when attribution was actually possible ──

@@ -9,11 +9,14 @@ appears exactly once, on first login after install.
 
 import asyncio
 import json
+import logging
 import os
 import tempfile
 from typing import Any
 
 from app.config import settings
+
+logger = logging.getLogger("app_settings")
 
 APP_SETTINGS_FILE = settings.data_path("app_settings.json")
 
@@ -48,8 +51,17 @@ def _atomic_write_json(file_path, data: Any, indent: int = 2, ensure_ascii: bool
 
 def load_settings() -> dict:
     try:
-        data = json.loads(APP_SETTINGS_FILE.read_text())
+        data = json.loads(APP_SETTINGS_FILE.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, IsADirectoryError, PermissionError):
+        return dict(_DEFAULT_SETTINGS)
+    if not isinstance(data, dict):
+        # A file holding a list/scalar (hand-edited or half-migrated) parses as
+        # valid JSON but cannot be merged; falling back to the defaults keeps
+        # GET /api/app-settings — and with it onboarding — working.
+        logger.warning(
+            "app_settings.json holds a %s instead of an object; using defaults",
+            type(data).__name__,
+        )
         return dict(_DEFAULT_SETTINGS)
     state = {**_DEFAULT_SETTINGS, **data}
     # A hand-edited or partially written file must not trap the dashboard in a

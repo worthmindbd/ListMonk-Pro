@@ -17,6 +17,12 @@ LOG_FILE = settings.data_path("reply_log.json")
 SETTINGS_FILE = settings.data_path("reply_settings.json")
 PROCESSED_FILE = settings.data_path("reply_processed.json")
 
+# Cap for the persisted processed-message set (mirrors bounce_processed.json):
+# without it the file grows forever on a long-running installation. The list
+# is kept in insertion order (oldest first), so trimming drops the oldest
+# entries — messages far outside the scanner's lookback window.
+MAX_PROCESSED_IDS = 5000
+
 _DEFAULT_SETTINGS = {
     "auto_tag_leads": True,
     "lead_tag": "lead",
@@ -116,6 +122,17 @@ def delete_replies(reply_ids) -> int:
     return removed
 
 
+def _load_processed_list() -> list[str]:
+    """Return the persisted processed IDs in file order (oldest first)."""
+    try:
+        data = json.loads(PROCESSED_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return [str(m) for m in data if m]
+    except (FileNotFoundError, json.JSONDecodeError, IsADirectoryError, PermissionError):
+        pass
+    return []
+
+
 def load_processed_message_ids() -> set[str]:
     """Return set of message IDs already handled by the reply scanner."""
     try:
@@ -133,16 +150,26 @@ def mark_processed_message_ids(message_ids) -> None:
     """Persist several handled message IDs with a single read + write.
 
     The reply scanner processes up to 200 messages per run; writing the whole
-    file once per message made each scan O(n²) on disk I/O.
+    file once per message made each scan O(n²) on disk I/O. The stored list is
+    insertion-ordered and capped at MAX_PROCESSED_IDS (newest entries win), so
+    a long-running installation cannot grow the file without bound.
     """
-    fresh = {str(m) for m in message_ids if m}
+    fresh = [str(m) for m in message_ids if m]
     if not fresh:
         return
-    current = load_processed_message_ids()
-    if fresh <= current:
+    current = _load_processed_list()
+    known = set(current)
+    added = []
+    for m in fresh:
+        if m not in known:
+            known.add(m)
+            added.append(m)
+    if not added:
         return
-    current.update(fresh)
-    _atomic_write_json(PROCESSED_FILE, sorted(current))
+    current.extend(added)
+    if len(current) > MAX_PROCESSED_IDS:
+        current = current[-MAX_PROCESSED_IDS:]
+    _atomic_write_json(PROCESSED_FILE, current)
 
 
 def mark_processed_message_id(message_id: str) -> None:

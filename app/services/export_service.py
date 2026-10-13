@@ -1,18 +1,39 @@
 import csv
 import io
 import json
-from typing import AsyncIterator, Iterator
+from typing import Any, AsyncIterator, Iterator
+
+# Leading characters that make spreadsheet applications (Excel, LibreOffice,
+# Google Sheets) interpret a CSV cell as a formula instead of text. Cell
+# values like subscriber names or reply bodies are attacker-controllable, so
+# every exported string cell is neutralised before it reaches the writer.
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _sanitize_cell(value: Any) -> Any:
+    """Defuse CSV formula injection in string cells.
+
+    A leading single quote makes spreadsheet applications treat the cell as
+    literal text; the quote is not displayed. Non-string values (ids, counts,
+    timestamps as numbers) are returned unchanged.
+    """
+    if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
+        return "'" + value
+    return value
 
 
 def _flatten_row(row: dict, columns: list[str]) -> dict:
-    """Flatten nested dicts/lists to JSON strings so CSV can hold them."""
+    """Flatten nested dicts/lists to JSON strings so CSV can hold them.
+
+    Every cell also passes through ``_sanitize_cell`` — both writers go via
+    this helper, which is the single place exports can be formula-injected.
+    """
     flat_row = {}
     for col in columns:
         val = row.get(col, "")
         if isinstance(val, (dict, list)):
-            flat_row[col] = json.dumps(val, ensure_ascii=False)
-        else:
-            flat_row[col] = val
+            val = json.dumps(val, ensure_ascii=False)
+        flat_row[col] = _sanitize_cell(val)
     return flat_row
 
 

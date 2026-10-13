@@ -231,9 +231,15 @@ def connect_imap() -> Optional[imaplib.IMAP4_SSL | imaplib.IMAP4]:
         return None
     try:
         if settings.imap_use_ssl:
-            conn = imaplib.IMAP4_SSL(settings.imap_host, settings.imap_port)
+            conn = imaplib.IMAP4_SSL(
+                settings.imap_host, settings.imap_port,
+                timeout=settings.imap_timeout,
+            )
         else:
-            conn = imaplib.IMAP4(settings.imap_host, settings.imap_port)
+            conn = imaplib.IMAP4(
+                settings.imap_host, settings.imap_port,
+                timeout=settings.imap_timeout,
+            )
         conn.login(settings.imap_user, settings.imap_pass)
         return conn
     except Exception as e:

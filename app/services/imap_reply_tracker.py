@@ -20,6 +20,9 @@ from app.config import settings
 from app.services.listmonk_client import ListMonkClient
 from app.services.imap_helpers import safe_email_for_query, extract_email_body
 from app.services.imap_unsubscribe import _extract_reply_only, _match_campaign
+# Shared idempotency-key helper: Message-ID when present, otherwise a
+# From|Date|Subject fingerprint (same scheme as the bounce ingester).
+from app.services.bounce_ingest import _message_state_id
 from app.services.reply_log import (
     append_log, load_processed_message_ids, mark_processed_message_ids,
 )
@@ -278,10 +281,18 @@ def _tidy_reply_text(text: str) -> str:
 
 
 def _connect_imap() -> imaplib.IMAP4:
+    # A socket timeout is mandatory: without it a hung mail server blocks the
+    # worker thread — and holds _reply_scan_lock — forever.
     if settings.imap_use_ssl:
-        client = imaplib.IMAP4_SSL(settings.imap_host, settings.imap_port)
+        client = imaplib.IMAP4_SSL(
+            settings.imap_host, settings.imap_port,
+            timeout=settings.imap_timeout,
+        )
     else:
-        client = imaplib.IMAP4(settings.imap_host, settings.imap_port)
+        client = imaplib.IMAP4(
+            settings.imap_host, settings.imap_port,
+            timeout=settings.imap_timeout,
+        )
     client.login(settings.imap_user, settings.imap_pass)
     return client
 
@@ -400,7 +411,12 @@ async def _scan_and_track_replies_impl(
     for msg in messages:
         stats["scanned"] += 1
         msg_id = (msg.get("Message-ID") or "").strip()
-        if msg_id and msg_id in processed_ids:
+        # Messages without a Message-ID still need an idempotency key, or the
+        # 15-minute scan re-records them on every run across the whole 14-day
+        # window. Fall back to the From|Date|Subject fingerprint the bounce
+        # ingester uses.
+        state_id = msg_id or _message_state_id(msg)
+        if state_id and state_id in processed_ids:
             continue
 
         from_header = msg.get("From", "")
@@ -409,8 +425,8 @@ async def _scan_and_track_replies_impl(
 
         # Skip our own outgoing emails or empty addresses
         if not from_email or from_email == my_email:
-            if msg_id:
-                new_msg_ids.append(msg_id)
+            if state_id:
+                new_msg_ids.append(state_id)
             continue
 
         to_header = msg.get("To", "")
@@ -463,8 +479,10 @@ async def _scan_and_track_replies_impl(
         stats["new_replies"] += 1
         stats[sentiment] = stats.get(sentiment, 0) + 1
 
-        if msg_id:
-            new_msg_ids.append(msg_id)
+        # Persist the idempotency key (Message-ID or fingerprint), not just
+        # the raw Message-ID, so header-less replies are deduped too.
+        if state_id:
+            new_msg_ids.append(state_id)
 
     if new_records:
         await append_log(new_records)

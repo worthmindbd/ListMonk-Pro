@@ -9,6 +9,23 @@ load_dotenv()
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _env_int(name: str, default: int, minimum: int) -> int:
+    """Read an integer env var, falling back to ``default`` on bad input.
+
+    Values that are not integers or fall below ``minimum`` are rejected: a
+    typo in .env must neither crash the app at import time nor create sockets
+    with an effectively useless timeout.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        return default
+    return value if value >= minimum else default
+
+
 class Settings:
     listmonk_url: str = os.getenv("LISTMONK_URL", "http://localhost:9000")
     listmonk_user: str = os.getenv("LISTMONK_USER", "listmonk")
@@ -32,6 +49,13 @@ class Settings:
     bounce_imap_user: str = os.getenv("BOUNCE_IMAP_USER", "")
     bounce_imap_pass: str = os.getenv("BOUNCE_IMAP_PASS", "")
     bounce_imap_use_ssl: bool = os.getenv("BOUNCE_IMAP_USE_SSL", "true").lower() == "true"
+
+    # Socket timeout (seconds) for every IMAP connection (unsubscribe, reply,
+    # and bounce scanners). Without it a hung mail server blocks a worker
+    # thread — and holds the module scan lock — forever, silently stalling the
+    # whole pipeline until restart. Must be >= 5; invalid values fall back to
+    # the default.
+    imap_timeout: int = _env_int("IMAP_TIMEOUT", default=60, minimum=5)
 
     @property
     def imap_configured(self) -> bool:
