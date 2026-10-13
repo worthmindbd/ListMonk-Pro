@@ -13,6 +13,9 @@ session_secret.key
 docs/
 *.jpg
 *.png
+# The dashboard serves static/favicon.png on the unauthenticated /favicon.ico
+# route — excluding it made that route 500 in the production image only.
+!static/favicon.png
 unsubscribe_log.json*
 unsubscribe_settings.json
 unsubscribe_processed.json

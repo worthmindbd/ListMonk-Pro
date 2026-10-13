@@ -33,13 +33,13 @@ ListMonk-Pro/
 │       ├── bounce_ingest.py       # RFC 3463 DSN classifier, IMAP scanner & processed-ID state
 │       ├── bounce_list.py         # Paginated bounce listing with opener exclusion & cache integration
 │       ├── bulk_ops.py            # ID validation + bounded-concurrency runner for bulk delete/archive
-│       ├── campaign_scheduler.py  # Timezone-aware send window scheduler (auto-pause/auto-resume)
+│       ├── campaign_scheduler.py  # Timezone-aware send window scheduler (auto-pause/auto-resume, _SCHED_LOCK-serialized)
 │       ├── csv_converter.py       # Converts arbitrary CSV to ListMonk schema (JSON attributes)
 │       ├── deliverability_service.py # Audit rules, score computation, and preset application
-│       ├── export_service.py      # CSV generators (sync list + async streamed)
+│       ├── export_service.py      # CSV generators (sync list + async streamed, formula-injection sanitized)
 │       ├── hard_bounce_cache.py   # In-memory hard bounce counts per campaign with background refresh
 │       ├── imap_helpers.py        # Shared IMAP utilities (body extraction, date formatting, query escaping)
-│       ├── imap_reply_tracker.py  # IMAP reply monitor, sentiment analysis, quote-thread stripping
+│       ├── imap_reply_tracker.py  # IMAP reply monitor, sentiment analysis, quote-thread stripping, Message-ID fingerprint dedup
 │       ├── imap_unsubscribe.py    # IMAP reply monitor for unsubscribe keywords with quote stripping
 │       ├── link_unsubscribe.py    # ListMonk direct link unsubscribe scanner & campaign attributor
 │       ├── listmonk_client.py     # Async HTTP client for ListMonk REST API (with paginate_all helper)
@@ -81,12 +81,13 @@ ListMonk-Pro/
 │   ├── test_csv_converter.py      # Encoding/delimiter/column detection
 │   ├── test_replies_deliverability.py # Reply sentiment, reply API & deliverability preset tests
 │   ├── test_bulk_actions.py       # Bulk select endpoints: ID validation, scoping, partial failures
+│   ├── test_service_hardening.py  # IMAP timeouts, DSN/reply fingerprint dedup, batch flush, scheduler lock, CSV sanitizer, state caps
 │   ├── test_review_fixes.py       # Regression tests for the full-codebase review
 │   ├── conftest.py                # Resets module-level caches between tests
 │   └── test_regressions.py        # Route order, IMAP seen-marking, prune, timestamp regressions
 ├── .github/
 │   └── workflows/
-│       └── deploy.yml             # SSH automated deploy for VPS
+│       └── deploy.yml             # Pytest-gated SSH automated deploy for VPS
 ├── docs/
 │   └── superpowers/               # Design specs and execution plans
 ├── .dockerignore
@@ -144,9 +145,20 @@ ListMonk-Pro/
     human, so `\Seen` cannot mean "already ingested": a DSN opened in webmail would
     otherwise be invisible forever.
   - Idempotency comes from `bounce_processed.json` in `DATA_DIR` (a capped list of
-    Message-IDs, with a `From|Date|Subject` fingerprint fallback). Only the Message-ID
-    header is fetched to test that set, so already-handled DSNs cost no body download.
-    A failed `create_bounce` is deliberately **not** recorded, so the next scan retries.
+    Message-IDs, with a `From|Date|Subject` fingerprint fallback for DSNs that lack
+    one). Only the identity headers (`MESSAGE-ID FROM DATE SUBJECT`) are fetched to
+    test that set, so already-handled DSNs cost no body download, and the
+    fingerprint fallback genuinely differentiates Message-ID-less DSNs. A message
+    with no identity material at all is **skipped unprocessed** (never ingested
+    without an idempotency key) and retried next scan. A failed `create_bounce` is
+    deliberately **not** recorded, so the next scan retries.
+  - Handled IDs are flushed to `bounce_processed.json` in batches of
+    `PROCESSED_FLUSH_BATCH` (10) **before** messages are marked `\Seen`, plus a
+    final flush at scan end — a mid-scan crash can duplicate at most one batch
+    instead of re-ingesting the whole scan.
+  - All IMAP connections are created with `timeout=settings.imap_timeout`
+    (`IMAP_TIMEOUT`, default 60s): a hung mailbox server must not pin an executor
+    thread and the module scan lock forever.
   - A DSN that cannot be attributed is discarded **only when the campaign history was
     actually available**. If `_fetch_campaigns_covering` failed or was truncated, those
     DSNs stay unprocessed for the next scan — otherwise a transient ListMonk hiccup at
@@ -181,7 +193,7 @@ ListMonk-Pro/
   - Quote stripping (`_extract_reply_only`): ignores quoted history/template footers to eliminate false positives.
   - List-aware campaign matching: attributes replies to the latest campaign that targeted the subscriber's actual lists.
   - Actions: unenrolls subscriber from all lists, conditionally blocklists (if enabled in settings), logs to `unsubscribe_log.json`.
-  - Processed messages are marked `\Seen` after their records are persisted; handled emails are also stored in `unsubscribe_processed.json`, so clearing/deleting log records does not cause re-processing.
+  - Processed messages are marked `\Seen` after their records are persisted; handled emails are also stored in `unsubscribe_processed.json` (capped at 5000 entries), so clearing/deleting log records does not cause re-processing.
 - **Link Unsubscribe Scanner** (`app/services/link_unsubscribe.py`):
   - Polls ListMonk lists for subscribers with `unsubscribed` status.
   - Cascades unsubscription across all lists and applies optional blocklist.
@@ -194,10 +206,10 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | Task Loop | Interval | Purpose |
 |-----------|----------|---------|
 | `auto_unblock_loop` | 6 hours | Finds blocklisted clickers/openers, re-enables them, deletes false bounce records |
-| `scheduler_loop` | 60 seconds | Enforces daily send windows, auto-pauses/resumes campaigns |
+| `scheduler_loop` | 60 seconds | Enforces daily send windows, auto-pauses/resumes campaigns. The whole load → mutate → save cycle of a tick runs under `_SCHED_LOCK`, shared with `update_schedule_settings()` (the API's PUT path), so overlapping ticks or a settings write during a tick can never clobber `schedule.json` |
 | `imap_scan_loop` | 1 hour | Scans IMAP inbox for replies + polls ListMonk for link unsubscribes |
 | `bounce_ingest_loop` | 1 hour | Scans the bounce mailbox for new DSNs in the 30-day window, classifies & records bounces; skips delay notices and anything already in `bounce_processed.json` |
-| `reply_scan_loop` | 15 minutes | Scans IMAP for cold-outreach prospect replies, strips quotes, classifies sentiment |
+| `reply_scan_loop` | 15 minutes | Scans IMAP for cold-outreach prospect replies, strips quotes, classifies sentiment. Dedup uses the Message-ID or, when absent, the same `From|Date|Subject` fingerprint as bounce ingestion, persisted to `reply_processed.json` (capped at 5000) |
 | `start_cache_updater` | 5 minutes | Refreshes in-memory hard bounce counts per campaign |
 
 ### 6. CSV Converter (`app/services/csv_converter.py`)
@@ -239,7 +251,8 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 
 ### 7. Persistent Runtime State (`DATA_DIR`)
 - `app/config.py` provides `settings.data_path(filename)` to store mutable JSON state files (`schedule.json`, `app_settings.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`, `reply_log.json`, `reply_processed.json`, `reply_settings.json`, `bounce_processed.json`).
-- `bounce_processed.json` is a capped list of handled DSN Message-IDs (newest first) that makes bounce ingestion idempotent independently of IMAP `\Seen`.
+- `bounce_processed.json` is a capped list of handled DSN Message-IDs (newest first) that makes bounce ingestion idempotent independently of IMAP `\Seen`. `reply_processed.json` and `unsubscribe_processed.json` are capped the same way (5000 entries, oldest evicted).
+- Every JSON state read/write is explicit UTF-8; writes are atomic (tempfile + `fsync` + `os.replace`). `app_settings.load_settings` also guards against a hand-edited file holding a non-object (falls back to defaults instead of 500-ing the onboarding gate).
 - In Docker, `DATA_DIR` defaults to `/data` (backed by a named volume).
 - Automatically migrates legacy root JSON files into `DATA_DIR` on first run.
 
@@ -252,7 +265,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | **App** | `/api/app-settings` | GET / PUT | Installation-wide mode state; `mode_selected` gates the onboarding modal (shows once per installation, not per browser) |
 | **Auth** | `/auth/login` | GET / POST | Login page / authenticate session |
 | | `/auth/logout` | POST | End session & redirect (POST-only: a GET would be a forced-logout CSRF) |
-| **Subscribers** | `/api/subscribers` | GET | Paginated subscribers with search/query/list/`status` filter |
+| **Subscribers** | `/api/subscribers` | GET | Paginated subscribers with free-text `search` (escaped into an ILIKE on email/name — never pass raw text as `query`, which is a ListMonk SQL passthrough), `query`/list/`status` filter |
 | | `/api/subscribers/export-all` | GET | Stream all subscribers as CSV |
 | | `/api/subscribers/import/status` | GET | Get subscriber import status |
 | | `/api/subscribers/import/logs` | GET | Get subscriber import logs |
@@ -270,7 +283,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/campaigns/running/stats` | GET | Real-time running campaign stats |
 | | `/api/campaigns/summary` | GET | Aggregate totals across all campaigns (cached 60s) |
 | | `/api/campaigns/export-all` | GET | Export all campaigns summary as CSV |
-| | `/api/campaigns/analytics/{type}` | GET | Campaign analytics (views/clicks/bounces/links) |
+| | `/api/campaigns/analytics/{type}` | GET | Campaign analytics (views/clicks/bounces/links — the type is whitelisted before it reaches the upstream URL) |
 | | `/api/campaigns/analytics/{type}/export` | GET | Export campaign analytics as CSV |
 | | `/api/campaigns/{id}` | GET / PUT / DELETE | Get / update / delete campaign |
 | | `/api/campaigns/{id}/preview` | GET | Preview campaign HTML rendering |
@@ -280,7 +293,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/campaigns` | DELETE | Bulk delete campaigns by ID array |
 | | `/api/campaigns/{id}/test` | POST | Send test email |
 | | `/api/campaigns/{id}/subscribers/{type}` | GET | View campaign viewers, clickers, or hard bounces |
-| | `/api/campaigns/{id}/subscribers/{type}/export` | GET | Export viewers, clickers, or hard bounces as CSV |
+| | `/api/campaigns/{id}/subscribers/{type}/export` | GET | Export viewers, clickers, or hard bounces as CSV; optional `from_date`/`to_date` (YYYY-MM-DD, strictly validated) bound the export to the window the analytics charts show |
 | **Templates** | `/api/templates` | GET / POST | List templates / create template |
 | | `/api/templates` | DELETE | Bulk delete templates by ID array |
 | | `/api/templates/{id}` | GET / PUT / DELETE | Get / update / delete template |
@@ -306,13 +319,13 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/unsubscribes/campaign/{id}/export` | GET | Export campaign unsubscribes as CSV |
 | | `/api/unsubscribes/records` | DELETE | Delete specific records by email |
 | | `/api/unsubscribes/export` | GET | Export all unsubscribes as CSV |
-| | `/api/unsubscribes/scan` | POST | Manually trigger IMAP + link scan |
+| | `/api/unsubscribes/scan` | POST | Manually trigger IMAP + link scan (502 when a configured mailbox is unreachable; 200 with an explicit "not configured — link scan only" message otherwise) |
 | | `/api/unsubscribes/imap-status` | GET | Check IMAP connection health |
 | | `/api/unsubscribes/clear` | DELETE | Clear all unsubscribe log records |
 | | `/api/unsubscribes/reset` | POST | Undo all unsubscribes & restore list memberships |
 | **Replies** | `/api/replies` | GET | Paginated prospect replies with sentiment/status filtering |
 | | `/api/replies/stats` | GET | Aggregate reply counts, reply rate %, and sentiment breakdown (optional `campaign_id` scopes counts and rate to one campaign; a `by_campaign` breakdown is always returned for the analytics chart) |
-| | `/api/replies/scan` | POST | Manually trigger IMAP prospect reply scan |
+| | `/api/replies/scan` | POST | Manually trigger IMAP prospect reply scan (502 when the mailbox scan fails — never a 200 "ok" with a buried error) |
 | | `/api/replies/status` | GET | Check IMAP connection status |
 | | `/api/replies/settings` | GET / PUT | Get / update reply tracker settings (auto-tagging) |
 | | `/api/replies/status` | PUT | Bulk update reply status from the feed's selection bar |
@@ -393,8 +406,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ### Coding Rules for Agents
 1. **Never make up file paths** — verify existing files before editing.
 2. **Never break existing comments and docstrings** — preserve documentation integrity.
-3. **Escaping ListMonk SQL queries** — use `safe_email_for_query` from `imap_helpers.py` when passing user input to ListMonk queries.
-4. **Memory efficiency** — for CSV exports, prefer `aiter_dicts_to_csv` from `export_service.py` fed by `listmonk.iter_pages(...)` so rows stream one page at a time. `dict_list_to_csv` still buffers its input list, so only use it when the dataset is already materialised (e.g. after in-process filtering).
+3. **Escaping ListMonk SQL queries** — use `safe_email_for_query` from `imap_helpers.py` when passing user input to ListMonk queries. ListMonk's subscriber `query` parameter is raw SQL: free-text search boxes must go through a builder like `subscribers._search_to_query` (strips LIKE wildcards/backslashes, doubles quotes, wraps in ILIKE), never through `query` verbatim. Any path segment interpolated into an upstream ListMonk URL (e.g. `analytics_type`) must be whitelisted first.
+4. **Memory efficiency** — for CSV exports, prefer `aiter_dicts_to_csv` from `export_service.py` fed by `listmonk.iter_pages(...)` so rows stream one page at a time. `dict_list_to_csv` still buffers its input list, so only use it when the dataset is already materialised (e.g. after in-process filtering). Both writers neutralize spreadsheet formula injection (`=`, `+`, `-`, `@`, tab, CR leading characters get a `'` prefix) — client-side "Export Selected" builders must use `App.csvCell()` for the same reason.
 5. **Bound pagination inputs** — every endpoint taking `page`/`per_page` must declare `Query(..., ge=1, le=MAX)`. Bounce listing is the expensive one: serving page N scans every preceding record, so an unbounded `per_page` multiplies into tens of thousands of ListMonk queries.
 6. **Never chain `.get(k, {}).get(...)`** on ListMonk response fields that can be explicitly null (notably `bounce["campaign"]`). Use the helpers in `bounce_filters.py` (`bounce_campaign_id` / `bounce_campaign_name`).
 7. **Failed actions return a status code** — raise `HTTPException` rather than returning `200 {"error": ...}`, so monitoring and the frontend can distinguish success from failure. The one exception is `/api/auto-unblock/status`, which degrades to a `200` with an `error` field because the Settings page loads it via `Promise.all`.
