@@ -114,17 +114,27 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
         records = [r for r in all_records
                    if str(r.get("campaign_id")) == str(campaign_id)]
 
-    total = len(records)
-    positive = sum(1 for r in records if r.get("sentiment") == "positive")
-    auto_reply = sum(1 for r in records if r.get("sentiment") == "auto_reply")
-    negative = sum(1 for r in records if r.get("sentiment") == "negative")
+    # Bounces (delivery-failure DSNs the reply scanner caught in the inbox)
+    # are automated mail, not replies: they are reported separately and never
+    # inflate the reply totals or the reply rate.
+    def _is_reply(r: dict) -> bool:
+        return r.get("sentiment") != "bounce"
+
+    human = [r for r in records if _is_reply(r)]
+
+    total = len(human)
+    positive = sum(1 for r in human if r.get("sentiment") == "positive")
+    auto_reply = sum(1 for r in human if r.get("sentiment") == "auto_reply")
+    negative = sum(1 for r in human if r.get("sentiment") == "negative")
+    bounces = sum(1 for r in records if not _is_reply(r))
 
     # Reply counts per campaign (always from the full log, even for a scoped
-    # call) power the Analytics campaign comparison chart.
+    # call) power the Analytics campaign comparison chart. Bounces are
+    # excluded there too: a DSN is not campaign engagement.
     by_campaign: dict[str, int] = {}
     for r in all_records:
         cid = r.get("campaign_id")
-        if cid:
+        if cid and _is_reply(r):
             key = str(cid)
             by_campaign[key] = by_campaign.get(key, 0) + 1
 
@@ -137,6 +147,7 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
         "positive": positive,
         "auto_reply": auto_reply,
         "negative": negative,
+        "bounces": bounces,
         "total_sent": total_sent,
         "reply_rate": reply_rate,
         "positive_rate": round((positive / total_sent * 100), 2) if total_sent > 0 else 0.0,
@@ -148,7 +159,7 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
 async def get_replies(
     page: int = Query(1, ge=1, le=MAX_PAGE),
     per_page: int = Query(25, ge=1, le=MAX_PER_PAGE),
-    sentiment: str = Query("", description="positive, auto_reply, negative"),
+    sentiment: str = Query("", description="positive, auto_reply, negative, bounce"),
     status: str = Query("", description="unread, lead, replied, archived"),
     campaign_id: int = Query(0, description="Optional campaign ID filter"),
     q: str = Query("", description="Search term for email, name, subject, or body"),

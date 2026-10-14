@@ -1,7 +1,7 @@
 """IMAP Reply Tracker for ListMonk Pro Cold Outreach.
 
 Scans the IMAP inbox for replies from cold email prospects, strips quoted
-threads, categorizes sentiment (positive, auto_reply, negative),
+threads, categorizes sentiment (positive, auto_reply, negative, bounce),
 and links responses to specific campaigns and subscribers.
 """
 
@@ -46,10 +46,41 @@ _OOO_PATTERNS = [
     re.compile(r"away\s+from\s+(my\s+)?desk", re.IGNORECASE),
     re.compile(r"on\s+(annual\s+)?leave", re.IGNORECASE),
     re.compile(r"on\s+vacation", re.IGNORECASE),
-    re.compile(r"undeliverable", re.IGNORECASE),
-    re.compile(r"delivery\s+status\s+notification", re.IGNORECASE),
     re.compile(r"mailbox\s+is\s+full", re.IGNORECASE),
 ]
+
+# Bounce / DSN detection, checked before every sentiment keyword. Mailer-daemon
+# notices land in the same inbox as prospect replies, and a DSN matched none of
+# the keyword lists below — so the unknown-means-positive default flagged a
+# hard bounce ("550-5.1.1 The email account that you tried to reach does not
+# exist") as a Hot Lead. Gmail's wording ("Mail delivery failed: returning
+# message to sender") differs per provider, so both subject and body markers
+# from the common senders (Gmail, Outlook, Exim, qmail, Postfix) are covered.
+_BOUNCE_PATTERNS = [
+    re.compile(r"mail\s+delivery\s+(failed|subsystem)", re.IGNORECASE),
+    re.compile(r"returning\s+message\s+to\s+sender", re.IGNORECASE),
+    re.compile(r"delivery\s+status\s+notification", re.IGNORECASE),
+    re.compile(r"delivery\s+(has\s+)?failed|failed\s+delivery", re.IGNORECASE),
+    re.compile(r"undeliverable|undelivered\s+mail", re.IGNORECASE),
+    re.compile(r"could\s+not\s+be\s+delivered", re.IGNORECASE),
+    re.compile(r"address\(es\)\s+failed", re.IGNORECASE),
+    re.compile(r"failure\s+notice", re.IGNORECASE),
+    re.compile(r"action:\s*failed", re.IGNORECASE),
+    re.compile(r"final-recipient:", re.IGNORECASE),
+    re.compile(r"permanent\s+error", re.IGNORECASE),
+]
+# DSN senders: a message from these is a bounce regardless of wording.
+_BOUNCE_SENDER_RE = re.compile(
+    r"^(mailer-daemon|postmaster|mdaemon|bounces?)\b", re.IGNORECASE
+)
+# Automated but not-a-bounce senders (no-reply@, notifications@, ...): their
+# mail is never a human reply, and bodies like "click here to unsubscribe"
+# must not reach the negative keyword pass either.
+_AUTOMATED_SENDER_RE = re.compile(
+    r"^(no[-_]?reply|do[-_\s]?not[-_\s]?reply|donotreply|"
+    r"auto[-_]?(generated|reply)|notifications?|alerts?|news(letter)?)\b",
+    re.IGNORECASE,
+)
 
 _NEGATIVE_PATTERNS = [
     re.compile(r"not\s+interested", re.IGNORECASE),
@@ -96,24 +127,43 @@ _IMAGE_PLACEHOLDER_RE = re.compile(r"\[image:\s*[^\]]*\]", re.IGNORECASE)
 _BLANK_RUN_RE = re.compile(r"\n{3,}")
 
 
-def classify_sentiment(subject: str, reply_text: str) -> str:
+def classify_sentiment(subject: str, reply_text: str, from_email: str = "") -> str:
     """Classify the sentiment of a prospect reply.
 
-    Returns: 'positive' | 'auto_reply' | 'negative'
+    Returns: 'positive' | 'auto_reply' | 'negative' | 'bounce'
+
+    ``from_email`` (optional) lets the delivery-failure and automated-sender
+    checks run before any keyword: a bounce is never a human sentiment, and a
+    no-reply sender's notification text must not inherit keyword matches.
     """
     combined = f"{subject}\n{reply_text}"
 
-    # 1. Out of Office / Auto-reply check
+    # 1. Bounce / DSN check — before every sentiment keyword. A delivery
+    #    failure beats even rejection wording quoted inside the DSN body.
+    sender = (from_email or "").strip().lower()
+    local_part = sender.split("@", 1)[0]
+    if _BOUNCE_SENDER_RE.match(local_part):
+        return "bounce"
+    for pat in _BOUNCE_PATTERNS:
+        if pat.search(combined):
+            return "bounce"
+
+    # 2. Out of Office / Auto-reply check
     for pat in _OOO_PATTERNS:
         if pat.search(combined):
             return "auto_reply"
 
-    # 2. Negative / Unsubscribe check
+    # 3. Automated no-reply senders: their notifications are never human
+    #    sentiment, so they must not fall through to the positive default.
+    if _AUTOMATED_SENDER_RE.match(local_part):
+        return "auto_reply"
+
+    # 4. Negative / Unsubscribe check
     for pat in _NEGATIVE_PATTERNS:
         if pat.search(reply_text) or pat.search(subject):
             return "negative"
 
-    # 3. Positive / Warm Lead check
+    # 5. Positive / Warm Lead check
     for pat in _POSITIVE_PATTERNS:
         if pat.search(reply_text):
             return "positive"
@@ -319,7 +369,8 @@ def collect_body_repairs(
         reply_only = extract_clean_reply(extract_email_body(msg))
         if not reply_only.strip():
             continue
-        sentiment = classify_sentiment(msg.get("Subject", ""), reply_only)
+        _, repair_from = email.utils.parseaddr(msg.get("From", ""))
+        sentiment = classify_sentiment(msg.get("Subject", ""), reply_only, repair_from)
         repairs[msg_id] = {
             "full_body": reply_only,
             "body_preview": reply_only[:200] + ("..." if len(reply_only) > 200 else ""),
@@ -333,7 +384,9 @@ async def apply_body_repairs(repairs: dict[str, dict]) -> int:
 
     Sentiment is re-classified from the recovered text; a repaired positive
     reply still in the default ``unread`` status becomes a ``lead``, mirroring
-    ingestion. Statuses a human has set are never overwritten.
+    ingestion. Statuses a human has set are never overwritten — except that a
+    recovered bounce loses a ``lead`` flag, which only the old classifier's
+    positive default could have granted it.
     """
     if not repairs:
         return 0
@@ -349,6 +402,8 @@ async def apply_body_repairs(repairs: dict[str, dict]) -> int:
             r["sentiment"] = fix["sentiment"]
             if fix["sentiment"] == "positive" and r.get("status") == "unread":
                 r["status"] = "lead"
+            elif fix["sentiment"] == "bounce" and r.get("status") == "lead":
+                r["status"] = "unread"
             changed += 1
         if changed:
             save_log(records)
@@ -363,7 +418,9 @@ async def reclassify_stored_sentiments() -> int:
     pattern) would never reach them and their badge would stay wrong forever.
     Sentiment is derived data and is safe to overwrite; statuses a human may
     have set are never touched, except for the same ``unread`` -> ``lead``
-    promotion ingestion applies to a freshly positive reply.
+    promotion ingestion applies to a freshly positive reply — and the reverse
+    demotion when a record the old classifier had auto-flagged turns out to
+    be a bounce: a delivery failure is never a hot lead, whoever set it.
     """
     async with _log_lock:
         records = load_log()
@@ -372,12 +429,16 @@ async def reclassify_stored_sentiments() -> int:
             body = (r.get("full_body") or "").strip()
             if not body:
                 continue  # empty bodies are the repair pass's job
-            sentiment = classify_sentiment(r.get("subject", ""), body)
+            sentiment = classify_sentiment(
+                r.get("subject", ""), body, r.get("from_email", "")
+            )
             if sentiment == r.get("sentiment"):
                 continue
             r["sentiment"] = sentiment
             if sentiment == "positive" and r.get("status") == "unread":
                 r["status"] = "lead"
+            elif sentiment == "bounce" and r.get("status") == "lead":
+                r["status"] = "unread"
             changed += 1
         if changed:
             save_log(records)
@@ -419,6 +480,7 @@ async def scan_and_track_replies(
             "positive": 0,
             "negative": 0,
             "auto_reply": 0,
+            "bounce": 0,
             "reclassified": 0,
             "message": "Reply scan already in progress",
         }
@@ -440,6 +502,7 @@ async def _scan_and_track_replies_impl(
             "positive": 0,
             "negative": 0,
             "auto_reply": 0,
+            "bounce": 0,
             "reclassified": 0,
         }
 
@@ -452,6 +515,7 @@ async def _scan_and_track_replies_impl(
         "positive": 0,
         "negative": 0,
         "auto_reply": 0,
+        "bounce": 0,
         "repaired": 0,
         "reclassified": 0,
     }
@@ -585,7 +649,7 @@ async def _scan_and_track_replies_impl(
         full_body = extract_email_body(msg)
         reply_only = extract_clean_reply(full_body)
 
-        sentiment = classify_sentiment(subject, reply_only)
+        sentiment = classify_sentiment(subject, reply_only, from_email)
 
         # Match campaign (history was fetched once for the whole scan)
         camp_id, camp_name = await match_campaign_for_reply(

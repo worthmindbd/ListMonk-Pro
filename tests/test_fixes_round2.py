@@ -605,6 +605,32 @@ def test_reply_stats_survive_campaign_lookup_failure(client, tmp_path, monkeypat
     assert data["reply_rate"] == 0.0
 
 
+def test_reply_stats_exclude_bounces(client, tmp_path, monkeypatch):
+    """Delivery-failure DSNs the reply scanner caught are stored with
+    sentiment=bounce: reported separately, never counted as replies or as
+    campaign engagement (a bounce used to inflate the reply rate)."""
+    _reply_log(tmp_path, monkeypatch, [
+        {"id": "rep_1", "sentiment": "positive", "campaign_id": 7},
+        {"id": "rep_2", "sentiment": "bounce", "campaign_id": 7},
+        {"id": "rep_3", "sentiment": "negative", "campaign_id": 9},
+    ])
+
+    with patch(
+        "app.routers.replies.listmonk.get_campaign",
+        new=AsyncMock(return_value={"data": {"id": 7, "sent": 200}}),
+    ):
+        resp = client.get("/api/replies/stats?campaign_id=7")
+
+    data = resp.json()
+    assert data["total_replies"] == 1          # the DSN is not a reply
+    assert data["bounces"] == 1
+    assert data["positive"] == 1
+    assert data["negative"] == 0               # scoped to campaign 7
+    assert data["total_sent"] == 200
+    assert data["reply_rate"] == 0.5           # 1/200, not 2/200
+    assert data["by_campaign"] == {"7": 1, "9": 1}  # bounce not counted
+
+
 # ── 14. Auto-unblock runs concurrently and preserves list memberships ────────
 
 @pytest.mark.asyncio

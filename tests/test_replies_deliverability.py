@@ -56,6 +56,138 @@ def test_classify_sentiment_polite_decline_is_negative():
     ) == "negative"
 
 
+# ── Bounce / DSN detection ──────────────────────────────────────────────────
+#
+# Regression: a mailer-daemon delivery-failure notice matched none of the
+# keyword lists, so the unknown-means-positive default tagged it
+# "Interested / Lead" and auto-flagged a nonexistent address as a Hot Lead.
+
+_GMAIL_DSN_BODY = (
+    "This message was created automatically by mail delivery software.\n\n"
+    "A message that you sent could not be delivered to one or more of its\n"
+    "recipients. This is a permanent error. The following address(es) failed:\n\n"
+    "business@bandalabs.com\n"
+    "    host aspmx.l.google.com [74.125.206.27]\n"
+    "    SMTP error from remote mail server after RCPT TO:<business@bandalabs.com>:\n"
+    "    550-5.1.1 The email account that you tried to reach does not exist. Please try\n"
+    "    550-5.1.1 double-checking the recipient's email address for typos or\n"
+    "    550-5.1.1 unnecessary spaces. For more information, go to\n"
+    "    550-5.1.1 https://support.google.com/mail/?p=NoSuchUser - gsmtp"
+)
+
+
+def test_classify_bounce_subjects_are_never_leads():
+    # Exim/cPanel wording — the exact DSN seen poisoning the replies feed.
+    assert classify_sentiment(
+        "Mail delivery failed: returning message to sender", _GMAIL_DSN_BODY
+    ) == "bounce"
+    # Gmail native wording.
+    assert classify_sentiment(
+        "Delivery Status Notification (Failure)",
+        "Technical details of permanent failure:\n550 5.1.1 address does not exist",
+    ) == "bounce"
+    # Outlook / Exchange wording.
+    assert classify_sentiment(
+        "Undeliverable: Re: Quick question",
+        "Your message wasn't delivered because the recipient's email provider rejected it.",
+    ) == "bounce"
+    # qmail wording.
+    assert classify_sentiment(
+        "failure notice", "Hi. This is the qmail-send program. I'm afraid I wasn't able to deliver your message."
+    ) == "bounce"
+
+
+def test_classify_bounce_senders_are_never_leads():
+    # A mailer-daemon/postmaster sender is a bounce even with generic wording.
+    assert classify_sentiment(
+        "Undelivered Mail", "See attached transcript.", "mailer-daemon@host.getaevoramedia.com"
+    ) == "bounce"
+    assert classify_sentiment(
+        "Returned mail", "Transcript attached.", "MAILER-DAEMON@mx.example.com"
+    ) == "bounce"
+    assert classify_sentiment(
+        "Re: Offer", "Some automated text.", "postmaster@example.com"
+    ) == "bounce"
+
+
+def test_classify_bounce_beats_quoted_rejection_wording():
+    # A DSN body can quote rejection-like lines from the original thread;
+    # the delivery failure is still the message's actual sentiment.
+    assert classify_sentiment(
+        "Mail delivery failed: returning message to sender",
+        _GMAIL_DSN_BODY + "\n> Not interested, please remove me.",
+    ) == "bounce"
+
+
+def test_classify_automated_no_reply_senders_are_not_positive():
+    # no-reply/notification senders must not fall through to the positive
+    # default (their bodies often contain "unsubscribe" footer words, so the
+    # automated-sender check runs before the keyword passes).
+    assert classify_sentiment(
+        "You have a new message", "Click here to manage your notification preferences.",
+        "no-reply@linkedin.com",
+    ) == "auto_reply"
+    assert classify_sentiment(
+        "Receipt", "Thanks for your purchase.", "noreply@shop.example"
+    ) == "auto_reply"
+    # A human sender with the same unknown body is still a (default) positive.
+    assert classify_sentiment(
+        "You have a new message", "Click here to manage your notification preferences.",
+        "kate@rollerads.com",
+    ) == "positive"
+
+
+def test_classify_human_replies_unchanged_by_bounce_rules():
+    # The new checks must not disturb real prospect classifications.
+    assert classify_sentiment("Re: Hello", "Please remove me from your list") == "negative"
+    assert classify_sentiment("Re: Followup", "Yes please, happy to connect") == "positive"
+    assert classify_sentiment("Out of office", "I am out of the office until Monday") == "auto_reply"
+
+
+@pytest.mark.asyncio
+async def test_reclassify_demotes_bounce_misflagged_as_hot_lead(tmp_path, monkeypatch):
+    """Records the old classifier's unknown-means-positive default turned into
+    Hot Leads are fixed on the next scan: the DSN becomes a bounce and loses
+    the lead flag, while a genuine positive reply is left untouched."""
+    import app.services.reply_log as rl
+    from app.services.imap_reply_tracker import reclassify_stored_sentiments
+
+    monkeypatch.setattr(rl, "LOG_FILE", tmp_path / "reply_log.json")
+    monkeypatch.setattr(rl, "PROCESSED_FILE", tmp_path / "reply_processed.json")
+    monkeypatch.setattr(rl, "SETTINGS_FILE", tmp_path / "reply_settings.json")
+    rl.save_log([
+        {
+            "id": "rep_1",
+            "message_id": "<dsn-1@host>",
+            "from_email": "mailer-daemon@host.getaevoramedia.com",
+            "subject": "Mail delivery failed: returning message to sender",
+            "sentiment": "positive",   # what the old classifier stored
+            "status": "lead",          # auto-promoted at ingestion
+            "full_body": _GMAIL_DSN_BODY,
+        },
+        {
+            "id": "rep_2",
+            "message_id": "<yes-1@host>",
+            "from_email": "admin@makenibent.com",
+            "subject": "Re: Question About Makeni Bent Digital Consulting LLC?",
+            "sentiment": "positive",
+            "status": "lead",
+            "full_body": "Yes. Please share.",
+        },
+    ])
+
+    changed = await reclassify_stored_sentiments()
+
+    assert changed == 1
+    records = rl.load_log()
+    bounce = next(r for r in records if r["id"] == "rep_1")
+    assert bounce["sentiment"] == "bounce"
+    assert bounce["status"] == "unread"  # a DSN is never a hot lead
+    lead = next(r for r in records if r["id"] == "rep_2")
+    assert lead["sentiment"] == "positive"
+    assert lead["status"] == "lead"
+
+
 @pytest.mark.asyncio
 async def test_deliverability_checklist_evaluation():
     mock_listmonk = MagicMock()

@@ -36,7 +36,7 @@ const Replies = {
         try {
             this.stats = await API.get('/api/replies/stats');
         } catch (e) {
-            this.stats = { total_replies: 0, positive: 0, auto_reply: 0, negative: 0, reply_rate: 0 };
+            this.stats = { total_replies: 0, positive: 0, auto_reply: 0, negative: 0, bounces: 0, reply_rate: 0 };
         }
     },
 
@@ -89,6 +89,11 @@ const Replies = {
                     <div class="stat-value">${App.formatNumber(s.auto_reply || 0)}</div>
                     <div style="font-size:0.82rem;color:var(--text-muted)">Automated OOO notices</div>
                 </div>
+                <div class="stat-card warning">
+                    <div class="stat-label"><span class="badge-dot badge-dot-bounce"></span> Bounces / Delivery Failures</div>
+                    <div class="stat-value" style="color:var(--lemon)">${App.formatNumber(s.bounces || 0)}</div>
+                    <div style="font-size:0.82rem;color:var(--text-muted)">Not counted as replies</div>
+                </div>
                 <div class="stat-card danger">
                     <div class="stat-label"><span class="badge-dot badge-dot-negative"></span> Not Interested</div>
                     <div class="stat-value" style="color:var(--rose)">${App.formatNumber(s.negative || 0)}</div>
@@ -115,6 +120,7 @@ const Replies = {
                             <option value="positive" ${this.sentiment === 'positive' ? 'selected' : ''}>Positive / Interested</option>
                             <option value="auto_reply" ${this.sentiment === 'auto_reply' ? 'selected' : ''}>Out of Office</option>
                             <option value="negative" ${this.sentiment === 'negative' ? 'selected' : ''}>Not Interested</option>
+                            <option value="bounce" ${this.sentiment === 'bounce' ? 'selected' : ''}>Bounce / Delivery Failure</option>
                         </select>
 
                         <select class="form-control filter-select" id="statusFilter" aria-label="Filter replies by status" onchange="Replies.filterStatus(this.value)">
@@ -174,6 +180,7 @@ const Replies = {
             'positive': { label: 'Interested / Lead', colorClass: 'badge-positive', dotClass: 'badge-dot-positive' },
             'auto_reply': { label: 'Out of Office', colorClass: 'badge-auto-reply', dotClass: 'badge-dot-auto-reply' },
             'negative': { label: 'Not Interested', colorClass: 'badge-negative', dotClass: 'badge-dot-negative' },
+            'bounce': { label: 'Bounce', colorClass: 'badge-bounce', dotClass: 'badge-dot-bounce' },
         };
 
         const sent = sentimentConfig[r.sentiment] || { label: r.sentiment || 'Reply', colorClass: 'badge-default', dotClass: 'badge-dot-auto-reply' };
@@ -228,10 +235,11 @@ const Replies = {
                 </div>
 
                 <div class="reply-actions">
+                    ${r.sentiment === 'bounce' ? '' : `
                     <button class="btn btn-sm ${r.status === 'lead' ? 'btn-success' : 'btn-secondary'}" onclick="Replies.toggleLead('${r.id}', '${r.status}')">
                         <svg viewBox="0 0 24 24" fill="${r.status === 'lead' ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
                         ${r.status === 'lead' ? 'Hot Lead Flagged' : 'Mark as Hot Lead'}
-                    </button>
+                    </button>`}
                     <button class="btn btn-sm btn-secondary" onclick="Replies.copyEmail(${App.escapeHtml(JSON.stringify(r.from_email || ''))})">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                         Copy Email
@@ -240,10 +248,11 @@ const Replies = {
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
                         Full Details
                     </button>
+                    ${r.sentiment === 'bounce' ? '' : `
                     <button class="btn btn-sm btn-danger-outline" onclick="Replies.unsubscribeLead('${r.id}')">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
                         Blocklist / Unsubscribe
-                    </button>
+                    </button>`}
                     <button class="btn btn-sm btn-danger" onclick="Replies.remove('${r.id}')">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                         Delete
