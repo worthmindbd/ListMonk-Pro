@@ -1,7 +1,7 @@
 """IMAP Reply Tracker for ListMonk Pro Cold Outreach.
 
 Scans the IMAP inbox for replies from cold email prospects, strips quoted
-threads, categorizes sentiment (positive, question, auto_reply, negative),
+threads, categorizes sentiment (positive, auto_reply, negative),
 and links responses to specific campaigns and subscribers.
 """
 
@@ -64,7 +64,7 @@ _NEGATIVE_PATTERNS = [
     re.compile(r"report\s+(as\s+)?spam", re.IGNORECASE),
     # Polite declines: no blunt "not interested", but zero interest either.
     # Without these a courteous "no" ("we are not exploring this type of
-    # collaboration…") matches nothing and falls through to the question bucket.
+    # collaboration…") matches nothing and would be misread as a positive reply.
     re.compile(r"\bnot\s+(currently\s+|at\s+this\s+time\s+)?(exploring|seeking|pursuing|looking\s+(for|to)|in\s+the\s+market)", re.IGNORECASE),
     re.compile(r"\bnot\s+(a|the)\s+(good\s+|great\s+|right\s+)?fit\b", re.IGNORECASE),
     re.compile(r"\bnot\s+the\s+right\s+(time|person|moment)\b", re.IGNORECASE),
@@ -99,7 +99,7 @@ _BLANK_RUN_RE = re.compile(r"\n{3,}")
 def classify_sentiment(subject: str, reply_text: str) -> str:
     """Classify the sentiment of a prospect reply.
 
-    Returns: 'positive' | 'question' | 'auto_reply' | 'negative'
+    Returns: 'positive' | 'auto_reply' | 'negative'
     """
     combined = f"{subject}\n{reply_text}"
 
@@ -118,15 +118,9 @@ def classify_sentiment(subject: str, reply_text: str) -> str:
         if pat.search(reply_text):
             return "positive"
 
-    # 4. Question check
-    if "?" in reply_text or re.search(r"\b(how|what|when|who|where|why|can you|could you)\b", reply_text, re.IGNORECASE):
-        return "question"
-
-    # Default to question if short conversational reply, otherwise positive if polite
-    if len(reply_text.strip()) > 0 and len(reply_text.strip()) < 150:
-        return "question"
-
-    return "question"
+    # No keyword matched: the reply is a real human response that is neither
+    # an auto-response nor a rejection, so treat it as a positive reply.
+    return "positive"
 
 
 def _clean_subject_for_matching(subj: str) -> str:
@@ -425,7 +419,6 @@ async def scan_and_track_replies(
             "positive": 0,
             "negative": 0,
             "auto_reply": 0,
-            "question": 0,
             "reclassified": 0,
             "message": "Reply scan already in progress",
         }
@@ -447,7 +440,6 @@ async def _scan_and_track_replies_impl(
             "positive": 0,
             "negative": 0,
             "auto_reply": 0,
-            "question": 0,
             "reclassified": 0,
         }
 
@@ -460,7 +452,6 @@ async def _scan_and_track_replies_impl(
         "positive": 0,
         "negative": 0,
         "auto_reply": 0,
-        "question": 0,
         "repaired": 0,
         "reclassified": 0,
     }

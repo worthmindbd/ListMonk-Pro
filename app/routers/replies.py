@@ -116,7 +116,6 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
 
     total = len(records)
     positive = sum(1 for r in records if r.get("sentiment") == "positive")
-    question = sum(1 for r in records if r.get("sentiment") == "question")
     auto_reply = sum(1 for r in records if r.get("sentiment") == "auto_reply")
     negative = sum(1 for r in records if r.get("sentiment") == "negative")
 
@@ -136,7 +135,6 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
         "campaign_id": campaign_id,
         "total_replies": total,
         "positive": positive,
-        "question": question,
         "auto_reply": auto_reply,
         "negative": negative,
         "total_sent": total_sent,
@@ -150,7 +148,7 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
 async def get_replies(
     page: int = Query(1, ge=1, le=MAX_PAGE),
     per_page: int = Query(25, ge=1, le=MAX_PER_PAGE),
-    sentiment: str = Query("", description="positive, question, auto_reply, negative"),
+    sentiment: str = Query("", description="positive, auto_reply, negative"),
     status: str = Query("", description="unread, lead, replied, archived"),
     campaign_id: int = Query(0, description="Optional campaign ID filter"),
     q: str = Query("", description="Search term for email, name, subject, or body"),

@@ -563,7 +563,7 @@ def test_reply_stats_scoped_to_campaign(client, tmp_path, monkeypatch):
     _reply_log(tmp_path, monkeypatch, [
         {"id": "rep_1", "sentiment": "positive", "campaign_id": 7},
         # Tracker records have used both ints and strings for campaign_id.
-        {"id": "rep_2", "sentiment": "question", "campaign_id": "7"},
+        {"id": "rep_2", "sentiment": "auto_reply", "campaign_id": "7"},
         {"id": "rep_3", "sentiment": "positive", "campaign_id": 9},
     ])
 
@@ -577,7 +577,7 @@ def test_reply_stats_scoped_to_campaign(client, tmp_path, monkeypatch):
     assert data["campaign_id"] == 7
     assert data["total_replies"] == 2
     assert data["positive"] == 1
-    assert data["question"] == 1
+    assert data["auto_reply"] == 1
     assert data["negative"] == 0
     assert data["total_sent"] == 200
     assert data["reply_rate"] == 1.0

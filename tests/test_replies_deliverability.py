@@ -20,13 +20,14 @@ def test_classify_sentiment():
     assert classify_sentiment("Re: Quick question", "Can you send over pricing and schedule a demo?") == "positive"
     assert classify_sentiment("Re: Followup", "Yes please, happy to connect") == "positive"
 
-    # Question
-    assert classify_sentiment("Re: Inquiry", "How does this work with our existing stack?") == "question"
+    # A reply matching no keyword is a real human response — neither an
+    # auto-response nor a rejection — so it falls back to positive.
+    assert classify_sentiment("Re: Inquiry", "How does this work with our existing stack?") == "positive"
 
 
 def test_classify_sentiment_polite_decline_is_negative():
-    # A courteous "no" carries no blunt refusal phrase; it must not fall
-    # through to the question bucket (regression: a real prospect reply
+    # A courteous "no" carries no blunt refusal phrase; it must not be
+    # misread as a positive reply (regression: a real prospect reply
     # saying exactly this was badged "Question").
     decline = (
         "Hello Kawser! Thank you very much for reaching out and sharing your "

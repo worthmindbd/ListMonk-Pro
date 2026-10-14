@@ -130,7 +130,6 @@ const Dashboard = {
                     recentReplies.slice(0, 4).forEach(r => {
                         const sentMap = {
                             positive: { label: 'Interested', cls: 'badge-success', dotCls: 'badge-dot-positive' },
-                            question: { label: 'Question', cls: 'badge-warning', dotCls: 'badge-dot-question' },
                             auto_reply: { label: 'Auto-Reply', cls: 'badge-secondary', dotCls: 'badge-dot-auto-reply' },
                             negative: { label: 'Not Interested', cls: 'badge-danger', dotCls: 'badge-dot-negative' },
                         };
@@ -421,21 +420,20 @@ const Dashboard = {
 
         const theme = this.getThemeColors();
         const positive = repStats?.positive || 0;
-        const question = repStats?.question || 0;
         const autoReply = repStats?.auto_reply || 0;
         const negative = repStats?.negative || 0;
 
-        const labels = ['Positive / Interested', 'Questions', 'Out of Office', 'Not Interested'];
-        let data = [positive, question, autoReply, negative];
+        const labels = ['Positive / Interested', 'Out of Office', 'Not Interested'];
+        let data = [positive, autoReply, negative];
 
         // If no data, show placeholder empty chart
         const total = data.reduce((a, b) => a + b, 0);
         if (total === 0) {
             labels.push('Awaiting Replies');
-            data = [0, 0, 0, 0, 1];
+            data = [0, 0, 0, 1];
         }
 
-        const bgColors = ['#10b981', '#f59e0b', '#64748b', '#f43f5e', '#334155'];
+        const bgColors = ['#10b981', '#64748b', '#f43f5e', '#334155'];
 
         if (this.charts.status) this.charts.status.destroy();
         this.charts.status = new Chart(ctx, {

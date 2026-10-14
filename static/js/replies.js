@@ -36,7 +36,7 @@ const Replies = {
         try {
             this.stats = await API.get('/api/replies/stats');
         } catch (e) {
-            this.stats = { total_replies: 0, positive: 0, question: 0, auto_reply: 0, negative: 0, reply_rate: 0 };
+            this.stats = { total_replies: 0, positive: 0, auto_reply: 0, negative: 0, reply_rate: 0 };
         }
     },
 
@@ -84,11 +84,6 @@ const Replies = {
                     <div class="stat-value" style="color:var(--emerald)">${App.formatNumber(s.positive || 0)}</div>
                     <div style="font-size:0.82rem;color:var(--text-muted)">Interested & call requests</div>
                 </div>
-                <div class="stat-card warning">
-                    <div class="stat-label"><span class="badge-dot badge-dot-question"></span> Questions & Inquiries</div>
-                    <div class="stat-value" style="color:var(--amber)">${App.formatNumber(s.question || 0)}</div>
-                    <div style="font-size:0.82rem;color:var(--text-muted)">Clarifications & pricing</div>
-                </div>
                 <div class="stat-card">
                     <div class="stat-label"><span class="badge-dot badge-dot-auto-reply"></span> Out of Office / Auto-Reply</div>
                     <div class="stat-value">${App.formatNumber(s.auto_reply || 0)}</div>
@@ -118,7 +113,6 @@ const Replies = {
                         <select class="form-control filter-select" id="sentimentFilter" aria-label="Filter replies by sentiment" onchange="Replies.filterSentiment(this.value)">
                             <option value="" ${!this.sentiment ? 'selected' : ''}>All Sentiments</option>
                             <option value="positive" ${this.sentiment === 'positive' ? 'selected' : ''}>Positive / Interested</option>
-                            <option value="question" ${this.sentiment === 'question' ? 'selected' : ''}>Question</option>
                             <option value="auto_reply" ${this.sentiment === 'auto_reply' ? 'selected' : ''}>Out of Office</option>
                             <option value="negative" ${this.sentiment === 'negative' ? 'selected' : ''}>Not Interested</option>
                         </select>
@@ -178,7 +172,6 @@ const Replies = {
     renderReplyCard(r) {
         const sentimentConfig = {
             'positive': { label: 'Interested / Lead', colorClass: 'badge-positive', dotClass: 'badge-dot-positive' },
-            'question': { label: 'Question', colorClass: 'badge-question', dotClass: 'badge-dot-question' },
             'auto_reply': { label: 'Out of Office', colorClass: 'badge-auto-reply', dotClass: 'badge-dot-auto-reply' },
             'negative': { label: 'Not Interested', colorClass: 'badge-negative', dotClass: 'badge-dot-negative' },
         };
