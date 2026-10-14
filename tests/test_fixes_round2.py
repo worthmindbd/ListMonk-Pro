@@ -605,10 +605,10 @@ def test_reply_stats_survive_campaign_lookup_failure(client, tmp_path, monkeypat
     assert data["reply_rate"] == 0.0
 
 
-def test_reply_stats_exclude_bounces(client, tmp_path, monkeypatch):
-    """Delivery-failure DSNs the reply scanner caught are stored with
-    sentiment=bounce: reported separately, never counted as replies or as
-    campaign engagement (a bounce used to inflate the reply rate)."""
+def test_reply_stats_hide_leftover_bounce_records(client, tmp_path, monkeypatch):
+    """DSNs are ingested as bounces, never stored as replies. The read filter
+    is a defensive guard: a bounce-classified record left in a log written by
+    an older version can never surface in the totals or the campaign chart."""
     _reply_log(tmp_path, monkeypatch, [
         {"id": "rep_1", "sentiment": "positive", "campaign_id": 7},
         {"id": "rep_2", "sentiment": "bounce", "campaign_id": 7},
@@ -623,7 +623,6 @@ def test_reply_stats_exclude_bounces(client, tmp_path, monkeypatch):
 
     data = resp.json()
     assert data["total_replies"] == 1          # the DSN is not a reply
-    assert data["bounces"] == 1
     assert data["positive"] == 1
     assert data["negative"] == 0               # scoped to campaign 7
     assert data["total_sent"] == 200

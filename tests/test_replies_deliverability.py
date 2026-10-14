@@ -145,10 +145,10 @@ def test_classify_human_replies_unchanged_by_bounce_rules():
 
 
 @pytest.mark.asyncio
-async def test_reclassify_demotes_bounce_misflagged_as_hot_lead(tmp_path, monkeypatch):
-    """Records the old classifier's unknown-means-positive default turned into
-    Hot Leads are fixed on the next scan: the DSN becomes a bounce and loses
-    the lead flag, while a genuine positive reply is left untouched."""
+async def test_reclassify_purges_stored_bounce_records(tmp_path, monkeypatch):
+    """Records the old classifier stored from DSNs (unknown-means-positive
+    default even hot-flagged them) are removed from the feed by the next
+    scan: delivery failures are not replies. Genuine positives stay."""
     import app.services.reply_log as rl
     from app.services.imap_reply_tracker import reclassify_stored_sentiments
 
@@ -180,12 +180,40 @@ async def test_reclassify_demotes_bounce_misflagged_as_hot_lead(tmp_path, monkey
 
     assert changed == 1
     records = rl.load_log()
-    bounce = next(r for r in records if r["id"] == "rep_1")
-    assert bounce["sentiment"] == "bounce"
-    assert bounce["status"] == "unread"  # a DSN is never a hot lead
-    lead = next(r for r in records if r["id"] == "rep_2")
+    assert [r["id"] for r in records] == ["rep_2"]  # the DSN record is gone
+    lead = records[0]
     assert lead["sentiment"] == "positive"
     assert lead["status"] == "lead"
+
+
+@pytest.mark.asyncio
+async def test_body_repair_drops_recovered_bounce(tmp_path, monkeypatch):
+    """A stored empty reply whose recovered body is a DSN is removed, not
+    re-badged: delivery failures belong to the bounce pipeline."""
+    import app.services.reply_log as rl
+    from app.services.imap_reply_tracker import apply_body_repairs
+
+    monkeypatch.setattr(rl, "LOG_FILE", tmp_path / "reply_log.json")
+    monkeypatch.setattr(rl, "PROCESSED_FILE", tmp_path / "reply_processed.json")
+    monkeypatch.setattr(rl, "SETTINGS_FILE", tmp_path / "reply_settings.json")
+    rl.save_log([
+        {"id": "rep_1", "message_id": "<dsn@x>", "full_body": "",
+         "sentiment": "question", "status": "unread"},
+        {"id": "rep_2", "message_id": "<real@x>", "full_body": "text",
+         "sentiment": "question", "status": "archived"},
+    ])
+
+    changed = await apply_body_repairs({
+        "<dsn@x>": {
+            "full_body": _GMAIL_DSN_BODY,
+            "body_preview": _GMAIL_DSN_BODY[:200],
+            "sentiment": "bounce",
+        },
+    })
+
+    assert changed == 1
+    records = rl.load_log()
+    assert [r["id"] for r in records] == ["rep_2"]
 
 
 @pytest.mark.asyncio

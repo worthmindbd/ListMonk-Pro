@@ -560,125 +560,30 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
                     body = _extract_body(msg)
                     scanned += 1
 
-                    # Delay notices (Action: delayed) are not bounces: the
-                    # message is still in flight, and a later failure arrives
-                    # as its own DSN.
-                    dsn_action = _dsn_action(body)
-                    if dsn_action in _NON_BOUNCE_ACTIONS:
-                        skipped += 1
-                        reason_key = f"not_a_bounce:{dsn_action}"
-                        skipped_reasons[reason_key] = skipped_reasons.get(reason_key, 0) + 1
-                        await _finish(msg_id, state_id)
-                        continue
-
-                    # Parse bounce date from the email Date header
-                    bounce_date = None
-                    date_str = msg.get("Date", "")
-                    if date_str:
-                        try:
-                            dt = email.utils.parsedate_to_datetime(date_str)
-                            if dt.tzinfo is not None:
-                                bounce_date = dt.astimezone(timezone.utc)
-                            else:
-                                bounce_date = dt.replace(tzinfo=timezone.utc)
-                        except (ValueError, TypeError, AttributeError):
-                            bounce_date = None
-
-                    recipient = _extract_bounced_recipient(msg, body)
-                    if not recipient:
-                        skipped += 1
-                        skipped_reasons["no_recipient"] = skipped_reasons.get("no_recipient", 0) + 1
-                        await _finish(msg_id, state_id)
-                        continue
-
-                    # Look up subscriber
-                    safe_email = safe_email_for_query(recipient)
-                    if not safe_email:
-                        logger.warning(f"Invalid recipient format, skipping: {recipient}")
-                        await _finish(msg_id, state_id)
-                        continue
-                    try:
-                        sub_res = await client.get_subscribers(
-                            1, 1, f"subscribers.email = '{safe_email}'"
-                        )
-                        subs = sub_res.get("data", {}).get("results", [])
-                    except Exception as e:
-                        logger.warning(f"subscriber lookup failed for {recipient}: {e}")
-                        errors += 1
-                        continue
-
-                    if not subs:
-                        skipped += 1
-                        skipped_reasons["no_subscriber"] = skipped_reasons.get("no_subscriber", 0) + 1
-                        await _finish(msg_id, state_id)
-                        continue
-
-                    subscriber = subs[0]
-                    sub_list_ids = {l.get("id") for l in subscriber.get("lists", []) if l.get("id")}
-
-                    # Campaign attribution
-                    campaign = _pick_campaign(
-                        msg,
-                        subscriber_list_ids=sub_list_ids,
-                        recent_campaigns=recent_campaigns,
-                        bounce_date=bounce_date,
+                    outcome, detail = await ingest_parsed_dsn(
+                        client, msg, subject, body, recent_campaigns, campaigns_ok,
+                        ingested_by="bounce_ingest",
                     )
-                    if not campaign:
-                        skipped += 1
-                        skipped_reasons["no_campaign"] = skipped_reasons.get("no_campaign", 0) + 1
-                        if campaigns_ok:
-                            await _finish(msg_id, state_id)
-                        else:
-                            # Attribution needs the campaign list: without it we
-                            # cannot tell "old campaign" from "fetch failed", and
-                            # discarding the DSN would lose a real bounce for good.
-                            # Leave it unprocessed so the next scan retries it.
-                            logger.warning(
-                                "[BounceIngest] campaign history unavailable, "
-                                "will retry %s on the next scan", recipient,
-                            )
-                        continue
 
-                    if await subscriber_opened_campaign(
-                        client, subscriber["id"], campaign["id"],
-                    ):
-                        skipped += 1
-                        skipped_reasons["opened_campaign"] = (
-                            skipped_reasons.get("opened_campaign", 0) + 1
-                        )
-                        logger.info(
-                            f"[BounceIngest] skip {recipient}: opened campaign "
-                            f"{campaign.get('id')}"
-                        )
-                        await _finish(msg_id, state_id)
-                        continue
-
-                    classification = classify_bounce(body, subject)
-                    bounce_type = classification["type"]
-
-                    try:
-                        await client.create_bounce(
-                            email=recipient,
-                            campaign_uuid=campaign.get("uuid"),
-                            bounce_type=bounce_type,
-                            source="api",
-                            meta={
-                                "ingested_by": "bounce_ingest",
-                                "classify_reason": classification["reason"],
-                                "smtp_code": classification["smtp_code"],
-                                "subject": subject[:200],
-                            },
-                        )
+                    if outcome == "ingested":
                         ingested += 1
-                        if bounce_type == "hard":
+                        if detail == "hard":
                             hard_count += 1
                         else:
                             soft_count += 1
                         await _finish(msg_id, state_id)
-                    except Exception as e:
-                        logger.error(f"create_bounce failed for {recipient}: {e}")
+                    elif outcome == "skipped":
+                        skipped += 1
+                        skipped_reasons[detail] = skipped_reasons.get(detail, 0) + 1
+                        await _finish(msg_id, state_id)
+                    elif outcome == "retry":
+                        # Subscriber lookup or create_bounce failed: do NOT
+                        # mark seen — let a retry pick it up next scan.
                         errors += 1
-                        # Do NOT mark seen — let a retry pick it up next scan
+                    elif outcome == "retry_no_campaign":
+                        # Reason counted, message left unprocessed so a later
+                        # scan (with campaign history) can attribute it.
+                        skipped_reasons[detail] = skipped_reasons.get(detail, 0) + 1
 
                 except Exception as e:
                     logger.error(f"error processing message {msg_id}: {e}")
@@ -740,3 +645,121 @@ def _pick_campaign(
             return camp
 
     return None
+
+
+async def ingest_parsed_dsn(
+    client: ListMonkClient,
+    msg: email.message.EmailMessage,
+    subject: str,
+    body: str,
+    recent_campaigns: list,
+    campaigns_ok: bool,
+    ingested_by: str = "bounce_ingest",
+) -> tuple[str, str]:
+    """Classify one fully-fetched DSN and create its ListMonk bounce record.
+
+    Shared by the bounce-mailbox scanner and the reply tracker, so a DSN that
+    lands in the primary inbox becomes exactly the same bounce record (Bounces
+    page, Analytics bounce counts) instead of a "reply". Returns
+    ``(outcome, detail)``:
+
+      ("ingested", "hard"|"soft")      bounce record created
+      ("skipped", reason)              terminal — callers record it as handled
+      ("retry", "subscriber_lookup"|"create_failed")   transient, retry later
+      ("retry_no_campaign", "no_campaign")  history unavailable, retry later
+
+    Callers own idempotency state and IMAP flags; the reasons double as the
+    ``skipped_reasons`` keys the bounce scan reports.
+    """
+    # Delay notices (Action: delayed) are not bounces: the message is still
+    # in flight, and a later failure arrives as its own DSN.
+    dsn_action = _dsn_action(body)
+    if dsn_action in _NON_BOUNCE_ACTIONS:
+        return "skipped", f"not_a_bounce:{dsn_action}"
+
+    # Parse bounce date from the email Date header
+    bounce_date = None
+    date_str = msg.get("Date", "")
+    if date_str:
+        try:
+            dt = email.utils.parsedate_to_datetime(date_str)
+            if dt.tzinfo is not None:
+                bounce_date = dt.astimezone(timezone.utc)
+            else:
+                bounce_date = dt.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError, AttributeError):
+            bounce_date = None
+
+    recipient = _extract_bounced_recipient(msg, body)
+    if not recipient:
+        return "skipped", "no_recipient"
+
+    # Look up subscriber
+    safe_email = safe_email_for_query(recipient)
+    if not safe_email:
+        logger.warning(f"Invalid recipient format, skipping: {recipient}")
+        return "skipped", "invalid_recipient"
+    try:
+        sub_res = await client.get_subscribers(
+            1, 1, f"subscribers.email = '{safe_email}'"
+        )
+        subs = sub_res.get("data", {}).get("results", [])
+    except Exception as e:
+        logger.warning(f"subscriber lookup failed for {recipient}: {e}")
+        return "retry", "subscriber_lookup"
+
+    if not subs:
+        return "skipped", "no_subscriber"
+
+    subscriber = subs[0]
+    sub_list_ids = {l.get("id") for l in subscriber.get("lists", []) if l.get("id")}
+
+    # Campaign attribution
+    campaign = _pick_campaign(
+        msg,
+        subscriber_list_ids=sub_list_ids,
+        recent_campaigns=recent_campaigns,
+        bounce_date=bounce_date,
+    )
+    if not campaign:
+        if campaigns_ok:
+            return "skipped", "no_campaign"
+        # Attribution needs the campaign list: without it we cannot tell
+        # "old campaign" from "fetch failed", and discarding the DSN would
+        # lose a real bounce for good. Leave it unprocessed so the next
+        # scan retries it.
+        logger.warning(
+            "[BounceIngest] campaign history unavailable, "
+            "will retry %s on the next scan", recipient,
+        )
+        return "retry_no_campaign", "no_campaign"
+
+    if await subscriber_opened_campaign(
+        client, subscriber["id"], campaign["id"],
+    ):
+        logger.info(
+            f"[BounceIngest] skip {recipient}: opened campaign "
+            f"{campaign.get('id')}"
+        )
+        return "skipped", "opened_campaign"
+
+    classification = classify_bounce(body, subject)
+    bounce_type = classification["type"]
+
+    try:
+        await client.create_bounce(
+            email=recipient,
+            campaign_uuid=campaign.get("uuid"),
+            bounce_type=bounce_type,
+            source="api",
+            meta={
+                "ingested_by": ingested_by,
+                "classify_reason": classification["reason"],
+                "smtp_code": classification["smtp_code"],
+                "subject": subject[:200],
+            },
+        )
+    except Exception as e:
+        logger.error(f"create_bounce failed for {recipient}: {e}")
+        return "retry", "create_failed"
+    return "ingested", bounce_type

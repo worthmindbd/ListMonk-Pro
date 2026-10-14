@@ -400,3 +400,168 @@ class _FakeIMAP:
 
 async def _no_campaigns(listmonk, cutoff):
     return [], True
+
+
+# ── End-to-end: an inbox DSN becomes a bounce, never a reply ──────────────────
+
+def _inbox_dsn_raw() -> bytes:
+    import email.utils
+
+    date = email.utils.format_datetime(
+        email.utils.parsedate_to_datetime("Wed, 14 Oct 2026 14:10:50 +0200")
+    )
+    return (
+        b"From: Mail Delivery System <mailer-daemon@host.getaevoramedia.com>\r\n"
+        b"To: me@example.com\r\n"
+        b"Subject: Mail delivery failed: returning message to sender\r\n"
+        b"Message-ID: <inbox-dsn@example.com>\r\n"
+        b"Date: " + date.encode() + b"\r\n"
+        b"\r\n"
+        b"This message was created automatically by mail delivery software.\r\n"
+        b"\r\n"
+        b"A message that you sent could not be delivered to one or more of its\r\n"
+        b"recipients. This is a permanent error. The following address(es) failed:\r\n"
+        b"\r\n"
+        b"business@bandalabs.com\r\n"
+        b"  SMTP error from remote mail server after RCPT TO:<business@bandalabs.com>:\r\n"
+        b"  550-5.1.1 The email account that you tried to reach does not exist.\r\n"
+    )
+
+
+_HUMAN_REPLY_RAW = (
+    b"From: Abdul Fattah Ismail <admin@makenibent.com>\r\n"
+    b"To: me@example.com\r\n"
+    b"Subject: Re: Question About Makeni Bent Digital Consulting LLC?\r\n"
+    b"Message-ID: <yes-reply@example.com>\r\n"
+    b"Date: Wed, 14 Oct 2026 13:00:00 +0000\r\n"
+    b"\r\n"
+    b"Yes. Please share.\r\n"
+)
+
+
+class _FakeListmonk:
+    """ListMonk double backing both the DSN recipient and the reply sender."""
+
+    def __init__(self):
+        self.created = []
+
+    async def get_subscribers(self, page, per_page, query):
+        return {"data": {"results": [{
+            "id": 42,
+            "email": "business@bandalabs.com",
+            "lists": [{"id": 1}],
+        }], "total": 1}}
+
+    async def create_bounce(self, **kwargs):
+        self.created.append(kwargs)
+        return {"data": True}
+
+
+class _InboxIMAP:
+    """Minimal IMAP stand-in serving a fixed set of raw messages."""
+
+    def __init__(self, raw_messages: list[bytes]):
+        self.raw_messages = raw_messages
+
+    def select(self, *args, **kwargs):
+        return "OK", [b"1"]
+
+    def search(self, *args, **kwargs):
+        return "OK", [b" ".join(str(i + 1).encode() for i in range(len(self.raw_messages)))]
+
+    def fetch(self, num, spec):
+        idx = int(num) - 1
+        return "OK", [(num, self.raw_messages[idx])]
+
+    def close(self):
+        pass
+
+    def logout(self):
+        pass
+
+
+async def _run_inbox_scan(tmp_path, monkeypatch, messages):
+    import app.services.imap_reply_tracker as T
+    import app.services.bounce_ingest as bi
+    from datetime import datetime, timedelta, timezone
+
+    rl = _reply_log(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(bi, "PROCESSED_FILE", tmp_path / "bounce_processed.json")
+    monkeypatch.setattr(
+        bi, "subscriber_opened_campaign",
+        lambda *a, **k: _no_opened(),
+    )
+    monkeypatch.setattr(T.settings, "imap_host", "imap.example.com")
+    monkeypatch.setattr(T.settings, "imap_user", "me@example.com")
+    monkeypatch.setattr(T.settings, "imap_pass", "secret")
+    monkeypatch.setattr(T.settings, "imap_use_ssl", False)
+
+    async def _campaigns(listmonk, cutoff):
+        return [{
+            "id": 7,
+            "uuid": "camp-uuid-7",
+            "name": "Cold Outreach Campaign",
+            "created_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+            "lists": [{"id": 1}],
+        }], True
+
+    monkeypatch.setattr(T, "_fetch_campaigns_covering", _campaigns)
+    monkeypatch.setattr(T, "_connect_imap", lambda: _InboxIMAP(messages))
+
+    fake = _FakeListmonk()
+    stats = await T._scan_and_track_replies_impl(fake, days_back=14)
+    return stats, fake, rl
+
+
+async def _no_opened():
+    return False
+
+
+async def test_scan_routes_inbox_dsn_to_bounce_pipeline(tmp_path, monkeypatch):
+    """A mailer-daemon DSN in the primary inbox is never stored as a reply:
+    it becomes a ListMonk bounce record (Bounces page / Analytics counts)."""
+    stats, fake, rl = await _run_inbox_scan(
+        tmp_path, monkeypatch, [_inbox_dsn_raw(), _HUMAN_REPLY_RAW],
+    )
+
+    # The DSN stays out of the feed; the human reply is recorded normally.
+    assert stats["bounce"] == 1
+    assert stats["new_replies"] == 1
+    records = rl.load_log()
+    assert len(records) == 1
+    assert records[0]["full_body"].strip() == "Yes. Please share."
+    assert records[0]["sentiment"] == "positive"
+
+    # ... and it was recorded through the bounce pipeline, hard (5.1.1).
+    assert len(fake.created) == 1
+    bounce = fake.created[0]
+    assert bounce["email"] == "business@bandalabs.com"
+    assert bounce["bounce_type"] == "hard"
+    assert bounce["meta"]["ingested_by"] == "reply_tracker"
+
+    # Idempotency: the reply scanner's processed set has both messages, and
+    # the bounce ingester's set has the DSN so a shared mailbox never
+    # double-records it.
+    assert "<inbox-dsn@example.com>" in rl.load_processed_message_ids()
+    assert "<yes-reply@example.com>" in rl.load_processed_message_ids()
+    import app.services.bounce_ingest as bi
+    assert bi.load_processed_ids() == ["<inbox-dsn@example.com>"]
+
+
+async def test_scan_skips_dsn_already_ingested_by_bounce_scanner(tmp_path, monkeypatch):
+    """When the bounce ingester already recorded the DSN (both scanners watch
+    the same mailbox), the reply scan must not create a second bounce."""
+    import app.services.bounce_ingest as bi
+
+    # Point the shared bounce state at tmp before seeding it.
+    monkeypatch.setattr(bi, "PROCESSED_FILE", tmp_path / "bounce_processed.json")
+    bi.mark_processed_ids(["<inbox-dsn@example.com>"])
+    stats, fake, rl = await _run_inbox_scan(
+        tmp_path, monkeypatch, [_inbox_dsn_raw(), _HUMAN_REPLY_RAW],
+    )
+
+    assert stats["bounce"] == 1
+    assert fake.created == []
+    records = rl.load_log()
+    assert [r["full_body"].strip() for r in records] == ["Yes. Please share."]
+    assert "<inbox-dsn@example.com>" in rl.load_processed_message_ids()

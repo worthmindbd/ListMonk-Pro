@@ -485,3 +485,61 @@ async def test_unattributable_dsn_is_discarded_when_history_is_complete(monkeypa
     assert first["skipped_reasons"].get("no_campaign") == 1
     assert bi.load_processed_ids() == ["<old@mail>"]
     assert second["scanned"] == 0
+
+
+# ── Shared per-DSN ingestion (the reply tracker uses it for inbox DSNs) ──────
+
+def _opened(monkeypatch, opened=False):
+    monkeypatch.setattr(bi, "subscriber_opened_campaign", lambda *a, **k: _async_return(opened))
+
+
+@pytest.mark.asyncio
+async def test_ingest_parsed_dsn_creates_bounce_record(monkeypatch):
+    """The shared entry point records one fully-fetched DSN as a hard bounce."""
+    msg = _dsn("<shared@mail>", "bounced@example.com")
+    client = _FakeClient(_subscriber(), _campaign_list())
+    _opened(monkeypatch)
+
+    outcome, detail = await bi.ingest_parsed_dsn(
+        client, msg, msg.get("Subject", ""), bi._extract_body(msg),
+        recent_campaigns=_campaign_list(), campaigns_ok=True,
+        ingested_by="reply_tracker",
+    )
+
+    assert outcome == "ingested" and detail == "hard"
+    assert client.created[0]["email"] == "bounced@example.com"
+    assert client.created[0]["bounce_type"] == "hard"
+    assert client.created[0]["meta"]["ingested_by"] == "reply_tracker"
+
+
+@pytest.mark.asyncio
+async def test_ingest_parsed_dsn_skips_non_subscriber(monkeypatch):
+    msg = _dsn("<stranger2@mail>", "stranger@example.com")
+    client = _FakeClient(None, _campaign_list())
+    _opened(monkeypatch)
+
+    outcome, detail = await bi.ingest_parsed_dsn(
+        client, msg, msg.get("Subject", ""), bi._extract_body(msg),
+        recent_campaigns=_campaign_list(), campaigns_ok=True,
+    )
+
+    assert outcome == "skipped" and detail == "no_subscriber"
+    assert client.created == []
+
+
+@pytest.mark.asyncio
+async def test_ingest_parsed_dsn_retries_on_create_failure(monkeypatch):
+    class _FailingClient(_FakeClient):
+        async def create_bounce(self, **kwargs):
+            raise RuntimeError("ListMonk unavailable")
+
+    msg = _dsn("<shared-retry@mail>", "bounced@example.com")
+    client = _FailingClient(_subscriber(), _campaign_list())
+    _opened(monkeypatch)
+
+    outcome, detail = await bi.ingest_parsed_dsn(
+        client, msg, msg.get("Subject", ""), bi._extract_body(msg),
+        recent_campaigns=_campaign_list(), campaigns_ok=True,
+    )
+
+    assert outcome == "retry" and detail == "create_failed"

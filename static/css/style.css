@@ -2904,7 +2904,6 @@ td .tag {
 .badge-dot-positive { background-color: #10b981; box-shadow: 0 0 6px rgba(16, 185, 129, 0.5); }
 .badge-dot-auto-reply { background-color: #94a3b8; }
 .badge-dot-negative { background-color: #f43f5e; box-shadow: 0 0 6px rgba(244, 63, 94, 0.5); }
-.badge-dot-bounce { background-color: #fbbf24; box-shadow: 0 0 6px rgba(251, 191, 36, 0.5); }
 
 .mode-card-header h4 {
     margin: 0 0 6px 0;
@@ -3101,12 +3100,6 @@ td .tag {
     background: rgba(244, 63, 94, 0.15);
     color: #f43f5e;
     border: 1px solid rgba(244, 63, 94, 0.35);
-}
-
-.sentiment-badge.badge-bounce {
-    background: rgba(251, 191, 36, 0.15);
-    color: #fbbf24;
-    border: 1px solid rgba(251, 191, 36, 0.35);
 }
 
 .reply-subject {

@@ -39,8 +39,8 @@ ListMonk-Pro/
 │       ├── export_service.py      # CSV generators (sync list + async streamed, formula-injection sanitized)
 │       ├── hard_bounce_cache.py   # In-memory hard bounce counts per campaign with background refresh
 │       ├── imap_helpers.py        # Shared IMAP utilities (body extraction, date formatting, query escaping)
-│       ├── imap_reply_tracker.py  # IMAP reply monitor, sentiment analysis (incl. bounce/DSN detection), quote-thread stripping, Message-ID fingerprint dedup,
-│       │                          #   HTML-only body fallback + repair pass for replies stored with an empty body
+│       ├── imap_reply_tracker.py  # IMAP reply monitor, sentiment analysis, quote-thread stripping, Message-ID fingerprint dedup,
+│       │                          #   HTML-only body fallback + repair pass; routes inbox DSNs into the bounce pipeline (never stored as replies)
 │       ├── imap_unsubscribe.py    # IMAP reply monitor for unsubscribe keywords with quote stripping
 │       ├── link_unsubscribe.py    # ListMonk direct link unsubscribe scanner & campaign attributor
 │       ├── listmonk_client.py     # Async HTTP client for ListMonk REST API (with paginate_all helper)
@@ -211,7 +211,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | `scheduler_loop` | 60 seconds | Enforces daily send windows, auto-pauses/resumes campaigns. The whole load → mutate → save cycle of a tick runs under `_SCHED_LOCK`, shared with `update_schedule_settings()` (the API's PUT path), so overlapping ticks or a settings write during a tick can never clobber `schedule.json` |
 | `imap_scan_loop` | 1 hour | Scans IMAP inbox for replies + polls ListMonk for link unsubscribes |
 | `bounce_ingest_loop` | 1 hour | Scans the bounce mailbox for new DSNs in the 30-day window, classifies & records bounces; skips delay notices and anything already in `bounce_processed.json` |
-| `reply_scan_loop` | 15 minutes | Scans IMAP for cold-outreach prospect replies, strips quotes, classifies sentiment. Delivery-failure DSNs (mailer-daemon subject/sender/body markers) are classified as `bounce`: badged in the feed but never counted as replies, leads, or reply-rate engagement. HTML-only replies (no usable `text/plain` part) are rendered to text via `imap_helpers.html_to_text` so genuine replies are never stored with an empty body; records already stored empty are repaired in place from the fetched messages, and a re-classification pass re-tags stored replies when the sentiment rules evolve (a stored DSN misflagged as a hot lead loses the flag). Dedup uses the Message-ID or, when absent, the same `From|Date|Subject` fingerprint as bounce ingestion, persisted to `reply_processed.json` (capped at 5000) |
+| `reply_scan_loop` | 15 minutes | Scans IMAP for cold-outreach prospect replies, strips quotes, classifies sentiment. Delivery-failure DSNs (mailer-daemon subject/sender/body markers) are never stored as replies: they are routed through `bounce_ingest.ingest_parsed_dsn` so the failed prospect gets a real bounce record (Bounces page, Analytics bounce counts), deduped against `bounce_processed.json` so a mailbox both scanners watch yields one record. HTML-only replies (no usable `text/plain` part) are rendered to text via `imap_helpers.html_to_text` so genuine replies are never stored with an empty body; records already stored empty are repaired in place from the fetched messages, and a re-classification pass re-tags stored replies when the sentiment rules evolve (a DSN stored by an older version is removed from the feed outright). Dedup uses the Message-ID or, when absent, the same `From|Date|Subject` fingerprint as bounce ingestion, persisted to `reply_processed.json` (capped at 5000) |
 | `start_cache_updater` | 5 minutes | Refreshes in-memory hard bounce counts per campaign |
 
 ### 6. CSV Converter (`app/services/csv_converter.py`)
