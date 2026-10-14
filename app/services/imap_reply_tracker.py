@@ -62,6 +62,18 @@ _NEGATIVE_PATTERNS = [
     re.compile(r"wrong\s+person", re.IGNORECASE),
     re.compile(r"cease\s+and\s+desist", re.IGNORECASE),
     re.compile(r"report\s+(as\s+)?spam", re.IGNORECASE),
+    # Polite declines: no blunt "not interested", but zero interest either.
+    # Without these a courteous "no" ("we are not exploring this type of
+    # collaboration…") matches nothing and falls through to the question bucket.
+    re.compile(r"\bnot\s+(currently\s+|at\s+this\s+time\s+)?(exploring|seeking|pursuing|looking\s+(for|to)|in\s+the\s+market)", re.IGNORECASE),
+    re.compile(r"\bnot\s+(a|the)\s+(good\s+|great\s+|right\s+)?fit\b", re.IGNORECASE),
+    re.compile(r"\bnot\s+the\s+right\s+(time|person|moment)\b", re.IGNORECASE),
+    re.compile(r"\b(no|don'?t|do\s+not)\s+(current\s+|immediate\s+)?need\b", re.IGNORECASE),
+    re.compile(r"\b(have\s+)?sav(?:ed|e)\s+your\s+(contact|details|information)", re.IGNORECASE),
+    re.compile(r"\b(keep|keeping)\s+(you|your\s+\w+)\s+(in\s+mind|on\s+file)\b", re.IGNORECASE),
+    re.compile(r"\b(will|would|'ll)\s+(certainly\s+|definitely\s+|be\s+sure\s+to\s+)?(get|be)\s+in\s+touch\s+if\s+(the\s+)?(situation|needs?|circumstances?)", re.IGNORECASE),
+    re.compile(r"\b(wish\s+you\s+(great\s+|much\s+|every\s+|continued\s+)?success|best\s+of\s+luck)\b", re.IGNORECASE),
+    re.compile(r"\bpass\s+(on\s+this|for\s+now)\b", re.IGNORECASE),
 ]
 
 _POSITIVE_PATTERNS = [
@@ -349,6 +361,35 @@ async def apply_body_repairs(repairs: dict[str, dict]) -> int:
     return changed
 
 
+async def reclassify_stored_sentiments() -> int:
+    """Re-run the classifier over stored reply bodies (single write).
+
+    Records whose Message-ID is already in the processed set are skipped by
+    every later scan, so a classifier improvement (e.g. a new polite-decline
+    pattern) would never reach them and their badge would stay wrong forever.
+    Sentiment is derived data and is safe to overwrite; statuses a human may
+    have set are never touched, except for the same ``unread`` -> ``lead``
+    promotion ingestion applies to a freshly positive reply.
+    """
+    async with _log_lock:
+        records = load_log()
+        changed = 0
+        for r in records:
+            body = (r.get("full_body") or "").strip()
+            if not body:
+                continue  # empty bodies are the repair pass's job
+            sentiment = classify_sentiment(r.get("subject", ""), body)
+            if sentiment == r.get("sentiment"):
+                continue
+            r["sentiment"] = sentiment
+            if sentiment == "positive" and r.get("status") == "unread":
+                r["status"] = "lead"
+            changed += 1
+        if changed:
+            save_log(records)
+    return changed
+
+
 def _connect_imap() -> imaplib.IMAP4:
     # A socket timeout is mandatory: without it a hung mail server blocks the
     # worker thread — and holds _reply_scan_lock — forever.
@@ -385,6 +426,7 @@ async def scan_and_track_replies(
             "negative": 0,
             "auto_reply": 0,
             "question": 0,
+            "reclassified": 0,
             "message": "Reply scan already in progress",
         }
 
@@ -406,6 +448,7 @@ async def _scan_and_track_replies_impl(
             "negative": 0,
             "auto_reply": 0,
             "question": 0,
+            "reclassified": 0,
         }
 
     processed_ids = load_processed_message_ids()
@@ -419,6 +462,7 @@ async def _scan_and_track_replies_impl(
         "auto_reply": 0,
         "question": 0,
         "repaired": 0,
+        "reclassified": 0,
     }
 
     # Fetch the campaign history once per scan, walked back far enough to
@@ -491,6 +535,19 @@ async def _scan_and_track_replies_impl(
                 )
     except Exception as e:
         logger.warning(f"[ReplyTracker] Body repair pass failed (non-fatal): {e}")
+
+    # Re-tag stored records the (evolved) classifier now reads differently:
+    # their Message-IDs are in the processed set, so the ingest loop below
+    # would skip them forever and their badge would stay stale.
+    try:
+        stats["reclassified"] = await reclassify_stored_sentiments()
+        if stats["reclassified"]:
+            logger.info(
+                f"[ReplyTracker] Re-classified {stats['reclassified']} stored "
+                "reply record(s) with the current sentiment rules"
+            )
+    except Exception as e:
+        logger.warning(f"[ReplyTracker] Sentiment re-classification failed (non-fatal): {e}")
 
     my_email = (settings.imap_user or "").strip().lower()
 

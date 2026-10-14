@@ -297,6 +297,56 @@ async def test_apply_body_repairs_noop_without_repairs(tmp_path, monkeypatch):
     assert await apply_body_repairs({}) == 0
 
 
+# ── Re-tagging stored sentiments after classifier changes ────────────────────
+
+async def test_reclassify_stored_sentiments_retags_polite_decline(tmp_path, monkeypatch):
+    from app.services.imap_reply_tracker import reclassify_stored_sentiments
+
+    decline = (
+        "At this time, we are not exploring this type of collaboration, but we "
+        "have saved your contact information and will certainly get in touch if "
+        "the situation changes."
+    )
+    rl = _reply_log(tmp_path, monkeypatch, [
+        {"id": "rep_1", "message_id": "<decline@x>", "subject": "Re: Proposal",
+         "full_body": decline, "sentiment": "question", "status": "unread"},
+        {"id": "rep_2", "message_id": "<empty@x>", "subject": "Re: Proposal",
+         "full_body": "", "sentiment": "question", "status": "unread"},
+        {"id": "rep_3", "message_id": "<warm@x>", "subject": "Re: Proposal",
+         "full_body": "Yes please, happy to connect", "sentiment": "positive",
+         "status": "lead"},
+        {"id": "rep_4", "message_id": "<late@x>", "subject": "Re: Proposal",
+         "full_body": "Sounds good, let's talk tomorrow", "sentiment": "question",
+         "status": "unread"},
+    ])
+
+    changed = await reclassify_stored_sentiments()
+
+    assert changed == 2
+    records = {r["id"]: r for r in rl.load_log()}
+    assert records["rep_1"]["sentiment"] == "negative"
+    # A negative re-tag never demotes a status a human may have set.
+    assert records["rep_1"]["status"] == "unread"
+    # Empty bodies belong to the repair pass and stay untouched.
+    assert records["rep_2"]["sentiment"] == "question"
+    assert records["rep_3"]["sentiment"] == "positive"
+    # A flip to positive mirrors ingestion's unread -> lead promotion.
+    assert records["rep_4"]["sentiment"] == "positive"
+    assert records["rep_4"]["status"] == "lead"
+
+
+async def test_reclassify_stored_sentiments_noop_when_unchanged(tmp_path, monkeypatch):
+    from app.services.imap_reply_tracker import reclassify_stored_sentiments
+
+    rl = _reply_log(tmp_path, monkeypatch, [
+        {"id": "rep_1", "message_id": "<m@x>", "subject": "Re: Offer",
+         "full_body": "Not interested, unsubscribe", "sentiment": "negative",
+         "status": "archived"},
+    ])
+    assert await reclassify_stored_sentiments() == 0
+    assert rl.load_log()[0]["sentiment"] == "negative"
+
+
 # ── End-to-end: a scan repairs a stored empty reply ──────────────────────────
 
 async def test_scan_repairs_stored_empty_reply(tmp_path, monkeypatch):

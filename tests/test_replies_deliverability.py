@@ -24,6 +24,37 @@ def test_classify_sentiment():
     assert classify_sentiment("Re: Inquiry", "How does this work with our existing stack?") == "question"
 
 
+def test_classify_sentiment_polite_decline_is_negative():
+    # A courteous "no" carries no blunt refusal phrase; it must not fall
+    # through to the question bucket (regression: a real prospect reply
+    # saying exactly this was badged "Question").
+    decline = (
+        "Hello Kawser! Thank you very much for reaching out and sharing your "
+        "proposal with us.\n\n"
+        "At this time, we are not exploring this type of collaboration, but we "
+        "have saved your contact information and will certainly get in touch if "
+        "the situation changes. We truly appreciate your professionalism and "
+        "wish you great success with your projects.\n\n"
+        "Wishing you a productive and wonderful day ahead!"
+    )
+    assert classify_sentiment("Re: Question About Rollerads?", decline) == "negative"
+    assert classify_sentiment(
+        "Re: Offer", "We're not currently looking for a new vendor, but thanks anyway"
+    ) == "negative"
+    assert classify_sentiment(
+        "Re: Offer", "Not a good fit for us right now — best of luck!"
+    ) == "negative"
+    assert classify_sentiment(
+        "Re: Offer", "We have no need for this service at the moment."
+    ) == "negative"
+    assert classify_sentiment(
+        "Re: Offer", "I'll pass on this for now, thanks for thinking of us."
+    ) == "negative"
+    assert classify_sentiment(
+        "Re: Offer", "We'll keep you in mind should our needs change."
+    ) == "negative"
+
+
 @pytest.mark.asyncio
 async def test_deliverability_checklist_evaluation():
     mock_listmonk = MagicMock()
