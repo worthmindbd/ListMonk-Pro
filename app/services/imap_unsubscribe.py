@@ -325,7 +325,7 @@ async def _fetch_campaign_history(client: ListMonkClient, cutoff: Optional[datet
         except Exception as e:
             logger.error(f"[IMAP] Failed to fetch campaigns: {e}")
             return [], False, False
-        data = result.get("data", {})
+        data = result.get("data") or {}
         results = data.get("results", [])
         complete = results and data.get("total", 0) <= len(results)
         return results, bool(complete), True
@@ -342,7 +342,7 @@ async def _fetch_campaign_history(client: ListMonkClient, cutoff: Optional[datet
             logger.error(f"[IMAP] Failed to fetch campaigns: {e}")
             return campaigns, False, False
 
-        data = result.get("data", {})
+        data = result.get("data") or {}
         results = data.get("results", [])
         if not results:
             return campaigns, True, True  # reached the end of history
@@ -649,7 +649,7 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                         result = await client.get_subscribers(
                             1, 1, f"subscribers.email = '{safe_email}'"
                         )
-                        subscribers = result.get("data", {}).get("results", [])
+                        subscribers = (result.get("data") or {}).get("results") or []
 
                         if not subscribers:
                             logger.info(f"Sender {sender_email} not found in ListMonk, skipping")

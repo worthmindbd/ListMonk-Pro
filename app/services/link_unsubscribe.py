@@ -160,7 +160,7 @@ async def _fetch_campaign_history(client: ListMonkClient) -> list[dict]:
             page=page, per_page=CAMPAIGN_PAGE_SIZE,
             order_by="created_at", order="DESC",
         )
-        results = result.get("data", {}).get("results", [])
+        results = (result.get("data") or {}).get("results") or []
         if not results:
             break
         campaigns.extend(results)
@@ -248,7 +248,7 @@ async def _scan_link_unsubscribes_impl(client: ListMonkClient) -> dict:
                     page=page,
                     per_page=PER_PAGE,
                 )
-                subscribers = result.get("data", {}).get("results", [])
+                subscribers = (result.get("data") or {}).get("results") or []
             except Exception as e:
                 logger.error(f"Failed to fetch unsubscribed subscribers for list {list_id}: {e}")
                 errors += 1

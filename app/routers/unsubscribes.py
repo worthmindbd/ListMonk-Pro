@@ -326,7 +326,7 @@ async def reset_all_unsubscribes():
             try:
                 # Step 1: Fetch current subscriber data from ListMonk
                 result = await listmonk.get_subscriber(sub_id)
-                subscriber = result.get("data", {})
+                subscriber = result.get("data") or {}
 
                 if not subscriber:
                     results[idx] = {

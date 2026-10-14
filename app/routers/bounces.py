@@ -155,11 +155,12 @@ async def delete_all_bounces(campaign_id: Optional[int] = None,
             bounce_ids.append(bid)
 
     if not bounce_ids:
-        return {"deleted": 0, "errors": 0, "campaign_id": campaign_id}
+        return {"deleted": 0, "errors": 0, "failed": [], "campaign_id": campaign_id}
 
     sem = asyncio.Semaphore(_DELETE_CONCURRENCY)
     deleted = 0
     errors = 0
+    failed: list[dict] = []
 
     async def _delete(bid: int):
         nonlocal deleted, errors
@@ -169,6 +170,7 @@ async def delete_all_bounces(campaign_id: Optional[int] = None,
                 deleted += 1
             except Exception as exc:
                 errors += 1
+                failed.append({"id": bid, "error": str(exc)})
                 logger.error(f"Failed to delete bounce {bid}: {exc}")
 
     for start in range(0, len(bounce_ids), _DELETE_CHUNK):
@@ -176,4 +178,7 @@ async def delete_all_bounces(campaign_id: Optional[int] = None,
         await asyncio.gather(*(_delete(bid) for bid in chunk))
 
     schedule_hard_bounce_update()
-    return {"deleted": deleted, "errors": errors, "campaign_id": campaign_id}
+    # Same partial-failure shape as the ids branch: the caller can see WHICH
+    # records failed, not just how many.
+    return {"deleted": deleted, "errors": errors, "failed": failed,
+            "campaign_id": campaign_id}

@@ -733,7 +733,7 @@ async def ingest_parsed_dsn(
         sub_res = await client.get_subscribers(
             1, 1, f"subscribers.email = '{safe_email}'"
         )
-        subs = sub_res.get("data", {}).get("results", [])
+        subs = (sub_res.get("data") or {}).get("results") or []
     except Exception as e:
         logger.warning(f"subscriber lookup failed for {recipient}: {e}")
         return "retry", "subscriber_lookup"

@@ -379,7 +379,96 @@ def test_bounce_mark_processed_ids_is_thread_safe(tmp_path, monkeypatch):
     assert len(stored) == 8 * 50, "concurrent marks must never lose an id"
 
 
-# ── Unsubscribe scanner: transient campaign-fetch failure must abort ────────
+# ── ListMonk responses with explicit "data": null must not crash callers ────
+
+@pytest.mark.asyncio
+async def test_dsn_lookup_tolerates_null_data(monkeypatch):
+    """ListMonk answering {"data": null} used to raise AttributeError inside
+    the subscriber lookup, which the ingester classified as a transient
+    failure — so the DSN was retried on EVERY scan, forever."""
+    from app.services import bounce_ingest as bi
+
+    lm = AsyncMock()
+    lm.get_subscribers = AsyncMock(return_value={"data": None})
+    lm.get_campaigns = AsyncMock(return_value={"data": {"results": [], "total": 0}})
+
+    msg = email.message.EmailMessage()
+    msg["From"] = "mailer-daemon@relay.example.com"
+    msg["Subject"] = "Undelivered Mail Returned to Sender"
+    msg["Date"] = email.utils.format_datetime(datetime.now(timezone.utc))
+    msg.set_content("Final-Recipient: rfc822; ghost@example.com\nAction: failed")
+
+    outcome, detail = await bi.ingest_parsed_dsn(
+        lm, msg, msg["Subject"], "Final-Recipient: rfc822; ghost@example.com",
+        recent_campaigns=[], campaigns_ok=True,
+    )
+    # A terminal skip, NOT "retry" (which would loop the DSN forever).
+    assert outcome == "skipped"
+    assert detail in ("no_subscriber", "no_campaign", "invalid_recipient")
+
+
+@pytest.mark.asyncio
+async def test_paginate_all_tolerates_null_data():
+    """iter_pages used to crash with AttributeError on {"data": null},
+    taking every streamed export down with it."""
+    from app.services.listmonk_client import ListMonkClient
+
+    client = ListMonkClient()
+    client._request = AsyncMock(return_value={"data": None})
+
+    items = [item async for item in client.iter_pages(client.get_subscribers)]
+    assert items == []
+
+
+def test_parse_ids_rejects_bools_and_fractional_floats():
+    """int(True) == 1 and int(1.9) == 1 used to silently act on a record the
+    caller never selected."""
+    from app.services.bulk_ops import parse_ids
+
+    assert parse_ids([1.0, 2]) == [1, 2]  # integral floats are fine
+    for junk in ([True], [1.9]):
+        with pytest.raises(ValueError):
+            parse_ids(junk)
+
+
+# ── Bounce sweep deletes report the same partial-failure shape ──────────────
+
+@pytest.mark.asyncio
+async def test_bounce_sweep_delete_reports_failed_ids():
+    """The filter-wide sweep branch used to swallow which records failed —
+    only the ids branch reported a `failed` list."""
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    lm = AsyncMock()
+
+    async def fake_get_bounces(page, per_page=50, campaign_id=None,
+                               source="", bounce_type=""):
+        if page == 1:
+            return {"data": {"results": [{"id": 5, "email": "x@y.z", "type": "hard"}],
+                             "total": 1}}
+        return {"data": {"results": [], "total": 1}}
+
+    lm.get_bounces = AsyncMock(side_effect=fake_get_bounces)
+
+    async def fake_delete(bid):
+        raise RuntimeError("listmonk said no")
+
+    lm.delete_bounce = AsyncMock(side_effect=fake_delete)
+
+    with patch("app.main.verify_session", return_value=True), \
+         patch("app.routers.bounces.listmonk", lm), \
+         patch("app.routers.bounces.schedule_hard_bounce_update"):
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.delete("/api/bounces?bounce_type=hard")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["deleted"] == 0
+    assert body["errors"] == 1
+    assert body["failed"] == [{"id": 5, "error": "listmonk said no"}]
+
 
 class _RecordingConn:
     """IMAP double that records every \\Seen marking."""

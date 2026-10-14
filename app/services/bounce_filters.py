@@ -52,7 +52,7 @@ async def subscriber_opened_campaign(
         f"WHERE campaign_id={campaign_id})"
     )
     result = await client.get_subscribers(1, 1, query)
-    return result.get("data", {}).get("total", 0) > 0
+    return ((result.get("data") or {}).get("total") or 0) > 0
 
 
 async def email_opened_campaign(
@@ -68,7 +68,7 @@ async def email_opened_campaign(
         f"WHERE campaign_id={campaign_id})"
     )
     result = await client.get_subscribers(1, 1, query)
-    return result.get("data", {}).get("total", 0) > 0
+    return ((result.get("data") or {}).get("total") or 0) > 0
 
 
 async def build_opener_emails_by_campaign(

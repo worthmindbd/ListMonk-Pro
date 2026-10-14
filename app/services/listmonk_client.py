@@ -101,7 +101,7 @@ class ListMonkClient:
         page = 1
         while True:
             result = await fetch_fn(page=page, per_page=per_page, **kwargs)
-            data = result.get("data", {})
+            data = result.get("data") or {}
             results = data.get("results", [])
             if not results:
                 return
@@ -425,7 +425,7 @@ class ListMonkClient:
         back blank — sending the mask back would overwrite the real secret),
         then PUTs the merged payload.
         """
-        current = (await self.get_settings()).get("data", {})
+        current = (await self.get_settings()).get("data") or {}
         if not current:
             raise ValueError("Could not read current Listmonk settings")
         payload = sanitize_settings_for_update(current)

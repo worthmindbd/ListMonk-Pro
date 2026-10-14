@@ -357,7 +357,7 @@ async def auto_unblock_status():
     # when only this readout is unavailable. The client renders `error`.
     try:
         result = await listmonk.get_subscribers(1, 1, QUERY_BLOCKLISTED_ENGAGED)
-        total = result.get("data", {}).get("total", 0)
+        total = (result.get("data") or {}).get("total") or 0
         return {
             "blocklisted_engaged": total,
             "blocklisted_clickers": total,

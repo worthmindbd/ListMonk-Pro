@@ -58,7 +58,7 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
     """Fetch current Listmonk settings and run deliverability checks."""
     try:
         res = await listmonk.get_settings()
-        raw_settings = res.get("data", {})
+        raw_settings = res.get("data") or {}
     except Exception as e:
         logger.error(f"Failed to fetch Listmonk settings: {e}")
         return {

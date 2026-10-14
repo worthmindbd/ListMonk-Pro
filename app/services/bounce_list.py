@@ -154,7 +154,7 @@ async def fetch_filtered_bounces_page(
         res = await client.get_bounces(
             lm_page, LM_FETCH_SIZE, campaign_id, source, bounce_type,
         )
-        data = res.get("data", {})
+        data = res.get("data") or {}
         lm_total = data.get("total", 0)
         raw_results = data.get("results", [])
         if not raw_results:

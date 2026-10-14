@@ -105,7 +105,7 @@ async def get_campaigns(page: int = Query(1, ge=1, le=MAX_PAGE),
     # Replace bounce counts with hard bounce counts from cache. Only do this
     # once the cache has been populated — otherwise raw (soft-inclusive)
     # counts would be mixed with hard counts.
-    campaigns = result.get("data", {}).get("results", [])
+    campaigns = (result.get("data") or {}).get("results") or []
     if campaigns and _hard_counts_ready():
         hard_counts = get_all_hard_bounce_counts()
         for c in campaigns:
@@ -353,7 +353,7 @@ async def get_campaign(campaign_id: int):
     # Replace bounce count with hard-bounce cache (populated at startup
     # and refreshed every 5 min). Keeps ListMonk's raw count until the
     # initial cache update completes.
-    campaign = result.get("data", {})
+    campaign = result.get("data") or {}
     if campaign and _hard_counts_ready():
         cached = get_all_hard_bounce_counts()
         campaign["bounces"] = cached.get(campaign_id, 0)

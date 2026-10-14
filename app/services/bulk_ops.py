@@ -27,6 +27,9 @@ def parse_ids(raw, limit: int = MAX_BULK_IDS) -> list[int]:
 
     Raises ValueError (routers turn that into a 400) rather than coercing
     junk to 0, so a malformed body can never silently act on everything.
+    Booleans (``True`` is ``int(True) == 1``) and fractional floats
+    (``int(1.9) == 1``) are rejected too: silently converting them to a
+    nearby valid id would act on a record the caller never selected.
     """
     if raw is None or raw == "":
         return []
@@ -37,9 +40,13 @@ def parse_ids(raw, limit: int = MAX_BULK_IDS) -> list[int]:
     seen: set[int] = set()
     ids: list[int] = []
     for value in raw:
+        if isinstance(value, bool):
+            raise ValueError(f"Invalid id: {value!r}")
         try:
             item = int(value)
         except (TypeError, ValueError):
+            raise ValueError(f"Invalid id: {value!r}")
+        if isinstance(value, float) and item != value:
             raise ValueError(f"Invalid id: {value!r}")
         if item < 1:
             raise ValueError(f"Invalid id: {value!r}")
