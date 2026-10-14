@@ -17,7 +17,17 @@ import csv
 import io
 import json
 import re
+import sys
 from typing import Optional
+
+# One oversized cell (a big JSON blob, embedded HTML, base64 — plausible for a
+# converter that promotes every column into attributes) must not kill the whole
+# conversion with "field larger than field limit": the csv module's default
+# 131,072-char cap exists to stop pathological memory use, not real data.
+try:
+    csv.field_size_limit(sys.maxsize)
+except (OverflowError, ValueError):  # pragma: no cover - 32-bit platforms
+    csv.field_size_limit(2**31 - 1)
 
 
 ENCODINGS = ["utf-8-sig", "utf-8", "latin-1", "cp1252"]
@@ -195,9 +205,14 @@ def _detect_delimiter(text: str) -> str:
 def _prepare_reader(file_bytes: bytes) -> tuple[str, str, list[str], io.StringIO]:
     """Decode the upload and detect its delimiter and header row.
 
-    Returns ``(text, delimiter, headers, text_io)`` where ``headers`` are the
-    stripped, non-empty column names and ``text_io`` is positioned at the first
-    data row, ready for a ``csv.DictReader``.
+    Returns ``(text, delimiter, headers, text_io)`` where ``headers`` keeps a
+    stripped placeholder for **every** physical column — blank header cells
+    become ``""`` — so a column's index in this list is also its index in the
+    raw data rows, and ``text_io`` is positioned at the first data row, ready
+    for a ``csv.DictReader``. Filtering the blanks out here used to compact
+    the positions, so with a header like ``,name,email`` (pandas
+    ``to_csv(index=True)``) the email column resolved onto the index-number
+    column and every row was mis-mapped or dropped.
     """
     encoding = detect_encoding(file_bytes)
     text = file_bytes.decode(encoding)
@@ -209,19 +224,22 @@ def _prepare_reader(file_bytes: bytes) -> tuple[str, str, list[str], io.StringIO
         raw_header = next(reader, None) or []
     except csv.Error:
         raw_header = []
-    headers = [str(h).strip() for h in raw_header if str(h).strip()]
+    headers = [str(h).strip() for h in raw_header]
     return text, delimiter, headers, text_io
 
 
 def _column_index_map(headers: list[str]) -> dict[str, int]:
     """Map lowercase header names to their position in the file.
 
+    Blank placeholder entries (physically present columns with an empty
+    header cell) are skipped so an empty name can never resolve to a column.
     Duplicate headers keep the first position (readers naturally use the
     left-most column of a repeated name).
     """
     mapping: dict[str, int] = {}
     for index, header in enumerate(headers):
-        mapping.setdefault(header.lower(), index)
+        if header:
+            mapping.setdefault(header.lower(), index)
     return mapping
 
 
@@ -287,7 +305,9 @@ def _attribute_plan(
     auto: list[tuple[str, int]] = []
     if auto_attributes:
         for idx, header in enumerate(headers):
-            if idx in skip or header.lower() in seen:
+            # Blank header cells are positional placeholders only: with no
+            # name there is nothing to promote (and no key to store it under).
+            if not header or idx in skip or header.lower() in seen:
                 continue
             seen.add(header.lower())
             auto.append((header, idx))
@@ -300,12 +320,13 @@ def _droppable_columns(headers: list[str], email_idx: int, name_idx: Optional[in
 
     In ``selected`` attribute mode these are the columns the user is choosing
     to throw away; the converter refuses to do that silently when the choice
-    is "none of them".
+    is "none of them". Blank placeholder columns have no name to show, so they
+    are excluded from the message.
     """
     skip = {email_idx}
     if name_idx is not None:
         skip.add(name_idx)
-    return [h for idx, h in enumerate(headers) if idx not in skip]
+    return [h for idx, h in enumerate(headers) if idx not in skip and h]
 
 
 def detect_columns(file_bytes: bytes) -> dict:
@@ -316,8 +337,11 @@ def detect_columns(file_bytes: bytes) -> dict:
     text, delimiter, headers, text_io = _prepare_reader(file_bytes)
     encoding = detect_encoding(file_bytes)
 
-    if not headers:
+    if not any(headers):
         return {"columns": [], "sample_rows": [], "encoding": encoding}
+    # Blank header cells stay in ``headers`` as positional placeholders; the
+    # UI column picker only shows names a user could actually select.
+    named_columns = [h for h in headers if h]
 
     # _prepare_reader consumed the header row; rewind so DictReader re-reads it.
     text_io.seek(0)
@@ -353,11 +377,11 @@ def detect_columns(file_bytes: bytes) -> dict:
         )
 
     return {
-        "columns": headers,
+        "columns": named_columns,
         "sample_rows": sample_rows,
         "encoding": encoding,
         "row_count_estimate": _count_csv_rows(text, delimiter),
-        "suggested": suggest_columns(headers, sample_rows),
+        "suggested": suggest_columns(named_columns, sample_rows),
         "ragged_rows": ragged_rows,
         "warnings": warnings,
     }
@@ -492,7 +516,7 @@ def _conversion_context(
     of the source data.
     """
     text, delimiter, headers, _ = _prepare_reader(file_bytes)
-    if not headers:
+    if not any(headers):
         return {"error": "No columns found in CSV"}, None
 
     index_map = _column_index_map(headers)

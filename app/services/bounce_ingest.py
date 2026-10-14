@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -44,11 +45,26 @@ from app.services.imap_helpers import (
 # idempotent regardless of read state (mirrors reply_processed.json and
 # unsubscribe_processed.json).
 PROCESSED_FILE = settings.data_path("bounce_processed.json")
-MAX_PROCESSED_IDS = 5000
+# Unlike the reply/unsubscribe scanners (200-message window, \Seen after
+# handling), this scanner deliberately re-examines EVERY DSN in the whole
+# 30-day window on every run and ignores \Seen — the mailbox is shared with a
+# human. The cap must therefore comfortably exceed the worst-case DSN traffic
+# inside that window: at ~167 DSNs/day, a 5000 cap started evicting ids of
+# DSNs still in the window, and every subsequent scan re-downloaded and
+# re-created them as duplicate bounce records. 50k covers a sustained
+# ~1,600 DSNs/day.
+MAX_PROCESSED_IDS = 50_000
 # Handled outcomes are flushed to the state file every this many messages (and
 # once more at the end of the scan). Persisting only at scan end meant a
 # mid-scan crash re-ingested every bounce created so far as a duplicate.
 PROCESSED_FLUSH_BATCH = 10
+
+# Serialises the read-modify-write cycle on bounce_processed.json. The bounce
+# scan persists its batches via asyncio.to_thread (which runs in worker
+# threads) while the reply tracker marks its inbox DSNs from the event loop —
+# without the lock two interleaved load→extend→save cycles could drop a batch
+# and re-ingest those DSNs on the next scan.
+_STATE_LOCK = threading.Lock()
 
 # DSN "Action:" values (RFC 3464) that are not bounces at all. A delay notice
 # means the message is still in flight, so recording a bounce for it would be
@@ -122,17 +138,23 @@ def save_processed_ids(ids: list[str]) -> None:
 
 
 def mark_processed_ids(ids: list[str]) -> None:
-    """Add identifiers to the processed set in one read + one write."""
+    """Add identifiers to the processed set in one read + one write.
+
+    The read-modify-write cycle runs under :data:`_STATE_LOCK` so concurrent
+    callers (the bounce scan's thread-pool flushes and the reply tracker's
+    event-loop calls) cannot drop each other's additions.
+    """
     fresh = [str(i) for i in ids if i]
     if not fresh:
         return
-    current = load_processed_ids()
-    known = set(current)
-    added = [i for i in fresh if i not in known]
-    if not added:
-        return
-    current.extend(added)
-    save_processed_ids(current)
+    with _STATE_LOCK:
+        current = load_processed_ids()
+        known = set(current)
+        added = [i for i in fresh if i not in known]
+        if not added:
+            return
+        current.extend(added)
+        save_processed_ids(current)
 
 
 def _fetch_state_id(conn: imaplib.IMAP4_SSL, msg_id: bytes) -> str:
@@ -289,7 +311,15 @@ def _extract_bounced_recipient(msg: email.message.EmailMessage, body: str) -> Op
                         if match:
                             return match.group(0).lower()
 
-    own_addr = (settings.bounce_imap_user or "").lower()
+    # Both of this installation's own addresses are excluded: a bare-text DSN
+    # quoted the original message's headers (the primary-inbox reply tracker
+    # ingests those too, where the sender's own address is `imap_user`, not
+    # the bounce user) could otherwise match the catch-all pattern below and
+    # record the bounce against the sender's own subscriber record.
+    own_addrs = {
+        (settings.imap_user or "").strip().lower(),
+        (settings.bounce_imap_user or "").strip().lower(),
+    }
 
     # Some relays emit the DSN as a plain text/plain message with the RFC 3464
     # fields inline instead of a message/delivery-status part. Those bodies
@@ -299,7 +329,7 @@ def _extract_bounced_recipient(msg: email.message.EmailMessage, body: str) -> Op
     for line in body.splitlines():
         if line.lower().startswith(("final-recipient:", "original-recipient:")):
             match = re.search(r"[\w.+-]+@[\w.-]+\.\w+", line)
-            if match and match.group(0).lower() != own_addr:
+            if match and match.group(0).lower() not in own_addrs:
                 return match.group(0).lower()
 
     patterns = [
@@ -312,7 +342,7 @@ def _extract_bounced_recipient(msg: email.message.EmailMessage, body: str) -> Op
             addr = m.group(1).lower().rstrip(">")
             if addr.startswith("mailto:"):
                 addr = addr[len("mailto:"):]
-            if addr and addr != own_addr:
+            if addr and addr not in own_addrs:
                 return addr
     return None
 

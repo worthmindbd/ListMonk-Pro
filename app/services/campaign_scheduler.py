@@ -55,9 +55,26 @@ def load_schedule() -> dict:
         try:
             with open(SCHEDULE_FILE, encoding="utf-8") as f:
                 data = json.load(f)
-            # Merge with defaults for any missing keys
-            merged = {**DEFAULT_SCHEDULE, **data}
-            return merged
+            if isinstance(data, dict):
+                # Explicit JSON nulls must not override the defaults: a
+                # hand-edited or corrupted `"days": null` / `"timezone": null`
+                # used to crash every scheduler tick (and GET /api/scheduler)
+                # with a TypeError before the tick's own guards could run.
+                merged = {
+                    **DEFAULT_SCHEDULE,
+                    **{k: v for k, v in data.items() if v is not None},
+                }
+                # List-valued keys must actually be lists.
+                for list_key in ("days", "auto_paused_campaigns"):
+                    if not isinstance(merged.get(list_key), list):
+                        merged[list_key] = list(DEFAULT_SCHEDULE[list_key])
+                # The timezone is parsed on every tick; validate it once here
+                # so an invalid name falls back to the default immediately.
+                try:
+                    ZoneInfo(merged["timezone"])
+                except Exception:
+                    merged["timezone"] = DEFAULT_SCHEDULE["timezone"]
+                return merged
         except Exception as e:
             logger.error(f"Failed to load schedule: {e}")
     return dict(DEFAULT_SCHEDULE)
@@ -111,7 +128,7 @@ def is_within_send_window(schedule: dict) -> bool:
 
     # Check day of week
     day_map = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
-    allowed_days = {day_map[d] for d in schedule.get("days", []) if d in day_map}
+    allowed_days = {day_map[d] for d in (schedule.get("days") or []) if d in day_map}
 
     # Check time window
     start = time(schedule["start_hour"], schedule["start_minute"])
@@ -161,7 +178,7 @@ async def run_scheduler_tick(client: ListMonkClient):
             return
 
         in_window = is_within_send_window(schedule)
-        auto_paused = set(schedule.get("auto_paused_campaigns", []))
+        auto_paused = set(schedule.get("auto_paused_campaigns") or [])
 
         tz = ZoneInfo(schedule["timezone"])
         now = datetime.now(tz)
@@ -181,6 +198,26 @@ async def run_scheduler_tick(client: ListMonkClient):
 
             changed = False
 
+            def _persist_auto_paused(campaign_id: int) -> None:
+                """Persist the tracking list right after each successful pause.
+
+                Waiting for the end-of-tick save meant a save failure (disk
+                full, permissions) left a campaign paused in ListMonk without
+                a tracking record — the resume branch only resumes campaigns
+                in ``auto_paused_campaigns``, so it would stay stalled until a
+                human noticed.
+                """
+                schedule["auto_paused_campaigns"] = list(auto_paused)
+                try:
+                    save_schedule(schedule)
+                except OSError as e:
+                    logger.error(
+                        f"Scheduler could not persist auto_paused_campaigns "
+                        f"after pausing campaign #{campaign_id}: {e}. The "
+                        "campaign is paused upstream but not tracked for "
+                        "auto-resume."
+                    )
+
             for camp in campaigns:
                 cid = camp["id"]
                 status = camp["status"]
@@ -192,6 +229,7 @@ async def run_scheduler_tick(client: ListMonkClient):
                         auto_paused.add(cid)
                         camp["status"] = "paused"
                         changed = True
+                        _persist_auto_paused(cid)
                         logger.info(f"Auto-PAUSED campaign #{cid} '{camp['name']}' (outside {schedule['start_hour']:02d}:{schedule['start_minute']:02d}-{schedule['end_hour']:02d}:{schedule['end_minute']:02d} {schedule['timezone']})")
                     except Exception as e:
                         logger.error(f"Failed to pause campaign #{cid}: {e}")

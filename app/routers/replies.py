@@ -220,6 +220,8 @@ async def update_statuses(request: Request):
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
 
     new_status = body.get("status")
     if new_status not in VALID_REPLY_STATUSES:
@@ -250,6 +252,8 @@ async def blocklist_reply_senders(request: Request):
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
 
     try:
         ids = _bulk_reply_ids(body.get("ids"))
@@ -291,7 +295,11 @@ async def update_status(reply_id: str, request: Request):
             detail=f"Status must be one of {VALID_REPLY_STATUSES}"
         )
 
-    updated = update_reply_status(reply_id, new_status)
+    # Same lock as every other log mutation: an unlocked load→mutate→save
+    # could be interleaved with the scanner's append (or a bulk update) and
+    # silently drop whichever write ran last.
+    async with _log_lock:
+        updated = update_reply_status(reply_id, new_status)
     if not updated:
         raise HTTPException(status_code=404, detail="Reply not found")
 

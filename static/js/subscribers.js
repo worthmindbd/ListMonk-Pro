@@ -183,8 +183,15 @@ const Subscribers = {
         const email = document.getElementById('subEmail').value.trim();
         const name = document.getElementById('subName').value.trim();
         const status = document.getElementById('subStatus').value;
-        let attribs = {};
-        try { attribs = JSON.parse(document.getElementById('subAttribs').value); } catch {}
+        // A typo in the JSON must not silently create the subscriber with
+        // empty attributes — surface the error and abort instead.
+        let attribs;
+        try {
+            attribs = JSON.parse(document.getElementById('subAttribs').value || '{}');
+        } catch {
+            App.toast('Attributes is not valid JSON', 'error');
+            return;
+        }
 
         if (!email) { App.toast('Email is required', 'error'); return; }
 
@@ -206,8 +213,11 @@ const Subscribers = {
             const s = subRes.status === 'fulfilled' ? (subRes.value?.data || {}) : {};
             if (!s.id) throw new Error('Subscriber not found');
 
-            const bounceData = bounceRes.status === 'fulfilled' ? (bounceRes.value?.data || {}) : {};
-            const bounces = bounceData.results || [];
+            // ListMonk returns a plain array in `data` for this endpoint (not
+            // the paginated {results:[...]} shape), so `.results` was always
+            // undefined and the Bounces section never showed any record.
+            const rawBounces = bounceRes.status === 'fulfilled' ? bounceRes.value?.data : null;
+            const bounces = Array.isArray(rawBounces) ? rawBounces : (rawBounces?.results || []);
             const lists = (s.lists || []).map(l => `<span class="tag" title="${App.escapeHtml(l.name)}">${App.escapeHtml(l.name)}</span>`).join('') || '-';
             const attribs = s.attribs && Object.keys(s.attribs).length
                 ? `<pre style="background:var(--bg-input);padding:12px;border-radius:8px;overflow:auto;max-height:240px;font-size:0.8rem">${App.escapeHtml(JSON.stringify(s.attribs, null, 2))}</pre>`
@@ -236,8 +246,10 @@ const Subscribers = {
     },
 
     async showEdit(id) {
+        const seq = App.seq();
         try {
             const result = await API.get(`/api/subscribers/${id}`);
+            if (App.stale(seq)) return;
             const s = result?.data || {};
             // Keep the full record: ListMonk's PUT is a full replace, so the
             // update must echo the subscriber's existing list memberships.
@@ -288,8 +300,16 @@ const Subscribers = {
         const email = document.getElementById('editEmail').value.trim();
         const name = document.getElementById('editName').value.trim();
         const status = document.getElementById('editStatus').value;
-        let attribs = {};
-        try { attribs = JSON.parse(document.getElementById('editAttribs').value); } catch {}
+        // ListMonk's PUT is a full replace: silently substituting {} for a
+        // malformed JSON body would wipe the subscriber's stored attributes
+        // while reporting success. Abort with the error instead.
+        let attribs;
+        try {
+            attribs = JSON.parse(document.getElementById('editAttribs').value || '{}');
+        } catch {
+            App.toast('Attributes is not valid JSON', 'error');
+            return;
+        }
 
         const boxes = Array.from(document.querySelectorAll('input[name="editSubLists"]'));
         const checked = boxes.filter(cb => cb.checked).map(cb => parseInt(cb.value));

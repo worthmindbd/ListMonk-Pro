@@ -38,14 +38,17 @@ class Settings:
 
     # IMAP settings for unsubscribe monitoring
     imap_host: str = os.getenv("IMAP_HOST", "")
-    imap_port: int = int(os.getenv("IMAP_PORT", "993"))
+    # _env_int, not raw int(): an empty (`IMAP_PORT=`) or typo'd value must
+    # fall back to the default instead of crashing the whole app at import —
+    # the same rule IMAP_TIMEOUT below already follows.
+    imap_port: int = _env_int("IMAP_PORT", default=993, minimum=1)
     imap_user: str = os.getenv("IMAP_USER", "")
     imap_pass: str = os.getenv("IMAP_PASS", "")
     imap_use_ssl: bool = os.getenv("IMAP_USE_SSL", "true").lower() == "true"
 
     # IMAP settings for bounce monitoring
     bounce_imap_host: str = os.getenv("BOUNCE_IMAP_HOST", "")
-    bounce_imap_port: int = int(os.getenv("BOUNCE_IMAP_PORT", "993"))
+    bounce_imap_port: int = _env_int("BOUNCE_IMAP_PORT", default=993, minimum=1)
     bounce_imap_user: str = os.getenv("BOUNCE_IMAP_USER", "")
     bounce_imap_pass: str = os.getenv("BOUNCE_IMAP_PASS", "")
     bounce_imap_use_ssl: bool = os.getenv("BOUNCE_IMAP_USE_SSL", "true").lower() == "true"

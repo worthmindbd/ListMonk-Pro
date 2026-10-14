@@ -51,8 +51,12 @@ def record_login_failure(ip: str) -> None:
                 _login_failures[tracked_ip] = attempts
             else:
                 _login_failures.pop(tracked_ip, None)
-        if len(_login_failures) >= _MAX_TRACKED_IPS:
-            _login_failures.clear()
+        # Still full: evict the OLDEST buckets instead of clearing every one.
+        # clear() reset the counts of IPs that were actively locked out, so a
+        # flood of spoofed X-Forwarded-For addresses could reach the cap and
+        # periodically unlock every concurrent brute-force source.
+        while len(_login_failures) >= _MAX_TRACKED_IPS:
+            _login_failures.pop(next(iter(_login_failures)), None)
     _login_failures.setdefault(ip, []).append(time.time())
 
 

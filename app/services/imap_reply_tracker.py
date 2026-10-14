@@ -18,13 +18,14 @@ from typing import Optional
 
 from app.config import settings
 from app.services.listmonk_client import ListMonkClient
-from app.services.imap_helpers import safe_email_for_query, extract_email_body
+from app.services.imap_helpers import safe_email_for_query, extract_email_body, imap_date
 from app.services.imap_unsubscribe import _extract_reply_only, _match_campaign
 # Shared idempotency-key helper: Message-ID when present, otherwise a
 # From|Date|Subject fingerprint (same scheme as the bounce ingester).
 # DSNs caught in the reply inbox are ingested through the same bounce
 # pipeline as bounce-mailbox DSNs, sharing its processed-ID set.
 from app.services.bounce_ingest import (
+    _INGEST_LOCK,
     _message_state_id, _extract_body, ingest_parsed_dsn, mark_processed_ids,
     load_processed_ids as load_processed_bounce_ids,
 )
@@ -485,31 +486,38 @@ async def _ingest_inbox_dsn(
     Analytics counts them. Returns True when the DSN reached a terminal
     outcome (record the idempotency key); False means transient — the next
     scan retries it.
+
+    Lock order: ``_reply_scan_lock`` (held by the caller) → ``_INGEST_LOCK``.
+    The bounce scan only ever takes ``_INGEST_LOCK``, so no cycle is possible.
+    Serialising here means a mailbox both scanners watch can never run the
+    check → create_bounce → mark sequence for the same DSN twice: the second
+    scanner re-reads the processed set after the first one finished.
     """
-    state_id = _message_state_id(msg)
-    if state_id and state_id in set(load_processed_bounce_ids()):
-        # The bounce ingester already recorded this DSN (both scanners can
-        # watch the same mailbox) — creating it again would duplicate it.
+    async with _INGEST_LOCK:
+        state_id = _message_state_id(msg)
+        if state_id and state_id in set(load_processed_bounce_ids()):
+            # The bounce ingester already recorded this DSN (both scanners can
+            # watch the same mailbox) — creating it again would duplicate it.
+            return True
+        try:
+            outcome, detail = await ingest_parsed_dsn(
+                listmonk, msg, subject, _extract_body(msg),
+                recent_campaigns=campaigns, campaigns_ok=campaigns_ok,
+                ingested_by="reply_tracker",
+            )
+        except Exception as e:
+            logger.warning(f"[ReplyTracker] Inbox DSN ingestion failed (will retry): {e}")
+            return False
+        if outcome == "retry" or outcome == "retry_no_campaign":
+            logger.warning(f"[ReplyTracker] Inbox DSN deferred ({detail}); the next scan retries it")
+            return False
+        if outcome == "ingested":
+            logger.info(f"[ReplyTracker] Recorded inbox DSN as a {detail} bounce")
+        if state_id:
+            # Share the bounce ingester's processed set, so a mailbox watched by
+            # both scanners yields exactly one bounce record per DSN.
+            mark_processed_ids([state_id])
         return True
-    try:
-        outcome, detail = await ingest_parsed_dsn(
-            listmonk, msg, subject, _extract_body(msg),
-            recent_campaigns=campaigns, campaigns_ok=campaigns_ok,
-            ingested_by="reply_tracker",
-        )
-    except Exception as e:
-        logger.warning(f"[ReplyTracker] Inbox DSN ingestion failed (will retry): {e}")
-        return False
-    if outcome == "retry" or outcome == "retry_no_campaign":
-        logger.warning(f"[ReplyTracker] Inbox DSN deferred ({detail}); the next scan retries it")
-        return False
-    if outcome == "ingested":
-        logger.info(f"[ReplyTracker] Recorded inbox DSN as a {detail} bounce")
-    if state_id:
-        # Share the bounce ingester's processed set, so a mailbox watched by
-        # both scanners yields exactly one bounce record per DSN.
-        mark_processed_ids([state_id])
-    return True
 
 
 def _connect_imap() -> imaplib.IMAP4:
@@ -613,7 +621,10 @@ async def _scan_and_track_replies_impl(
             if status != "OK":
                 return []
 
-            since = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%d-%b-%Y")
+            # imap_date, not strftime %b: IMAP SEARCH SINCE requires English
+            # month abbreviations, which %b only guarantees under the C
+            # locale — the same reason the other scanners use the helper.
+            since = imap_date(datetime.now(timezone.utc) - timedelta(days=days_back))
             status, search_data = mail.search(None, f'(SINCE "{since}")')
             if status != "OK" or not search_data[0]:
                 return []

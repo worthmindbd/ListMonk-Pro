@@ -312,7 +312,13 @@ class ListMonkClient:
                                    params=params)
 
     async def archive_campaign(self, campaign_id: int) -> dict:
-        return await self._request("PUT", f"/api/campaigns/{campaign_id}/archive")
+        # ListMonk binds `archive` exclusively from the JSON body (its handler
+        # has no default): an empty PUT answers 200 while writing
+        # archive=false — the dashboard's Archive action looked successful but
+        # archived nothing (and silently un-archived an archived campaign).
+        return await self._request(
+            "PUT", f"/api/campaigns/{campaign_id}/archive", json={"archive": True},
+        )
 
     # ── Templates ────────────────────────────────────────────
 

@@ -65,18 +65,25 @@ def _atomic_write_json(file_path: Path, data: Any, indent: int = 2, ensure_ascii
 def load_log() -> list[dict]:
     try:
         records = json.loads(LOG_FILE.read_text(encoding="utf-8"))
-        migrated = False
-        for r in records:
-            old_key = r.get("campaign_key", "")
-            new_key = _normalize_campaign_key(old_key)
-            if new_key != old_key:
-                r["campaign_key"] = new_key
-                migrated = True
-        if migrated:
-            save_log(records)
-        return records
     except (FileNotFoundError, json.JSONDecodeError, IsADirectoryError, PermissionError):
         return []
+    if not isinstance(records, list):
+        # A hand-edited or half-written file holding a dict/scalar would
+        # otherwise raise AttributeError on the .get() below and turn every
+        # /api/unsubscribes* endpoint into a 500 until fixed by hand.
+        return []
+    migrated = False
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        old_key = r.get("campaign_key", "")
+        new_key = _normalize_campaign_key(old_key)
+        if new_key != old_key:
+            r["campaign_key"] = new_key
+            migrated = True
+    if migrated:
+        save_log(records)
+    return records
 
 
 def save_log(records: list[dict]) -> None:

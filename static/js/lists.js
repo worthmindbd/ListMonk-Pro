@@ -170,8 +170,10 @@ const Lists = {
     },
 
     async showEdit(id) {
+        const seq = App.seq();
         try {
             const result = await API.get(`/api/lists/${id}`);
+            if (App.stale(seq)) return;
             const l = result?.data || {};
 
             App.setContent(`

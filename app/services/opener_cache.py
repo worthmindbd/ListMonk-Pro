@@ -29,12 +29,29 @@ def _normalize_email(email: str) -> str:
     return (email or "").strip().lower()
 
 
+def _sweep_expired() -> None:
+    """Drop entries whose TTL has passed (opportunistic, caller holds nothing).
+
+    Nothing else evicted entries: every campaign ever touched by bounce
+    listing or the hard-bounce refresh kept its opener set (and timestamp)
+    until process restart, so long-running installations grew the cache
+    without bound. Called from the fetch/invalidate paths, which are the only
+    moments entries are touched anyway.
+    """
+    now = time.monotonic()
+    expired = [cid for cid, at in _fetched_at.items() if now - at >= TTL_SECONDS]
+    for cid in expired:
+        _cache.pop(cid, None)
+        _fetched_at.pop(cid, None)
+
+
 async def _fetch_opener_emails(client: ListMonkClient, campaign_id: int) -> set[str]:
     subs = await client.paginate_all(
         client.get_subscribers, per_page=500,
         query=_views_query(campaign_id),
     )
     emails = {_normalize_email(s["email"]) for s in subs if s.get("email")}
+    _sweep_expired()
     _cache[campaign_id] = emails
     _fetched_at[campaign_id] = time.monotonic()
     logger.info("Opener cache updated for campaign %s: %d emails", campaign_id, len(emails))

@@ -463,6 +463,21 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                 campaigns_complete = False
                 covers_cutoff = False
 
+            # A failed page-1 fetch is the exact shape ([], False, False) — a
+            # genuine "no campaigns" instance returns ([], True, True).
+            # Proceeding would match every keyword reply against an empty
+            # campaign list, mark those messages \Seen as skips, and the UNSEEN
+            # search would never look at them again: real unsubscribe requests
+            # silently lost for good. Abort instead; the next hourly scan
+            # retries with nothing consumed.
+            if not campaigns_list and not campaigns_complete and not covers_cutoff:
+                logger.error(
+                    "[IMAP] Campaign history unavailable; aborting the scan so "
+                    "no unsubscribe request is skipped-and-seen. Will retry."
+                )
+                return {"scanned": 0, "matched": 0, "processed": 0, "errors": 1,
+                        "message": "Campaign history unavailable — scan aborted, will retry"}
+
             # Backfill + prune must be atomic with respect to other writers
             # (link scanner, reset/delete endpoints) so no records are lost.
             async with _log_lock:

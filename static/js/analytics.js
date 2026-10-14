@@ -378,7 +378,10 @@ const Analytics = {
             return;
         }
 
-        const baseParams = `campaign_id=${this.selectedCampaignId}&from_date=${this.fromDate}&to_date=${this.toDate}`;
+        // Selection identity: picking A then quickly B lets A's slower
+        // responses resolve last and repaint the charts under B's selector.
+        const campId = this.selectedCampaignId;
+        const baseParams = `campaign_id=${campId}&from_date=${this.fromDate}&to_date=${this.toDate}`;
 
         // Fetch the analytics types that are actually displayed. Cold email
         // mode hides click/link analytics (tracking is disabled there), so
@@ -390,6 +393,7 @@ const Analytics = {
             API.get(`/api/campaigns/analytics/bounces?${baseParams}`),
             isCold ? null : API.get(`/api/campaigns/analytics/links?${baseParams}`),
         ]);
+        if (campId !== this.selectedCampaignId) return;
 
         const viewsData = viewsRes.status === 'fulfilled' ? (viewsRes.value?.data || []) : [];
         const bouncesData = bouncesRes.status === 'fulfilled' ? (bouncesRes.value?.data || []) : [];

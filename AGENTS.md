@@ -85,6 +85,7 @@ ListMonk-Pro/
 │   ├── test_service_hardening.py  # IMAP timeouts, DSN/reply fingerprint dedup, batch flush, scheduler lock, CSV sanitizer, state caps
 │   ├── test_review_fixes.py       # Regression tests for the full-codebase review
 │   ├── test_reply_body_extraction.py # HTML-only reply body fallback & stored empty-reply repair regressions
+│   ├── test_full_review_fixes.py  # Regressions for the second full-codebase review (CSV blank headers, archive body, scan aborts, state races)
 │   ├── conftest.py                # Resets module-level caches between tests
 │   └── test_regressions.py        # Route order, IMAP seen-marking, prune, timestamp regressions
 ├── .github/
@@ -177,7 +178,7 @@ ListMonk-Pro/
     the `Bounce Feedback Loop Configured` audit check reports whether *ListMonk* can
     blocklist hard bounces by itself.
 - **Opener Cache** (`app/services/opener_cache.py`):
-  - In-memory cache of subscribers who opened a campaign (`campaign_views`), with a 10-minute TTL and in-flight request deduplication.
+  - In-memory cache of subscribers who opened a campaign (`campaign_views`), with a 10-minute TTL, in-flight request deduplication, and opportunistic eviction of expired entries (a long-running installation used to grow it without bound).
 - **Hard Bounce Cache** (`app/services/hard_bounce_cache.py`):
   - In-memory cache of true hard bounce counts per campaign, refreshed on startup and every 5 minutes in background. Overrides ListMonk's raw bounce count in campaign lists once the first refresh completes.
 - **Fast Filtered Listing** (`app/services/bounce_list.py`):
@@ -253,7 +254,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 
 ### 7. Persistent Runtime State (`DATA_DIR`)
 - `app/config.py` provides `settings.data_path(filename)` to store mutable JSON state files (`schedule.json`, `app_settings.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`, `reply_log.json`, `reply_processed.json`, `reply_settings.json`, `bounce_processed.json`).
-- `bounce_processed.json` is a capped list of handled DSN Message-IDs (newest first) that makes bounce ingestion idempotent independently of IMAP `\Seen`. `reply_processed.json` and `unsubscribe_processed.json` are capped the same way (5000 entries, oldest evicted).
+- `bounce_processed.json` is a capped list of handled DSN Message-IDs (newest first) that makes bounce ingestion idempotent independently of IMAP `\Seen`. Its cap (50,000) is much larger than the other sets because bounce ingestion re-examines the whole 30-day window on every scan: a smaller cap started evicting ids of DSNs still inside the window and re-created them as duplicate bounce records. `reply_processed.json` and `unsubscribe_processed.json` are capped the same way at 5000 entries (oldest evicted), which is safe there — the reply scan only re-reads the 200 most recent messages and the unsubscribe scanner marks handled mail `\Seen`.
 - Every JSON state read/write is explicit UTF-8; writes are atomic (tempfile + `fsync` + `os.replace`). `app_settings.load_settings` also guards against a hand-edited file holding a non-object (falls back to defaults instead of 500-ing the onboarding gate).
 - In Docker, `DATA_DIR` defaults to `/data` (backed by a named volume).
 - Automatically migrates legacy root JSON files into `DATA_DIR` on first run.

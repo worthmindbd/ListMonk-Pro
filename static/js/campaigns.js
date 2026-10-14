@@ -257,11 +257,13 @@ const Campaigns = {
     },
 
     async showDetail(id) {
+        const seq = App.seq();
         try {
             const [result, unsubRes] = await Promise.allSettled([
                 API.get(`/api/campaigns/${id}`),
                 API.get(`/api/unsubscribes/campaign/${id}`),
             ]);
+            if (App.stale(seq)) return;
 
             const c = result.status === 'fulfilled' ? (result.value?.data || {}) : {};
             if (!c.id) throw new Error('Campaign not found');
@@ -279,6 +281,10 @@ const Campaigns = {
             const bounceRate = c.sent ? ((c.bounces || 0) / c.sent * 100).toFixed(1) : '0';
             // Cold email mode disables tracking, so click metrics are omitted.
             const isCold = App.currentMode === 'cold_email';
+            // ListMonk rejects updates for anything but draft/paused/scheduled
+            // ("canEditCampaign"), so offering Edit on a running/finished
+            // campaign only led to a 400 after the form was filled out.
+            const canEdit = ['draft', 'paused', 'scheduled'].includes(c.status);
 
             App.setContent(`
                 <div class="inline-form">
@@ -288,7 +294,7 @@ const Campaigns = {
                             <button class="btn btn-sm" onclick="Campaigns.viewAnalytics(${c.id})">View Analytics</button>
                             <button class="btn btn-sm" onclick="Campaigns.exportCampaign(${c.id})">Export CSV</button>
                             <button class="btn btn-sm" onclick="Campaigns.preview(${c.id})">Preview</button>
-                            <button class="btn btn-sm" onclick="Campaigns.showEdit(${c.id})">Edit</button>
+                            ${canEdit ? `<button class="btn btn-sm" onclick="Campaigns.showEdit(${c.id})">Edit</button>` : ''}
                             <button class="btn btn-sm" onclick="Campaigns.showTestSend(${c.id})">Test Send</button>
                             <button class="btn btn-sm" onclick="Campaigns.archive(${c.id})">Archive</button>
                             <button class="btn btn-sm btn-danger" onclick="Campaigns.remove(${c.id})">Delete</button>
@@ -372,11 +378,13 @@ const Campaigns = {
     },
 
     async showEdit(id) {
+        const seq = App.seq();
         try {
             const [campRes, listsRes] = await Promise.all([
                 API.get(`/api/campaigns/${id}`),
                 API.get('/api/lists?per_page=100&minimal=true'),
             ]);
+            if (App.stale(seq)) return;
 
             const c = campRes?.data || {};
             const allLists = listsRes?.data?.results || [];
@@ -464,8 +472,10 @@ const Campaigns = {
     },
 
     async preview(id) {
+        const seq = App.seq();
         try {
             const result = await API.get(`/api/campaigns/${id}/preview`);
+            if (App.stale(seq)) return;
             App.setContent(`
                 <div style="margin-bottom:12px">
                     <button class="btn btn-secondary" onclick="Campaigns.showDetail(${id})">Back to Campaign</button>
