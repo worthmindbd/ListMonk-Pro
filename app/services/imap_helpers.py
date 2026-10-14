@@ -63,26 +63,40 @@ class _HTMLTextExtractor(HTMLParser):
         "section", "article",
     }
     _SKIP_TAGS = {"script", "style", "head", "title", "meta"}
+    # Void elements never receive an end tag (<meta>, <link>, <img> ...).
+    # Tracking them in the skip stack would leave it unbalanced forever —
+    # an Apple Mail "<head><meta …></head>" then suppressed the whole body.
+    _VOID_TAGS = {"meta", "link", "br", "img", "hr", "input", "source", "wbr"}
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self._chunks: list[str] = []
-        self._skip_depth = 0
+        self._skip_stack: list[str] = []
 
     def handle_starttag(self, tag, attrs):
+        if tag in self._VOID_TAGS:
+            if tag in self._BLOCK_TAGS:
+                self._chunks.append("\n")
+            return
         if tag in self._SKIP_TAGS:
-            self._skip_depth += 1
+            self._skip_stack.append(tag)
         elif tag in self._BLOCK_TAGS:
             self._chunks.append("\n")
 
     def handle_endtag(self, tag):
+        if tag in self._VOID_TAGS:
+            return
         if tag in self._SKIP_TAGS:
-            self._skip_depth = max(0, self._skip_depth - 1)
+            # Pop through the matching opener; tolerates stray end tags.
+            if tag in self._skip_stack:
+                while self._skip_stack:
+                    if self._skip_stack.pop() == tag:
+                        break
         elif tag in self._BLOCK_TAGS:
             self._chunks.append("\n")
 
     def handle_data(self, data):
-        if not self._skip_depth:
+        if not self._skip_stack:
             self._chunks.append(data)
 
     def text(self) -> str:

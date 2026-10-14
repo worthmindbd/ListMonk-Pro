@@ -77,6 +77,33 @@ SINGLE_PART_HTML = (
     b"<body><p>Happy to connect next week.</p></body></html>\r\n"
 )
 
+# Production shape (Apple Mail): multipart/alternative carrying a single
+# quoted-printable text/html part whose <head> holds an UNCLOSED <meta> void
+# tag. A skip-depth counter never recovered from that and suppressed the
+# whole body; only a tag stack that ignores void elements survives it.
+APPLE_MAIL_HTML_ONLY = (
+    b"From: Abdul Fattah Ismail <admin@makenibent.com>\r\n"
+    b"To: us@example.com\r\n"
+    b"Subject: Re: Question About Makeni Bent Digital Consulting LLC?\r\n"
+    b"Message-ID: <apple-mail@example.com>\r\n"
+    b'MIME-Version: 1.0\r\n'
+    b'Content-Type: multipart/alternative; boundary="am1"\r\n'
+    b"\r\n"
+    b"--am1\r\n"
+    b'Content-Type: text/html; charset="utf-8"\r\n'
+    b"Content-Transfer-Encoding: quoted-printable\r\n"
+    b"\r\n"
+    b'<html class="apple-mail-supports-explicit-dark-mode"><head>'
+    b'<meta http-equiv="content-type" content="text/html; charset=utf-8">'
+    b"</head><body dir=\"auto\">Yes. Please share.=C2=A0"
+    b'<div><br></div><div dir="ltr"><div>Makeni Bent Digital Consulting</div>'
+    b"</div><div>On Oct 13, 2026, at 19:28, Kawsar Mahmud "
+    b"&lt;kawsar@example.com&gt; wrote:</div>"
+    b"<blockquote type=\"cite\">original pitch text</blockquote>"
+    b"</body></html>\r\n"
+    b"--am1--\r\n"
+)
+
 
 # ── html_to_text ─────────────────────────────────────────────────────────────
 
@@ -134,6 +161,32 @@ def test_single_part_html_is_converted_not_leaked():
     assert "Happy to connect next week." in body
     assert "<p>" not in body
     assert "color:red" not in body
+
+
+def test_apple_mail_unclosed_meta_does_not_suppress_body():
+    """Production regression: an unclosed <meta> in <head> emptied the body.
+
+    Apple Mail replies carry a single quoted-printable text/html part whose
+    head opens a void <meta> tag that never closes. The extractor must still
+    return the reply text (and decode =C2=A0 to a space).
+    """
+    from app.services.imap_helpers import extract_email_body
+
+    body = extract_email_body(_parse(APPLE_MAIL_HTML_ONLY))
+    assert "Yes. Please share." in body
+    assert "Makeni Bent Digital Consulting" in body
+    assert "<html" not in body
+
+
+def test_apple_mail_reply_strips_quoted_thread_and_classifies_positive():
+    from app.services.imap_helpers import extract_email_body
+    from app.services.imap_reply_tracker import extract_clean_reply, classify_sentiment
+
+    msg = _parse(APPLE_MAIL_HTML_ONLY)
+    reply = extract_clean_reply(extract_email_body(msg))
+    assert reply.startswith("Yes. Please share.")
+    assert "original pitch text" not in reply
+    assert classify_sentiment(msg.get("Subject", ""), reply) == "positive"
 
 
 def test_html_only_reply_classifies_from_recovered_text():
@@ -253,11 +306,11 @@ async def test_scan_repairs_stored_empty_reply(tmp_path, monkeypatch):
     from app.services.listmonk_client import ListMonkClient
 
     _reply_log(tmp_path, monkeypatch, [
-        {"id": "rep_old", "message_id": "<html-only@example.com>",
+        {"id": "rep_old", "message_id": "<apple-mail@example.com>",
          "from_email": "prospect@example.com", "full_body": "",
          "body_preview": "", "sentiment": "question", "status": "unread"},
     ])
-    rl.mark_processed_message_ids(["<html-only@example.com>"])
+    rl.mark_processed_message_ids(["<apple-mail@example.com>"])
 
     monkeypatch.setattr(T.settings, "imap_host", "imap.example.com")
     monkeypatch.setattr(T.settings, "imap_user", "me@example.com")
@@ -271,7 +324,7 @@ async def test_scan_repairs_stored_empty_reply(tmp_path, monkeypatch):
     assert stats["repaired"] == 1
     assert stats["new_replies"] == 0  # not duplicated as a new reply
     record = rl.load_log()[0]
-    assert "we are interested" in record["full_body"]
+    assert "Yes. Please share." in record["full_body"]
     assert record["sentiment"] == "positive"
     assert record["status"] == "lead"
 
@@ -286,7 +339,7 @@ class _FakeIMAP:
         return "OK", [b"1"]
 
     def fetch(self, num, spec):
-        return "OK", [(b"1 (RFC822)", HTML_ONLY_MULTIPART)]
+        return "OK", [(b"1 (RFC822)", APPLE_MAIL_HTML_ONLY)]
 
     def close(self):
         pass
