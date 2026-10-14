@@ -39,7 +39,8 @@ ListMonk-Pro/
 │       ├── export_service.py      # CSV generators (sync list + async streamed, formula-injection sanitized)
 │       ├── hard_bounce_cache.py   # In-memory hard bounce counts per campaign with background refresh
 │       ├── imap_helpers.py        # Shared IMAP utilities (body extraction, date formatting, query escaping)
-│       ├── imap_reply_tracker.py  # IMAP reply monitor, sentiment analysis, quote-thread stripping, Message-ID fingerprint dedup
+│       ├── imap_reply_tracker.py  # IMAP reply monitor, sentiment analysis, quote-thread stripping, Message-ID fingerprint dedup,
+│       │                          #   HTML-only body fallback + repair pass for replies stored with an empty body
 │       ├── imap_unsubscribe.py    # IMAP reply monitor for unsubscribe keywords with quote stripping
 │       ├── link_unsubscribe.py    # ListMonk direct link unsubscribe scanner & campaign attributor
 │       ├── listmonk_client.py     # Async HTTP client for ListMonk REST API (with paginate_all helper)
@@ -83,6 +84,7 @@ ListMonk-Pro/
 │   ├── test_bulk_actions.py       # Bulk select endpoints: ID validation, scoping, partial failures
 │   ├── test_service_hardening.py  # IMAP timeouts, DSN/reply fingerprint dedup, batch flush, scheduler lock, CSV sanitizer, state caps
 │   ├── test_review_fixes.py       # Regression tests for the full-codebase review
+│   ├── test_reply_body_extraction.py # HTML-only reply body fallback & stored empty-reply repair regressions
 │   ├── conftest.py                # Resets module-level caches between tests
 │   └── test_regressions.py        # Route order, IMAP seen-marking, prune, timestamp regressions
 ├── .github/
@@ -209,7 +211,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | `scheduler_loop` | 60 seconds | Enforces daily send windows, auto-pauses/resumes campaigns. The whole load → mutate → save cycle of a tick runs under `_SCHED_LOCK`, shared with `update_schedule_settings()` (the API's PUT path), so overlapping ticks or a settings write during a tick can never clobber `schedule.json` |
 | `imap_scan_loop` | 1 hour | Scans IMAP inbox for replies + polls ListMonk for link unsubscribes |
 | `bounce_ingest_loop` | 1 hour | Scans the bounce mailbox for new DSNs in the 30-day window, classifies & records bounces; skips delay notices and anything already in `bounce_processed.json` |
-| `reply_scan_loop` | 15 minutes | Scans IMAP for cold-outreach prospect replies, strips quotes, classifies sentiment. Dedup uses the Message-ID or, when absent, the same `From|Date|Subject` fingerprint as bounce ingestion, persisted to `reply_processed.json` (capped at 5000) |
+| `reply_scan_loop` | 15 minutes | Scans IMAP for cold-outreach prospect replies, strips quotes, classifies sentiment. HTML-only replies (no usable `text/plain` part) are rendered to text via `imap_helpers.html_to_text` so genuine replies are never stored with an empty body; records already stored empty are repaired in place from the fetched messages. Dedup uses the Message-ID or, when absent, the same `From|Date|Subject` fingerprint as bounce ingestion, persisted to `reply_processed.json` (capped at 5000) |
 | `start_cache_updater` | 5 minutes | Refreshes in-memory hard bounce counts per campaign |
 
 ### 6. CSV Converter (`app/services/csv_converter.py`)

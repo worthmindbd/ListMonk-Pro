@@ -356,7 +356,12 @@ const Replies = {
                 App.toast(`Scan failed: ${stats.error}`, 'error');
             } else {
                 const count = stats.new_replies || 0;
-                App.toast(`Scan complete! Found ${count} new prospect reply(ies).`, count > 0 ? 'success' : 'info');
+                const repaired = stats.repaired || 0;
+                let msg = `Scan complete! Found ${count} new prospect reply(ies).`;
+                if (repaired) {
+                    msg += ` Recovered the body of ${repaired} empty reply(ies).`;
+                }
+                App.toast(msg, (count > 0 || repaired > 0) ? 'success' : 'info');
             }
             await Promise.all([this.loadStats(), this.loadReplies()]);
             this.renderPage();

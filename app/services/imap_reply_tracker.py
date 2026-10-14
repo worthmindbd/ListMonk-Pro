@@ -25,6 +25,7 @@ from app.services.imap_unsubscribe import _extract_reply_only, _match_campaign
 from app.services.bounce_ingest import _message_state_id
 from app.services.reply_log import (
     append_log, load_processed_message_ids, mark_processed_message_ids,
+    load_log, save_log, _log_lock,
 )
 
 logger = logging.getLogger("imap_reply_tracker")
@@ -280,6 +281,74 @@ def _tidy_reply_text(text: str) -> str:
     return text.strip()
 
 
+def _repairable_record_ids(records: list[dict]) -> set[str]:
+    """Message-IDs of stored replies whose body could not be extracted.
+
+    Replies ingested before the HTML-only body fallback existed were stored
+    with an empty ``full_body`` (the feed renders them as "(Empty reply)").
+    Their messages are already in the processed set, so a re-scan would skip
+    them forever without this repair hook.
+    """
+    return {
+        r.get("message_id") for r in records
+        if r.get("message_id") and not (r.get("full_body") or "").strip()
+    }
+
+
+def collect_body_repairs(
+    messages: list[email.message.EmailMessage],
+    empty_ids: set[str],
+) -> dict[str, dict]:
+    """Re-extract bodies for processed messages stored with an empty body.
+
+    ``messages`` are the already-parsed messages of the current scan window,
+    so repairing costs no extra IMAP traffic. Only records whose new
+    extraction is non-empty are returned; everything else stays untouched.
+    """
+    repairs: dict[str, dict] = {}
+    for msg in messages:
+        msg_id = (msg.get("Message-ID") or "").strip()
+        if not msg_id or msg_id not in empty_ids or msg_id in repairs:
+            continue
+        reply_only = extract_clean_reply(extract_email_body(msg))
+        if not reply_only.strip():
+            continue
+        sentiment = classify_sentiment(msg.get("Subject", ""), reply_only)
+        repairs[msg_id] = {
+            "full_body": reply_only,
+            "body_preview": reply_only[:200] + ("..." if len(reply_only) > 200 else ""),
+            "sentiment": sentiment,
+        }
+    return repairs
+
+
+async def apply_body_repairs(repairs: dict[str, dict]) -> int:
+    """Persist re-extracted bodies onto their stored records (single write).
+
+    Sentiment is re-classified from the recovered text; a repaired positive
+    reply still in the default ``unread`` status becomes a ``lead``, mirroring
+    ingestion. Statuses a human has set are never overwritten.
+    """
+    if not repairs:
+        return 0
+    async with _log_lock:
+        records = load_log()
+        changed = 0
+        for r in records:
+            fix = repairs.get(r.get("message_id"))
+            if not fix:
+                continue
+            r["full_body"] = fix["full_body"]
+            r["body_preview"] = fix["body_preview"]
+            r["sentiment"] = fix["sentiment"]
+            if fix["sentiment"] == "positive" and r.get("status") == "unread":
+                r["status"] = "lead"
+            changed += 1
+        if changed:
+            save_log(records)
+    return changed
+
+
 def _connect_imap() -> imaplib.IMAP4:
     # A socket timeout is mandatory: without it a hung mail server blocks the
     # worker thread — and holds _reply_scan_lock — forever.
@@ -349,6 +418,7 @@ async def _scan_and_track_replies_impl(
         "negative": 0,
         "auto_reply": 0,
         "question": 0,
+        "repaired": 0,
     }
 
     # Fetch the campaign history once per scan, walked back far enough to
@@ -405,6 +475,22 @@ async def _scan_and_track_replies_impl(
     except Exception as e:
         logger.error(f"IMAP connection or fetch failed: {e}")
         return {"error": str(e), **stats}
+
+    # Repair replies that were stored with an empty body (e.g. ingested before
+    # the HTML-only fallback existed). Their messages are in the processed set,
+    # so the loop below would skip them forever; the full messages are already
+    # in memory, so re-extraction costs nothing extra.
+    try:
+        repairs = collect_body_repairs(messages, _repairable_record_ids(load_log()))
+        if repairs:
+            stats["repaired"] = await apply_body_repairs(repairs)
+            if stats["repaired"]:
+                logger.info(
+                    f"[ReplyTracker] Repaired {stats['repaired']} reply record(s) "
+                    "with re-extracted bodies"
+                )
+    except Exception as e:
+        logger.warning(f"[ReplyTracker] Body repair pass failed (non-fatal): {e}")
 
     my_email = (settings.imap_user or "").strip().lower()
 
