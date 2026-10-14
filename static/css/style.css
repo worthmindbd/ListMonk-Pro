@@ -3156,15 +3156,6 @@ td .tag {
    only a failing check is allowed to raise its voice.
    ========================================================================== */
 
-/* Status timing strips on the Dashboard overview card. */
-.deliverability-status-strip.status-optimal {
-    border-left: 4px solid #10b981;
-}
-
-.deliverability-status-strip.status-tuning {
-    border-left: 4px solid #f59e0b;
-}
-
 .sr-only {
     position: absolute;
     width: 1px;

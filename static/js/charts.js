@@ -25,7 +25,7 @@ const Dashboard = {
         const isCold = App.currentMode === 'cold_email';
 
         try {
-            // Fetch all data in parallel including reply stats and deliverability if in cold email mode
+            // Fetch all data in parallel including reply stats if in cold email mode
             const requests = [
                 API.get('/api/lists?per_page=1&minimal=true'),
                 API.get('/api/campaigns?per_page=10&order_by=created_at&order=DESC'),
@@ -35,15 +35,13 @@ const Dashboard = {
 
             if (isCold) {
                 requests.push(API.get('/api/replies/stats'));
-                requests.push(API.get('/api/deliverability/checklist'));
                 requests.push(API.get('/api/replies?per_page=5'));
             }
 
             const results = await Promise.allSettled(requests);
             const [listsRes, campaignsRes, subscribersRes, summaryRes] = results;
             const replyStatsRes = isCold ? results[4] : null;
-            const delivRes = isCold ? results[5] : null;
-            const recentRepliesRes = isCold ? results[6] : null;
+            const recentRepliesRes = isCold ? results[5] : null;
 
             this.summary = summaryRes.status === 'fulfilled' ? (summaryRes.value || null) : null;
             const totalLists = listsRes.status === 'fulfilled' ? (listsRes.value?.data?.total || 0) : 0;
@@ -67,30 +65,12 @@ const Dashboard = {
                 // Retained so the theme toggle can re-render the sentiment
                 // chart without a full page reload.
                 this.lastRepStats = repStats;
-                const deliv = delivRes?.status === 'fulfilled' ? delivRes.value : {};
                 const recentReplies = recentRepliesRes?.status === 'fulfilled' ? (recentRepliesRes.value?.results || []) : [];
-                const delivScore = deliv?.score ?? 100;
                 const totalReplies = repStats.total_replies || 0;
                 const replyRate = repStats.reply_rate || 0;
                 const positiveLeads = repStats.positive || 0;
 
                 html += `
-                    <!-- Deliverability Status Strip -->
-                    <div class="card deliverability-status-strip ${delivScore === 100 ? 'status-optimal' : 'status-tuning'}" style="margin-bottom:20px;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
-                        <div style="display:flex;align-items:center;gap:14px;">
-                            <span class="deliverability-icon-badge" style="display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:10px;background:${delivScore === 100 ? 'rgba(16,185,129,0.15)' : 'rgba(245,158,11,0.15)'};color:${delivScore === 100 ? 'var(--emerald)' : 'var(--amber)'}">
-                                ${delivScore === 100 
-                                    ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>'
-                                    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>'}
-                            </span>
-                            <div>
-                                <strong style="color:var(--text-primary);font-size:1rem">Deliverability Health: ${delivScore}% ${delivScore === 100 ? '(Optimal for Cold Outreach)' : '(Action Recommended)'}</strong>
-                                <div style="font-size:0.82rem;color:var(--text-secondary);margin-top:2px">Zero tracking pixels • RFC List-Unsubscribe header omitted • Humanized drip batching</div>
-                            </div>
-                        </div>
-                        <a href="#/deliverability" class="btn btn-sm btn-secondary">Audit & Presets →</a>
-                    </div>
-
                     <!-- Cold Email KPI Cards -->
                     <div class="stats-grid">
                         <div class="stat-card accent">
