@@ -269,6 +269,19 @@ async def trigger_scan():
             ),
         )
 
+    # The link scanner reports a failed ListMonk fetch the same way (errors
+    # counter, 200 summary), so it needs the same honesty check: a broken
+    # link scan must not answer "Scan complete: 0 unsubscribed".
+    if link_result.get("errors", 0) > 0:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Link unsubscribe scan hit {link_result['errors']} error(s) "
+                f"after processing {link_result.get('processed', 0)} record(s); "
+                f"IMAP scan processed {imap_result.get('processed', 0)} record(s)"
+            ),
+        )
+
     total_processed = imap_result.get("processed", 0) + link_result.get("processed", 0)
     return {
         "imap": imap_result,

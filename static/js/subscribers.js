@@ -13,6 +13,12 @@ const Subscribers = {
 
     async render() {
         const seq = App.seq();
+        // Deep-linkable state: #/subscribers?page=2&q=acme&list=4&status=…
+        const rq = App.routeQuery();
+        if (rq.get('page')) this.page = Math.max(1, parseInt(rq.get('page'), 10) || 1);
+        if (rq.get('q') !== null) this.query = rq.get('q') || '';
+        if (rq.get('list') !== null) this.listFilter = parseInt(rq.get('list'), 10) || 0;
+        if (rq.get('status') !== null) this.statusFilter = rq.get('status') || '';
         try {
             // The list filter is a convenience: if the lists call fails, the
             // subscriber table must still render with the other filters.
@@ -39,6 +45,10 @@ const Subscribers = {
             const data = result?.data || {};
             const subscribers = data.results || [];
             const total = data.total || 0;
+            // A bulk delete can strand the view past the last page; clamp and
+            // re-fetch instead of painting a false "no subscribers" page.
+            const clamped = App.clampPage(this.page, total, this.perPage);
+            if (clamped !== this.page) { this.page = clamped; return this.render(); }
             this._rows = subscribers;
 
             const ids = this.pageIds();
@@ -61,7 +71,7 @@ const Subscribers = {
                 <div class="search-bar">
                     <div class="search-input">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                        <input type="search" id="subSearch" placeholder="Search subscribers by email or name..."
+                        <input type="search" id="subSearch" placeholder="Search subscribers by email or name…"
                             aria-label="Search subscribers by email or name"
                             value="${App.escapeHtml(this.query)}" onkeydown="if(event.key==='Enter')Subscribers.search()">
                     </div>
@@ -81,14 +91,14 @@ const Subscribers = {
                     </div>
                 </div>
                 ${App.selection.bar('subscribers')}
-                <div class="table-wrapper"><table>
+                <div class="table-wrapper" tabindex="0" role="region" aria-label="Scrollable data table"><table>
                     <thead><tr>
                         <th class="col-select">${App.selection.headbox('subscribers', 'Select all subscribers on this page')}</th>
                         <th>ID</th><th>Email</th><th>Name</th><th>Status</th><th>Lists</th><th>Created</th><th class="cell-actions">Actions</th>
                     </tr></thead><tbody>`;
 
             if (!subscribers.length) {
-                html += '<tr><td colspan="8"><div class="empty-state"><h3>No subscribers found</h3></div></td></tr>';
+                html += '<tr><td colspan="8"><div class="empty-state"><h2>No subscribers found</h2></div></td></tr>';
             }
 
             subscribers.forEach(s => {
@@ -97,7 +107,7 @@ const Subscribers = {
                 html += `<tr class="${App.selection.has('subscribers', s.id) ? 'row-selected' : ''}">
                     <td class="col-select">${App.selection.rowbox('subscribers', s.id, `Select ${s.email}`)}</td>
                     <td>${s.id}</td>
-                    <td><strong>${App.escapeHtml(s.email)}</strong></td>
+                    <td><strong class="cell-email" title="${App.escapeHtml(s.email)}">${App.escapeHtml(s.email)}</strong></td>
                     <td>${App.escapeHtml(s.name) || '-'}</td>
                     <td>${App.statusBadge(s.status)}</td>
                     <td>${lists}</td>
@@ -116,10 +126,14 @@ const Subscribers = {
             html += '</tbody></table></div>';
             html += App.renderPagination(this.page, total, this.perPage, 'Subscribers.goToPage');
             if (App.stale(seq)) return;
+            App.syncUrl('subscribers', {
+                page: this.page, q: this.query,
+                list: this.listFilter, status: this.statusFilter,
+            });
             App.setContent(html);
         } catch {
             if (App.stale(seq)) return;
-            App.setContent('<div class="empty-state"><h3>Failed to load subscribers</h3></div>');
+            App.setContent('<div class="empty-state"><h2>Failed to load subscribers</h2></div>');
         }
     },
 
@@ -135,27 +149,30 @@ const Subscribers = {
     search() {
         this.query = document.getElementById('subSearch')?.value || '';
         this.page = 1;
+        App.bumpSeq();
         this.render();
     },
 
     filterStatus(val) {
         this.statusFilter = val || '';
         this.page = 1;
+        App.bumpSeq();
         this.render();
     },
 
     filterList(val) {
         this.listFilter = parseInt(val) || 0;
         this.page = 1;
+        App.bumpSeq();
         this.render();
     },
 
-    goToPage(p) { this.page = p; this.render(); },
+    goToPage(p) { this.page = p; App.bumpSeq(); this.render(); },
 
     showCreate() {
         App.setContent(`
             <div class="inline-form">
-                <h3 style="margin-bottom:16px">Add Subscriber</h3>
+                <h2 style="margin-bottom:16px">Add Subscriber</h2>
                 <div class="form-grid">
                     <div class="form-group"><label>Email *</label><input type="email" id="subEmail" placeholder="email@example.com"></div>
                     <div class="form-group"><label>Name</label><input type="text" id="subName" placeholder="Full name"></div>
@@ -265,7 +282,7 @@ const Subscribers = {
 
             App.setContent(`
                 <div class="inline-form">
-                    <h3 style="margin-bottom:16px">Edit Subscriber #${s.id}</h3>
+                    <h2 style="margin-bottom:16px">Edit Subscriber #${s.id}</h2>
                     <div class="form-grid">
                         <div class="form-group"><label>Email</label><input type="email" id="editEmail" value="${App.escapeHtml(s.email || '')}"></div>
                         <div class="form-group"><label>Name</label><input type="text" id="editName" value="${App.escapeHtml(s.name || '')}"></div>

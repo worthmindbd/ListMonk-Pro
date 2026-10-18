@@ -52,6 +52,17 @@
     --glass-bg: var(--bg-surface);
     --input-bg: var(--bg-input);
     --input-border: var(--glass-border);
+    /* Card surface alias: .reply-card / .onboarding-modal reference this and
+       must follow the theme like every other surface token. */
+    --bg-card: var(--bg-surface);
+    /* Explicit transition list (never `all`): hover/focus feedback stays on
+       repaint/compositor properties instead of animating layout. */
+    --transition-ui: color 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+        background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+        border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+        box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+        transform 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+        opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 
     /* ── Dark Theme Tokens (Default) ───────────────────────── */
     color-scheme: dark;
@@ -169,10 +180,46 @@ h1, h2, h3, h4, h5, h6 {
 /* Tabular figures for data, numbers, counts */
 .tabular-nums,
 .stat-value,
+td,
 td strong,
 .pagination-info {
     font-feature-settings: "tnum";
     font-variant-numeric: tabular-nums;
+}
+
+/* Kill double-tap zoom delay on tap targets without disabling pinch zoom. */
+button,
+a,
+select,
+label,
+input {
+    touch-action: manipulation;
+}
+
+/* Skip link: hidden until focused, then pinned above the chrome. */
+.skip-link {
+    position: fixed;
+    top: -60px;
+    left: 16px;
+    z-index: 300;
+    padding: 10px 18px;
+    background: var(--primary);
+    color: #ffffff;
+    font-weight: 600;
+    border-radius: var(--radius-sm);
+    box-shadow: var(--glass-shadow);
+    transition: top 0.2s ease;
+}
+
+.skip-link:focus-visible {
+    top: 12px;
+}
+
+/* Scrollable tables are keyboard-reachable regions (axe
+   scrollable-region-focusable); show where focus landed. */
+.table-wrapper:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: -2px;
 }
 
 /* ── Atmospheric Ambient Mesh Backdrop ─────────────────────── */
@@ -279,19 +326,6 @@ td strong,
     color: var(--text-primary);
 }
 
-.logo-icon {
-    width: 36px;
-    height: 36px;
-    border-radius: 10px;
-    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-soft) 100%);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #ffffff;
-    box-shadow: 0 4px 14px var(--primary-glow);
-    flex-shrink: 0;
-}
-
 .logo-icon svg {
     width: 20px;
     height: 20px;
@@ -363,7 +397,7 @@ td strong,
     border-radius: var(--radius-pill);
     font-size: 0.88rem;
     font-weight: 500;
-    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: var(--transition-ui);
     position: relative;
     border: 1px solid transparent;
 }
@@ -517,7 +551,7 @@ td strong,
     color: var(--text-secondary);
     cursor: pointer;
     padding: 6px;
-    transition: all 0.15s ease;
+    transition: var(--transition-ui);
 }
 
 .menu-toggle:hover {
@@ -588,7 +622,7 @@ td strong,
     inset: 0;
     background: rgba(255, 255, 255, 0.12);
     border-radius: 20px;
-    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: var(--transition-ui);
     border: 1px solid var(--glass-border);
 }
 
@@ -616,6 +650,11 @@ td strong,
 
 .theme-switch input:checked + .theme-slider::before {
     transform: translateX(16px);
+}
+
+.theme-switch input:focus-visible + .theme-slider {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
 }
 
 /* ── Content Viewport ──────────────────────────────────────── */
@@ -651,7 +690,7 @@ td strong,
     padding: 24px;
     box-shadow: var(--glass-shadow);
     position: relative;
-    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: var(--transition-ui);
 }
 
 /* Specular highlight line */
@@ -707,7 +746,7 @@ td strong,
     box-shadow: var(--glass-shadow);
     position: relative;
     overflow: hidden;
-    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: var(--transition-ui);
 }
 
 .stat-card::before {
@@ -767,7 +806,15 @@ td strong,
 .table-wrapper {
     overflow-x: auto;
     width: 100%;
-    background: var(--bg-surface);
+    /* Scroll affordance for wide tables: the solid covers (local) hide the
+       edge shadows (scroll) once scrolled fully to that side, so a phone
+       user can see there are more columns under the pinned action cell. */
+    background:
+        linear-gradient(90deg, var(--bg-surface) 30%, rgba(0, 0, 0, 0)) left center / 24px 100% no-repeat local,
+        linear-gradient(270deg, var(--bg-surface) 30%, rgba(0, 0, 0, 0)) right center / 24px 100% no-repeat local,
+        linear-gradient(90deg, rgba(0, 0, 0, 0.18), rgba(0, 0, 0, 0)) left center / 14px 100% no-repeat scroll,
+        linear-gradient(270deg, rgba(0, 0, 0, 0.18), rgba(0, 0, 0, 0)) right center / 14px 100% no-repeat scroll,
+        var(--bg-surface);
     backdrop-filter: blur(20px) saturate(180%);
     -webkit-backdrop-filter: blur(20px) saturate(180%);
     border: 1px solid var(--glass-border);
@@ -787,7 +834,10 @@ thead {
 }
 
 th {
-    padding: 14px 18px;
+    /* 14px sides (not 18): with break-word keeping real min-content widths,
+       the 8-column subscriber table otherwise overflows its wrapper by ~64px
+       at 1440px and clips the Created column under the pinned action cell. */
+    padding: 14px;
     text-align: left;
     font-weight: 600;
     color: var(--text-secondary);
@@ -800,7 +850,7 @@ th {
 }
 
 td {
-    padding: 14px 18px;
+    padding: 14px;
     border-bottom: 1px solid var(--glass-border);
     color: var(--text-primary);
     vertical-align: middle;
@@ -887,7 +937,7 @@ td .action-btns {
     font-weight: 600;
     font-family: inherit;
     cursor: pointer;
-    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: var(--transition-ui);
     text-decoration: none;
     white-space: nowrap;
     backdrop-filter: blur(10px);
@@ -975,14 +1025,28 @@ td .action-btns {
     font-size: 0.78rem;
 }
 
-.btn-icon {
-    padding: 7px;
-    border-radius: 50%;
-}
-
 /* ── Forms & Inputs ────────────────────────────────────────── */
 .form-group {
     margin-bottom: 18px;
+}
+
+/* Compact form controls — the reply feed's per-card status selects reference
+   these; without them the selects rendered at full input size. */
+.form-control {
+    background: var(--bg-input);
+    border: 1px solid var(--glass-border);
+    color: var(--text-primary);
+    border-radius: var(--radius-sm);
+    padding: 8px 12px;
+    font-size: 0.85rem;
+    font-family: inherit;
+}
+
+.form-control-sm {
+    padding: 4px 8px;
+    font-size: 0.78rem;
+    width: auto;
+    border-radius: var(--radius-xs);
 }
 
 .form-group label {
@@ -1010,7 +1074,7 @@ textarea {
     color: var(--text-primary);
     font-size: 0.9rem;
     font-family: inherit;
-    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: var(--transition-ui);
     backdrop-filter: blur(10px);
 }
 
@@ -1095,12 +1159,26 @@ code {
     border: 1px solid var(--glass-border);
     border-radius: var(--radius-pill);
     background: var(--bg-surface-elevated);
-    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: var(--transition-ui);
     user-select: none;
+    position: relative;
 }
 
+/* The input stays in the tab order (display:none would remove it and make
+   every pill picker keyboard-inoperable); it is only visually hidden. */
 .checkbox-label input[type="checkbox"] {
-    display: none;
+    position: absolute;
+    opacity: 0;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    pointer-events: none;
+}
+
+.checkbox-label input[type="checkbox"]:focus-visible + span {
+    outline: 2px solid var(--primary);
+    outline-offset: 3px;
+    border-radius: var(--radius-pill);
 }
 
 .checkbox-label span {
@@ -1122,6 +1200,42 @@ code {
 .checkbox-label:has(input:checked) span {
     color: #ffffff;
     font-weight: 600;
+}
+
+/* Visible switch affordance inside the wide scheduler ON/OFF banner: the
+   banner label alone read as a static info strip, not a toggle. */
+.banner-switch {
+    margin-left: auto;
+    width: 40px;
+    height: 22px;
+    border-radius: var(--radius-pill);
+    background: var(--toggle-track);
+    border: 1px solid var(--glass-border-hover);
+    position: relative;
+    flex-shrink: 0;
+    transition: var(--transition-ui);
+}
+
+.banner-switch::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    transition: transform 0.2s ease, background-color 0.2s ease;
+}
+
+.checkbox-label.toggle-on .banner-switch {
+    background: var(--emerald);
+    border-color: var(--emerald);
+}
+
+.checkbox-label.toggle-on .banner-switch::after {
+    transform: translateX(18px);
+    background: #ffffff;
 }
 
 /* Specific styling for active scheduler toggle */
@@ -1383,8 +1497,7 @@ td.col-select {
     text-align: center;
 }
 
-.col-select input[type="checkbox"],
-.row-select-all {
+.col-select input[type="checkbox"] {
     width: 16px;
     height: 16px;
     margin: 0;
@@ -1596,12 +1709,14 @@ td .tag {
 
 /* Wide tables: a long unbreakable token (an email address) sets the table's
    minimum width and pushes the last columns under the pinned action cell.
-   Letting those tokens break only on tablet/desktop widths keeps the table
-   inside its wrapper - on phones the columns are too narrow for it and the
-   address shatters into fragments, so the default wrapping stays. */
+   `break-word` wraps such tokens only when they would overflow, while (unlike
+   `anywhere`) keeping each column's min-content width — with `anywhere` the
+   auto table layout collapsed narrow columns and shattered IDs/emails
+   mid-token ("30 198", "info@stemcell.c om"). On phones the columns are too
+   narrow for wrapping to help, so the default wrapping stays. */
 @media (min-width: 769px) {
     td {
-        overflow-wrap: anywhere;
+        overflow-wrap: break-word;
     }
 }
 
@@ -1615,6 +1730,18 @@ td .tag {
     display: inline-block;
     max-width: 120px;
     min-width: 80px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: middle;
+}
+
+/* Email addresses are single unbreakable tokens: left at natural width they
+   set the table's min-content (~316px) and push the last columns under the
+   pinned action cell at 1440px. Ellipsized with a title tooltip instead. */
+.cell-email {
+    display: inline-block;
+    max-width: 224px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1654,7 +1781,7 @@ td .tag {
     background: var(--bg-surface);
     border: 1px solid var(--glass-border);
     border-radius: var(--radius-md);
-    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: var(--transition-ui);
 }
 
 .unsub-campaign-card:hover {
@@ -1728,7 +1855,7 @@ td .tag {
     background: var(--toggle-track);
     border: 1px solid var(--glass-border-hover);
     border-radius: 22px;
-    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: var(--transition-ui);
 }
 
 .toggle-slider::before {
@@ -1741,7 +1868,8 @@ td .tag {
     height: 16px;
     background: var(--text-muted);
     border-radius: 50%;
-    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1),
+        background-color 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .toggle-switch input:checked + .toggle-slider {
@@ -1750,8 +1878,13 @@ td .tag {
 }
 
 .toggle-switch input:checked + .toggle-slider::before {
-    left: 18px;
+    transform: translate(16px, -50%);
     background: #ffffff;
+}
+
+.toggle-switch input:focus-visible + .toggle-slider {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
 }
 
 /* ── Settings Tabs ─────────────────────────────────────────── */
@@ -1776,7 +1909,7 @@ td .tag {
     font-size: 0.88rem;
     font-weight: 500;
     cursor: pointer;
-    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: var(--transition-ui);
     font-family: inherit;
     white-space: nowrap;
 }
@@ -1812,7 +1945,7 @@ td .tag {
     font-size: 0.85rem;
     font-weight: 500;
     color: var(--text-muted);
-    transition: all 0.2s ease;
+    transition: var(--transition-ui);
 }
 
 .step.active {
@@ -1867,7 +2000,7 @@ td .tag {
     padding: 48px 24px;
     text-align: center;
     cursor: pointer;
-    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: var(--transition-ui);
     background: var(--bg-input);
 }
 
@@ -1927,6 +2060,8 @@ td .tag {
     max-width: 520px;
     max-height: 85vh;
     overflow-y: auto;
+    /* Scroll inside the dialog must not chain into the page behind it. */
+    overscroll-behavior: contain;
     box-shadow: var(--glass-shadow-lg);
     position: relative;
     animation: modalPop 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
@@ -1961,7 +2096,7 @@ td .tag {
     border-bottom: 1px solid var(--glass-border);
 }
 
-.modal-header h3 {
+.modal-header h2 {
     font-size: 1.15rem;
     font-weight: 600;
 }
@@ -2106,7 +2241,7 @@ td .tag {
     color: var(--primary-soft);
 }
 
-.empty-state h3 {
+.empty-state h2 {
     font-size: 1.15rem;
     color: var(--text-secondary);
     margin-bottom: 6px;
@@ -2236,7 +2371,12 @@ td .tag {
 }
 
 .switch input {
-    display: none;
+    position: absolute;
+    opacity: 0;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    pointer-events: none;
 }
 
 .switch .slider {
@@ -2245,7 +2385,7 @@ td .tag {
     border-radius: var(--radius-pill);
     background: var(--bg-input);
     border: 1px solid var(--glass-border);
-    transition: all 0.2s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
 }
 
 .switch .slider::after {
@@ -2257,7 +2397,7 @@ td .tag {
     height: 16px;
     border-radius: 50%;
     background: var(--text-muted);
-    transition: all 0.2s ease;
+    transition: transform 0.2s ease, background-color 0.2s ease;
 }
 
 .switch input:checked + .slider {
@@ -2266,8 +2406,13 @@ td .tag {
 }
 
 .switch input:checked + .slider::after {
-    left: 20px;
+    transform: translateX(18px);
     background: #ffffff;
+}
+
+.switch input:focus-visible + .slider {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
 }
 
 .chip-row {
@@ -2804,7 +2949,7 @@ td .tag {
     font-size: 0.82rem;
     font-weight: 600;
     cursor: pointer;
-    transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: var(--transition-ui);
     font-family: inherit;
 }
 
@@ -2851,7 +2996,7 @@ td .tag {
     border-radius: 14px;
     padding: 24px;
     cursor: pointer;
-    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: var(--transition-ui);
     display: flex;
     flex-direction: column;
     justify-content: space-between;
@@ -2906,7 +3051,7 @@ td .tag {
 .badge-dot-auto-reply { background-color: #94a3b8; }
 .badge-dot-negative { background-color: #f43f5e; box-shadow: 0 0 6px rgba(244, 63, 94, 0.5); }
 
-.mode-card-header h4 {
+.mode-card-header h3 {
     margin: 0 0 6px 0;
     font-size: 1.25rem;
     font-weight: 700;
@@ -3005,7 +3150,7 @@ td .tag {
     border-radius: 12px;
     padding: 20px;
     margin-bottom: 16px;
-    transition: all 0.2s ease;
+    transition: var(--transition-ui);
 }
 
 .reply-card.lead-highlight {
@@ -3100,7 +3245,9 @@ td .tag {
 
 .sentiment-badge.badge-neutral {
     background: rgba(100, 116, 139, 0.15);
-    color: #64748b;
+    /* #64748b only reached ~3.2:1 on this tinted fill; the lifted slate keeps
+       the badge above the 4.5:1 WCAG AA threshold (same fix as --text-muted). */
+    color: #94a3b8;
     border: 1px solid rgba(100, 116, 139, 0.35);
 }
 
@@ -3609,7 +3756,7 @@ td .tag {
     color: var(--text-muted);
 }
 
-.deliv-note h4 {
+.deliv-note h3 {
     margin: 10px 0 7px;
     font-size: 0.92rem;
     font-weight: 600;

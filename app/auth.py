@@ -94,10 +94,15 @@ def client_ip_from_request(request: Request) -> str:
 
     forwarded = request.headers.get("x-forwarded-for", "")
     if forwarded:
-        # Left-most entry is the original client.
-        first = forwarded.split(",")[0].strip()
-        if first:
-            return first
+        # Right-most entry is the original client: every trusted proxy
+        # APPENDS its own peer (nginx's $proxy_add_x_forwarded_for), so the
+        # entry added by the immediate trusted proxy is the only one the
+        # client cannot spoof. Reading the left-most entry instead would let
+        # an attacker rotate a fresh rate-limit bucket per attempt with a
+        # fake header.
+        entries = [e.strip() for e in forwarded.split(",") if e.strip()]
+        if entries:
+            return entries[-1]
     return peer
 
 

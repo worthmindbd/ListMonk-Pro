@@ -18,6 +18,9 @@ from app.services.opener_cache import get_cached_opener_emails, is_cached
 logger = logging.getLogger("bounce_list")
 
 LM_FETCH_SIZE = 100
+# Scan-cost bound for the paginated UI listing only (serving page N scans every
+# preceding record). Streaming exports/deletes use iter_filtered_bounces, which
+# walks the whole table so nothing is silently skipped.
 MAX_LM_PAGES = 300
 CHECK_CONCURRENCY = 25
 
@@ -59,7 +62,7 @@ async def iter_filtered_bounces(
     full-history deletion safe when the bounce table is large.
     """
     page = 1
-    while page <= MAX_LM_PAGES:
+    while True:
         res = await client.get_bounces(page, fetch_size, campaign_id, source, bounce_type)
         data = res.get("data") or {}
         results = data.get("results") or []
@@ -69,15 +72,15 @@ async def iter_filtered_bounces(
         for bounce in await _filter_bounce_batch(client, results, bounce_type):
             yield bounce
 
+        # Terminate when ListMonk reports the total as covered or a short page
+        # marks the end of the table. A page-count cap here used to drop the
+        # remaining bounces from exports and history-wide deletes silently.
         total = data.get("total")
         if isinstance(total, (int, float)) and page * fetch_size >= total:
             return
+        if len(results) < fetch_size:
+            return
         page += 1
-
-    logger.warning(
-        "Bounce pagination stopped at %d pages; remaining bounces were not listed",
-        MAX_LM_PAGES,
-    )
 
 
 async def filter_bounces_excluding_openers_fast(
@@ -176,12 +179,21 @@ async def fetch_filtered_bounces_page(
     # for hard bounces (already excludes openers); otherwise use cached total or
     # ListMonk's total (or actual collected count if we finished all pages).
     reached_end = (lm_page * LM_FETCH_SIZE >= lm_total) or (len(collected) < needed and not raw_results)
-    if reached_end:
+    stopped_at_cap = not reached_end and lm_page > MAX_LM_PAGES
+    if reached_end or stopped_at_cap:
+        # Hitting the scan-cost cap means deeper pages cannot be served, so
+        # report only what was actually reachable instead of advertising a
+        # total whose pages would all come back empty.
         total = len(collected)
+        if stopped_at_cap:
+            logger.warning(
+                "Bounce page scan stopped at %d pages; total clamped to %d served rows",
+                MAX_LM_PAGES, total,
+            )
     else:
         total = max(lm_total, len(collected))
 
-    if bounce_type == "hard":
+    if bounce_type == "hard" and not stopped_at_cap:
         cached = estimate_filtered_hard_total(campaign_id)
         if cached is not None:
             total = max(cached, len(collected))

@@ -77,7 +77,10 @@ async def get_opener_emails(
             _inflight[campaign_id] = task
 
     try:
-        return await task
+        # shield(): a cancelled waiter (client disconnect mid bounce-export)
+        # must not propagate into the SHARED fetch task — without it one
+        # abandoned request cancels the fetch and every other waiter on it.
+        return await asyncio.shield(task)
     finally:
         async with _lock:
             if _inflight.get(campaign_id) is task:

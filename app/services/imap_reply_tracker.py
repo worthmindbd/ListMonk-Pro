@@ -404,6 +404,23 @@ def _demote_auto_lead(record: dict) -> bool:
     return True
 
 
+def _clear_campaign_attribution(record: dict) -> bool:
+    """Drop stored campaign attribution when a reply becomes an auto-reply.
+
+    The scan never attributes automated responses (OOO desks, ticket systems)
+    to a campaign, so ``by_campaign``/``campaign_options`` rely on auto-replies
+    carrying no ``campaign_id``. A record re-tagged ``auto_reply`` by a later
+    classifier run (or written before that rule existed) would otherwise keep
+    inflating per-campaign reply charts whose reply-rate KPI excludes it.
+
+    Returns True when the attribution was changed.
+    """
+    changed = record.get("campaign_id") is not None or record.get("campaign_name")
+    record["campaign_id"] = None
+    record["campaign_name"] = None
+    return bool(changed)
+
+
 def _repairable_record_ids(records: list[dict]) -> set[str]:
     """Message-IDs of stored replies whose body could not be extracted.
 
@@ -480,6 +497,8 @@ async def apply_body_repairs(repairs: dict[str, dict]) -> int:
                     r["status_source"] = STATUS_SOURCE_AUTO
             else:
                 _demote_auto_lead(r)
+                if fix["sentiment"] == "auto_reply":
+                    _clear_campaign_attribution(r)
             changed += 1
         if changed:
             if drop_ids:
@@ -539,6 +558,8 @@ async def reclassify_stored_sentiments() -> int:
                 # auto-promoted lead status has to go with it, or the card
                 # keeps its "Hot Lead Flagged" state and lead-filter entry.
                 _demote_auto_lead(r)
+                if sentiment == "auto_reply":
+                    _clear_campaign_attribution(r)
             changed += 1
         if changed:
             if drop_ids:

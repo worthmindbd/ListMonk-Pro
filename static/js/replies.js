@@ -18,7 +18,14 @@ const Replies = {
         // navigated away; never repaint over another page.
         if (App.currentPage !== 'replies') return;
         this._seq = App.seq();
-        App.setContent('<div class="loading-spinner">Loading prospect replies...</div>');
+        // Deep-linkable state: #/replies?page=2&sentiment=positive&campaign=6
+        const rq = App.routeQuery();
+        if (rq.get('page')) this.page = Math.max(1, parseInt(rq.get('page'), 10) || 1);
+        if (rq.get('q') !== null) this.query = rq.get('q') || '';
+        if (rq.get('sentiment') !== null) this.sentiment = rq.get('sentiment') || '';
+        if (rq.get('status') !== null) this.status = rq.get('status') || '';
+        if (rq.get('campaign') !== null) this.campaignId = parseInt(rq.get('campaign'), 10) || 0;
+        App.setContent('<div class="loading-spinner">Loading prospect replies…</div>');
 
         try {
             await Promise.all([
@@ -29,7 +36,7 @@ const Replies = {
         } catch (err) {
             console.error('Replies load error:', err);
             if (App.stale(this._seq)) return;
-            App.setContent(`<div class="empty-state"><h3>Failed to load replies</h3><p>${App.escapeHtml(err?.message || '')}</p></div>`);
+            App.setContent(`<div class="empty-state"><h2>Failed to load replies</h2><p>${App.escapeHtml(err?.message || '')}</p></div>`);
         }
     },
 
@@ -110,7 +117,7 @@ const Replies = {
                 <div class="replies-toolbar">
                     <div class="search-input-wrap">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                        <input type="text" id="repliesSearchInput" class="form-control" placeholder="Search sender, email, subject, body..." value="${App.escapeHtml(this.query)}" onkeydown="if(event.key==='Enter')Replies.handleSearch(this.value)">
+                        <input type="text" id="repliesSearchInput" class="form-control" placeholder="Search sender, email, subject, body…" value="${App.escapeHtml(this.query)}" onkeydown="if(event.key==='Enter')Replies.handleSearch(this.value)">
                     </div>
 
                     <div class="replies-filters">
@@ -142,7 +149,7 @@ const Replies = {
 
                         <button class="btn btn-primary scan-btn" id="btnScanInbox" onclick="Replies.scanInbox()" ${this.isScanning ? 'disabled' : ''}>
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-                            <span>${this.isScanning ? 'Scanning Mailbox...' : 'Scan Mailbox Now'}</span>
+                            <span>${this.isScanning ? 'Scanning Mailbox…' : 'Scan Mailbox Now'}</span>
                         </button>
                     </div>
                 </div>
@@ -161,7 +168,7 @@ const Replies = {
                     <div style="display:inline-flex;align-items:center;justify-content:center;width:64px;height:64px;border-radius:16px;background:rgba(99,102,241,0.12);color:var(--primary);margin-bottom:16px">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="32" height="32"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
                     </div>
-                    <h3>No Prospect Replies Found</h3>
+                    <h2>No Prospect Replies Found</h2>
                     <p style="color:var(--text-secondary);max-width:500px;margin:0 auto 16px auto;">
                         ${this.query || this.sentiment || this.status || this.campaignId ? 'No replies match your current filters. Try resetting the filters.' : 'Your prospect replies will appear here once leads respond to your cold outreach. Click "Scan Mailbox Now" to check IMAP for new incoming messages.'}
                     </p>
@@ -181,6 +188,15 @@ const Replies = {
             html += App.renderPagination(this.page, total, this.perPage, 'Replies.goToPage');
         }
 
+        // A bulk delete can strand the view past the last page; clamp and
+        // re-fetch instead of painting a false "no replies" feed.
+        const clamped = App.clampPage(this.page, total, this.perPage);
+        if (total > 0 && clamped !== this.page) { this.page = clamped; this.render(); return; }
+
+        App.syncUrl('replies', {
+            page: this.page, q: this.query, sentiment: this.sentiment,
+            status: this.status, campaign: this.campaignId,
+        });
         App.setContent(html);
     },
 
@@ -224,17 +240,17 @@ const Replies = {
                             </div>
                             <div class="reply-meta">
                                 <span class="${campClass}" title="${App.escapeHtml(campTitle)}">${App.escapeHtml(campLabel)}</span>
-                                <span class="reply-date">${App.escapeHtml(r.date || '')}</span>
+                                <span class="reply-date">${App.formatDateTime(r.date)}</span>
                             </div>
                         </div>
                     </div>
 
                     <div class="reply-header-actions">
                         <span class="sentiment-badge ${sent.colorClass}">
-                            <span class="badge-dot ${sent.dotClass}"></span>${sent.label}
+                            <span class="badge-dot ${sent.dotClass}"></span>${App.escapeHtml(sent.label)}
                         </span>
                         <div class="status-select-wrap">
-                            <select class="form-control form-control-sm" aria-label="Set status for ${App.escapeHtml(r.from_email || 'this reply')}" onchange="Replies.updateStatus('${r.id}', this.value)">
+                            <select class="form-control form-control-sm" aria-label="Set status for ${App.escapeHtml(r.from_email || 'this reply')}" onchange="Replies.updateStatus(${App.escapeHtml(JSON.stringify(String(r.id)))}, this.value)">
                                 <option value="unread" ${r.status === 'unread' ? 'selected' : ''}>Unread</option>
                                 <option value="lead" ${r.status === 'lead' ? 'selected' : ''}>Hot Lead</option>
                                 <option value="replied" ${r.status === 'replied' ? 'selected' : ''}>Replied</option>
@@ -255,7 +271,7 @@ const Replies = {
                 </div>
 
                 <div class="reply-actions">
-                    <button class="btn btn-sm ${r.status === 'lead' ? 'btn-success' : 'btn-secondary'}" onclick="Replies.toggleLead('${r.id}', '${r.status}')">
+                    <button class="btn btn-sm ${r.status === 'lead' ? 'btn-success' : 'btn-secondary'}" onclick="Replies.toggleLead(${App.escapeHtml(JSON.stringify(String(r.id)))}, ${App.escapeHtml(JSON.stringify(String(r.status || '')))})">
                         <svg viewBox="0 0 24 24" fill="${r.status === 'lead' ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
                         ${r.status === 'lead' ? 'Hot Lead Flagged' : 'Mark as Hot Lead'}
                     </button>
@@ -263,15 +279,15 @@ const Replies = {
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                         Copy Email
                     </button>
-                    <button class="btn btn-sm btn-secondary" onclick="Replies.viewFullThread('${r.id}')">
+                    <button class="btn btn-sm btn-secondary" onclick="Replies.viewFullThread(${App.escapeHtml(JSON.stringify(String(r.id)))})">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
                         Full Details
                     </button>
-                    <button class="btn btn-sm btn-danger-outline" onclick="Replies.unsubscribeLead('${r.id}')">
+                    <button class="btn btn-sm btn-danger-outline" onclick="Replies.unsubscribeLead(${App.escapeHtml(JSON.stringify(String(r.id)))})">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
                         Blocklist / Unsubscribe
                     </button>
-                    <button class="btn btn-sm btn-danger" onclick="Replies.remove('${r.id}')">
+                    <button class="btn btn-sm btn-danger" onclick="Replies.remove(${App.escapeHtml(JSON.stringify(String(r.id)))})">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:-1px;margin-right:4px;"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                         Delete
                     </button>
@@ -364,7 +380,7 @@ const Replies = {
         const btnHtml = btn ? btn.innerHTML : '';
         if (btn) {
             btn.disabled = true;
-            btn.innerHTML = `<span class="spinner-sm"></span> Scanning Mailbox...`;
+            btn.innerHTML = `<span class="spinner-sm"></span> Scanning Mailbox…`;
         }
 
         try {
@@ -391,7 +407,7 @@ const Replies = {
         } finally {
             this.isScanning = false;
             // Restore the button even when the scan failed, so it does not
-            // stay stuck on "Scanning Mailbox..." forever.
+            // stay stuck on "Scanning Mailbox…" forever.
             const b = document.getElementById('btnScanInbox');
             if (b && btnHtml) { b.disabled = false; b.innerHTML = btnHtml; }
         }
@@ -469,29 +485,34 @@ ${App.escapeHtml(reply.full_body || reply.body_preview || '')}
     handleSearch(val) {
         this.query = val.trim();
         this.page = 1;
+        App.bumpSeq();
         this.render();
     },
 
     filterSentiment(val) {
         this.sentiment = val;
         this.page = 1;
+        App.bumpSeq();
         this.render();
     },
 
     filterStatus(val) {
         this.status = val;
         this.page = 1;
+        App.bumpSeq();
         this.render();
     },
 
     filterCampaign(val) {
         this.campaignId = val || 0;
         this.page = 1;
+        App.bumpSeq();
         this.render();
     },
 
     goToPage(p) {
         this.page = p;
+        App.bumpSeq();
         this.render();
     }
 };

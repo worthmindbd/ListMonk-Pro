@@ -74,6 +74,16 @@ def load_schedule() -> dict:
                     ZoneInfo(merged["timezone"])
                 except Exception:
                     merged["timezone"] = DEFAULT_SCHEDULE["timezone"]
+                # The window bounds become datetime.time on every tick (and in
+                # GET /api/scheduler); a hand-edited "start_hour": 99 — or a
+                # quoted "8" — would raise, 500-ing the Settings page and
+                # failing every tick, silently disabling window enforcement.
+                for key, maximum in (("start_hour", 23), ("end_hour", 23),
+                                     ("start_minute", 59), ("end_minute", 59)):
+                    value = merged.get(key)
+                    if (isinstance(value, bool) or not isinstance(value, int)
+                            or not 0 <= value <= maximum):
+                        merged[key] = DEFAULT_SCHEDULE[key]
                 return merged
         except Exception as e:
             logger.error(f"Failed to load schedule: {e}")

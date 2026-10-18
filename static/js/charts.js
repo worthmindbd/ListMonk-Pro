@@ -99,7 +99,7 @@ const Dashboard = {
                     <div class="charts-grid">
                         <div class="card">
                             <div class="card-header">
-                                <h3 class="card-title">Outbound Volume per Campaign</h3>
+                                <h2 class="card-title">Outbound Volume per Campaign</h2>
                             </div>
                             <div class="chart-container">
                                 <canvas id="campaignChart"></canvas>
@@ -107,7 +107,7 @@ const Dashboard = {
                         </div>
                         <div class="card">
                             <div class="card-header">
-                                <h3 class="card-title">Prospect Sentiment Distribution</h3>
+                                <h2 class="card-title">Prospect Sentiment Distribution</h2>
                             </div>
                             <div class="chart-container">
                                 <canvas id="statusChart"></canvas>
@@ -119,7 +119,7 @@ const Dashboard = {
                     <div class="dashboard-bottom-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:24px;margin-top:24px;">
                         <div class="card">
                             <div class="card-header">
-                                <h3 class="card-title">Recent Prospect Replies</h3>
+                                <h2 class="card-title">Recent Prospect Replies</h2>
                                 <a href="#/replies" class="btn btn-sm">View Inbox Feed →</a>
                             </div>
                             <div class="replies-compact-list" style="padding:10px 0;">`;
@@ -133,7 +133,7 @@ const Dashboard = {
                             auto_reply: { label: 'Auto-Reply', cls: 'badge-secondary', dotCls: 'badge-dot-auto-reply' },
                             negative: { label: 'Not Interested', cls: 'badge-danger', dotCls: 'badge-dot-negative' },
                         };
-                        const sent = sentMap[r.sentiment] || { label: r.sentiment || 'Reply', cls: 'badge-secondary', dotCls: 'badge-dot-auto-reply' };
+                        const sent = sentMap[r.sentiment] || { label: App.escapeHtml(r.sentiment || 'Reply'), cls: 'badge-secondary', dotCls: 'badge-dot-auto-reply' };
                         html += `
                             <div style="padding:10px 16px;border-bottom:1px solid var(--border-color);display:flex;align-items:center;justify-content:space-between;gap:12px;">
                                 <div style="overflow:hidden;">
@@ -156,10 +156,10 @@ const Dashboard = {
 
                         <div class="card">
                             <div class="card-header">
-                                <h3 class="card-title">Recent Outreach Campaigns</h3>
+                                <h2 class="card-title">Recent Outreach Campaigns</h2>
                                 <a href="#/campaigns" class="btn btn-sm">All Campaigns →</a>
                             </div>
-                            <div class="table-wrapper" style="border:none;box-shadow:none;background:transparent">
+                            <div class="table-wrapper" tabindex="0" role="region" aria-label="Scrollable data table" style="border:none;box-shadow:none;background:transparent">
                                 <table>
                                     <thead><tr>
                                         <th>Campaign</th><th>Status</th><th>Dispatched</th>
@@ -211,7 +211,7 @@ const Dashboard = {
                     <div class="charts-grid">
                         <div class="card">
                             <div class="card-header">
-                                <h3 class="card-title">Campaign Performance</h3>
+                                <h2 class="card-title">Campaign Performance</h2>
                             </div>
                             <div class="chart-container">
                                 <canvas id="campaignChart"></canvas>
@@ -219,7 +219,7 @@ const Dashboard = {
                         </div>
                         <div class="card">
                             <div class="card-header">
-                                <h3 class="card-title">Campaign Status Distribution</h3>
+                                <h2 class="card-title">Campaign Status Distribution</h2>
                             </div>
                             <div class="chart-container">
                                 <canvas id="statusChart"></canvas>
@@ -229,10 +229,10 @@ const Dashboard = {
 
                     <div class="card" style="margin-top:24px">
                         <div class="card-header">
-                            <h3 class="card-title">Recent Campaigns</h3>
+                            <h2 class="card-title">Recent Campaigns</h2>
                             <a href="#/campaigns" class="btn btn-sm">View All</a>
                         </div>
-                        <div class="table-wrapper" style="border:none;box-shadow:none;background:transparent">
+                        <div class="table-wrapper" tabindex="0" role="region" aria-label="Scrollable data table" style="border:none;box-shadow:none;background:transparent">
                             <table>
                                 <thead><tr>
                                     <th>Name</th><th>Status</th><th>Lists</th><th>Created</th>
@@ -263,7 +263,7 @@ const Dashboard = {
 
         } catch (err) {
             if (App.stale(seq)) return;
-            App.setContent(`<div class="empty-state"><h3>Failed to load dashboard</h3><p>${App.escapeHtml(err.message)}</p></div>`);
+            App.setContent(`<div class="empty-state"><h2>Failed to load dashboard</h2><p>${App.escapeHtml(err.message)}</p></div>`);
         }
     },
 
@@ -304,6 +304,8 @@ const Dashboard = {
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
+                // A lone campaign otherwise stretches into one full-width slab.
+                datasets: { bar: { maxBarThickness: 64 } },
                 plugins: {
                     legend: {
                         labels: {

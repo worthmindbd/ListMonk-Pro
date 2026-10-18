@@ -64,8 +64,9 @@ const Converter = {
     renderUpload() {
         return `
             <div class="card">
-                <div class="card-header"><h3 class="card-title">Upload CSV File</h3></div>
-                <div class="file-drop-zone" id="dropZone">
+                <div class="card-header"><h2 class="card-title">Upload CSV File</h2></div>
+                <div class="file-drop-zone" id="dropZone" role="button" tabindex="0"
+                     aria-label="Choose a CSV file — press Enter or Space to browse">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/>
                         <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/>
@@ -158,7 +159,7 @@ const Converter = {
         return `
             <div class="card">
                 <div class="card-header">
-                    <h3 class="card-title">Map Columns</h3>
+                    <h2 class="card-title">Map Columns</h2>
                     <span style="color:var(--text-muted);font-size:0.85rem">${App.escapeHtml(this.fileName)} - ${this.columns.length} columns detected</span>
                 </div>
                 ${this.renderWarnings()}
@@ -270,17 +271,17 @@ const Converter = {
         return `
             <div class="card" style="margin-bottom:20px">
                 <div class="card-header">
-                    <h3 class="card-title">Conversion Preview</h3>
+                    <h2 class="card-title">Conversion Preview</h2>
                     <span style="color:var(--text-muted);font-size:0.85rem">${App.escapeHtml(this.fileName)}</span>
                 </div>
                 <div id="previewChips" class="chip-row" style="margin-bottom:12px"></div>
-                <p id="previewStats" style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:12px"></p>
+                <p id="previewStats" role="status" aria-live="polite" style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:12px"></p>
                 <div id="previewNotice"></div>
-                <div id="previewTable"><p style="color:var(--text-muted)">Converting a sample...</p></div>
+                <div id="previewTable"><p style="color:var(--text-muted)">Converting a sample…</p></div>
             </div>
             <div class="card">
                 <div class="card-header">
-                    <h3 class="card-title">What would you like to do?</h3>
+                    <h2 class="card-title">What would you like to do?</h2>
                 </div>
                 <div style="display:flex;gap:12px;flex-wrap:wrap">
                     <button class="btn btn-primary" onclick="Converter.downloadConverted()">Download Converted CSV</button>
@@ -300,6 +301,15 @@ const Converter = {
 
             if (dropZone && fileInput) {
                 dropZone.addEventListener('click', () => fileInput.click());
+
+                // The dropzone is the file picker's only visible control; a
+                // keyboard user reaches it via Tab and opens it with Enter.
+                dropZone.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        fileInput.click();
+                    }
+                });
 
                 dropZone.addEventListener('dragover', (e) => {
                     e.preventDefault();
@@ -400,7 +410,7 @@ const Converter = {
             this.renderPreviewResult(result?.rows || [], this._previewStats);
         } catch {
             // API.request already surfaced the server message; leave a hint in
-            // the preview area instead of a stuck "Converting a sample...".
+            // the preview area instead of a stuck "Converting a sample…".
             this.renderPreviewError();
         }
     },
@@ -569,7 +579,7 @@ const Converter = {
         dialog.style.display = 'block';
         dialog.innerHTML = `
             <div style="border-top:1px solid var(--glass-border);padding-top:16px">
-                <h4 style="margin-bottom:12px">Import to ListMonk</h4>
+                <h3 style="margin-bottom:12px">Import to ListMonk</h3>
                 <div class="import-summary">
                     <div class="cell"><div class="k">Rows</div><div class="v">${stats.converted ?? 0}</div></div>
                     <div class="cell"><div class="k">Skipped</div><div class="v">${stats.skipped ?? 0}</div></div>
@@ -683,10 +693,10 @@ const Converter = {
         const dialog = document.getElementById('importDialog');
         if (!dialog) return;
         dialog.innerHTML = `
-            <div style="border-top:1px solid var(--glass-border);padding-top:16px">
-                <h4>Import Progress</h4>
+            <div style="border-top:1px solid var(--glass-border);padding-top:16px" role="status" aria-live="polite">
+                <h3>Import Progress</h3>
                 <div class="progress-bar"><div class="progress-fill" id="importProgress" style="width:0%"></div></div>
-                <p id="importStatusText" style="font-size:0.85rem;color:var(--text-secondary);margin-top:8px">Starting import...</p>
+                <p id="importStatusText" style="font-size:0.85rem;color:var(--text-secondary);margin-top:8px">Starting import…</p>
                 <pre id="importLogs" style="max-height:200px;overflow-y:auto;font-size:0.8rem;color:var(--text-muted);margin-top:12px;background:var(--bg-input);padding:12px;border-radius:var(--radius-md);border:1px solid var(--glass-border)"></pre>
             </div>
         `;
@@ -740,7 +750,7 @@ const Converter = {
                         App.toast('Stopped polling import status after repeated failures', 'error');
                         return;
                     }
-                    statusEl.textContent = `Status check failed (${failures}/5), retrying...`;
+                    statusEl.textContent = `Status check failed (${failures}/5), retrying…`;
                 }
 
                 if (logsRes.status === 'fulfilled') {

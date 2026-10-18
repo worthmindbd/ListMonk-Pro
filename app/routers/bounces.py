@@ -8,7 +8,7 @@ from app.services.bounce_ingest import ingest_bounce_mailbox
 from app.services.bounce_list import iter_filtered_bounces, fetch_filtered_bounces_page
 from app.services.bounce_filters import bounce_campaign_id, bounce_campaign_name
 from app.services.export_service import aiter_dicts_to_csv
-from app.services.bulk_ops import run_bulk, MAX_BULK_IDS
+from app.services.bulk_ops import run_bulk, parse_ids, MAX_BULK_IDS
 from app.services.hard_bounce_cache import schedule_hard_bounce_update
 
 router = APIRouter()
@@ -128,12 +128,15 @@ async def delete_all_bounces(campaign_id: Optional[int] = None,
     bounce_type = _validate_bounce_type(bounce_type)
 
     if ids:
-        if len(ids) > MAX_BULK_IDS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Too many ids (max {MAX_BULK_IDS})",
-            )
-        result = await run_bulk(ids, listmonk.delete_bounce)
+        # Shared selection validation (rule 14): dedupe + reject junk/<1 ids
+        # so a repeated row cannot 404 twice and inflate the error count.
+        try:
+            parsed_ids = parse_ids(ids)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if not parsed_ids:
+            raise HTTPException(status_code=400, detail="No bounce ids provided")
+        result = await run_bulk(parsed_ids, listmonk.delete_bounce)
         schedule_hard_bounce_update()
         return {
             "deleted": result["ok"],

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query, HTTPException
 from app.services.listmonk_client import listmonk
 from app.services.bulk_ops import parse_ids, run_bulk
+from app.services.search_query import build_ilike_search
 
 router = APIRouter()
 
@@ -12,10 +13,18 @@ MAX_PER_PAGE = 200
 @router.get("")
 async def get_lists(page: int = Query(1, ge=1, le=MAX_PAGE),
                     per_page: int = Query(50, ge=1, le=MAX_PER_PAGE),
-                    query: str = "", status: str = "",
+                    query: str = "", search: str = "", status: str = "",
                     order_by: str = "created_at", order: str = "DESC",
                     minimal: bool = False):
-    return await listmonk.get_lists(page, per_page, query, status,
+    # `query` stays a raw-SQL passthrough for power users; the UI's free-text
+    # box sends `search`, which is folded into a literal ILIKE clause so plain
+    # words never reach Postgres unparsed.
+    clauses = [c for c in (
+        query.strip(),
+        build_ilike_search(search, ("lists.name",)),
+    ) if c]
+    combined = " AND ".join(f"({c})" for c in clauses) if clauses else ""
+    return await listmonk.get_lists(page, per_page, combined, status,
                                     order_by, order, minimal)
 
 

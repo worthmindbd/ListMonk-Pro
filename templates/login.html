@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#090d16" id="themeColorMeta">
     <title>Login - ListMonk Pro</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -185,6 +186,19 @@
         }
 
         /* ── Header & Logo ──────────────────────────────────────── */
+        @media (prefers-reduced-motion: reduce) {
+            /* The floating orbs and entrance animation are pure decoration;
+               under reduced motion they must stop instead of looping. */
+            .orb,
+            .login-card,
+            .logo-icon,
+            .btn-submit,
+            .btn-submit svg {
+                animation: none !important;
+                transition: none !important;
+            }
+        }
+
         .brand-header {
             text-align: center;
             margin-bottom: 32px;
@@ -429,6 +443,8 @@
         (function() {
             var t = localStorage.getItem('theme') || 'dark';
             document.documentElement.setAttribute('data-theme', t);
+            var meta = document.getElementById('themeColorMeta');
+            if (meta) meta.setAttribute('content', t === 'dark' ? '#090d16' : '#f6f9fc');
         })();
     </script>
 </head>
@@ -441,10 +457,10 @@
         <div class="orb orb-4"></div>
     </div>
 
-    <div class="login-card">
+    <main class="login-card">
         <div class="brand-header">
             <div class="logo-badge">
-                <div class="logo-text">ListMonk<span>Pro</span><span class="logo-pill">v2.0</span></div>
+                <h1 class="logo-text" style="margin:0">ListMonk<span>Pro</span><span class="logo-pill">v2.0</span></h1>
             </div>
             <div class="subtitle">Sign in to your administration dashboard</div>
         </div>
@@ -484,7 +500,7 @@
                 Crafted by <a href="https://worthmind.net/" target="_blank" rel="noopener">WorthMind</a>
             </div>
         </div>
-    </div>
+    </main>
 
     <script>
         function toggleTheme() {
@@ -492,6 +508,8 @@
             const next = current === 'dark' ? 'light' : 'dark';
             document.documentElement.setAttribute('data-theme', next);
             localStorage.setItem('theme', next);
+            const meta = document.getElementById('themeColorMeta');
+            if (meta) meta.setAttribute('content', next === 'dark' ? '#090d16' : '#f6f9fc');
         }
 
         async function handleLogin(e) {

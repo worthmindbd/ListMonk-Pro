@@ -29,25 +29,41 @@ def _is_client_ready() -> bool:
     return listmonk._client is not None
 
 
+async def _count_chunk(chunk: list[dict], counts: dict[int, int]) -> None:
+    """Fold one batch of hard bounces into ``counts`` after opener exclusion."""
+    filtered = await filter_bounces_excluding_openers(listmonk, chunk)
+    for b in filtered:
+        cid = bounce_campaign_id(b)
+        if cid:
+            counts[cid] = counts.get(cid, 0) + 1
+
+
 async def update_hard_bounce_counts():
-    """Fetch all bounces and count hard bounces per campaign."""
+    """Fetch all bounces and count hard bounces per campaign.
+
+    Counting runs one ListMonk page at a time: materialising the whole bounce
+    table (including meta payloads) every five minutes used to spike memory
+    without bound on large installations.
+    """
     global _hard_bounce_counts, _last_updated
     from datetime import datetime
 
     async with _update_lock:
         try:
             logger.info("Updating hard bounce counts...")
-            all_bounces = await listmonk.paginate_all(
-                listmonk.get_bounces, per_page=BATCH_SIZE, bounce_type="hard",
-            )
-            hard_bounces = [b for b in all_bounces if b.get("type") == "hard"]
-            hard_bounces = await filter_bounces_excluding_openers(listmonk, hard_bounces)
-
             counts: dict[int, int] = {}
-            for b in hard_bounces:
-                cid = bounce_campaign_id(b)
-                if cid:
-                    counts[cid] = counts.get(cid, 0) + 1
+            chunk: list[dict] = []
+            async for bounce in listmonk.iter_pages(
+                listmonk.get_bounces, per_page=BATCH_SIZE, bounce_type="hard",
+            ):
+                if bounce.get("type") != "hard":
+                    continue
+                chunk.append(bounce)
+                if len(chunk) >= BATCH_SIZE:
+                    await _count_chunk(chunk, counts)
+                    chunk = []
+            if chunk:
+                await _count_chunk(chunk, counts)
 
             _hard_bounce_counts = counts
             _last_updated = datetime.now().isoformat()

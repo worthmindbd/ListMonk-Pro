@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#090d16" id="themeColorMeta">
     <title>ListMonk Pro — Modern Dashboard</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -13,6 +14,7 @@
     <script src="/static/js/vendor/chart.umd.min.js?v=4.5.1"></script>
 </head>
 <body>
+    <a class="skip-link" href="#contentArea">Skip to content</a>
     <!-- Ambient Gradient Mesh (from DESIGN.md) -->
     <div class="ambient-mesh">
         <div class="orb orb-1"></div>
@@ -107,7 +109,8 @@
         <!-- Main Content -->
         <main class="main-content">
             <header class="top-bar">
-                <button class="menu-toggle" id="menuToggle" aria-label="Toggle navigation">
+                <button class="menu-toggle" id="menuToggle" aria-label="Toggle navigation"
+                        aria-controls="sidebar" aria-expanded="false">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
                 </button>
                 <div class="top-bar-title-wrap">
@@ -149,7 +152,7 @@
         <div class="modal onboarding-modal" role="dialog" aria-modal="true" aria-labelledby="onboardingTitle">
             <div class="modal-header">
                 <div>
-                    <h3 id="onboardingTitle" style="margin:0;font-size:1.4rem;font-weight:700;">Welcome to ListMonk Pro</h3>
+                    <h2 id="onboardingTitle" style="margin:0;font-size:1.4rem;font-weight:700;">Welcome to ListMonk Pro</h2>
                     <p style="margin:6px 0 0 0;font-size:0.9rem;color:var(--text-secondary)">Choose your primary operating mode. You can switch anytime using the toggle in the top header.</p>
                 </div>
             </div>
@@ -159,7 +162,7 @@
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="26" height="26"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
                     </div>
                     <div class="mode-card-header">
-                        <h4>Newsletter Mode</h4>
+                        <h3>Newsletter Mode</h3>
                         <span class="badge badge-accent">Marketing & Broadcasts</span>
                     </div>
                     <p>Designed for content creators, publishers, and marketing campaigns. Full support for open tracking, click analytics, beautiful HTML templates, and opt-in lists.</p>
@@ -177,7 +180,7 @@
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="26" height="26"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
                     </div>
                     <div class="mode-card-header">
-                        <h4>Cold Email Mode</h4>
+                        <h3>Cold Email Mode</h3>
                         <span class="badge badge-success">B2B Outbound Outreach</span>
                     </div>
                     <p>Engineered for high-deliverability sales prospecting. IMAP reply tracking, sentiment categorization, deliverability pre-flight safeguards, and zero tracking pixels for primary inboxing.</p>
@@ -197,7 +200,7 @@
     <div class="modal-overlay" id="modalOverlay" style="display:none;">
         <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
             <div class="modal-header">
-                <h3 id="modalTitle">Confirm</h3>
+                <h2 id="modalTitle">Confirm</h2>
                 <button class="modal-close" id="modalClose" aria-label="Close dialog">&times;</button>
             </div>
             <div class="modal-body" id="modalBody"></div>
@@ -213,11 +216,16 @@
         function toggleTheme(isDark) {
             document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
             localStorage.setItem('theme', isDark ? 'dark' : 'light');
+            // Keep the browser chrome (mobile URL bar) in sync with the surface.
+            const meta = document.getElementById('themeColorMeta');
+            if (meta) meta.setAttribute('content', isDark ? '#090d16' : '#f6f9fc');
             window.dispatchEvent(new CustomEvent('themeChanged', { detail: { isDark } }));
         }
         (function() {
             const saved = localStorage.getItem('theme') || 'dark';
             document.documentElement.setAttribute('data-theme', saved);
+            const meta = document.getElementById('themeColorMeta');
+            if (meta) meta.setAttribute('content', saved === 'dark' ? '#090d16' : '#f6f9fc');
             document.addEventListener('DOMContentLoaded', () => {
                 const toggle = document.getElementById('themeToggle');
                 if (toggle) toggle.checked = saved === 'dark';

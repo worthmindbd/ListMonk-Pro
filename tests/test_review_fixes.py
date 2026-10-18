@@ -334,7 +334,16 @@ def test_forwarded_for_honoured_from_loopback_proxy(monkeypatch):
 
     monkeypatch.delenv("TRUST_PROXY", raising=False)
     got = client_ip_from_request(_request_with("127.0.0.1", "203.0.113.9, 10.0.0.5"))
-    assert got == "203.0.113.9", "left-most XFF entry is the original client"
+    assert got == "10.0.0.5", "right-most XFF entry is the one the trusted proxy appended"
+
+
+def test_forwarded_for_spoofed_leftmost_entry_ignored(monkeypatch):
+    """A client-supplied left-most entry must never pick the rate-limit bucket."""
+    from app.auth import client_ip_from_request
+
+    monkeypatch.delenv("TRUST_PROXY", raising=False)
+    got = client_ip_from_request(_request_with("127.0.0.1", "198.51.100.7, 203.0.113.9"))
+    assert got == "203.0.113.9"
 
 
 def test_trust_proxy_opt_in(monkeypatch):
@@ -466,6 +475,11 @@ async def test_hard_bounce_refresh_is_coalesced(monkeypatch):
         async def paginate_all(self, fn, per_page=500, **kw):
             paginations.append(1)
             return []
+
+        async def iter_pages(self, fn, per_page=500, **kw):
+            paginations.append(1)
+            return
+            yield  # unreachable: empty async generator
 
     monkeypatch.setattr(hbc, "listmonk", FakeLM())
     for _ in range(50):

@@ -48,7 +48,9 @@ const App = {
             const sidebar = document.getElementById('sidebar');
             sidebar.classList.toggle('open');
             // Drives the scrim behind the open drawer (see .nav-open in CSS).
-            document.body.classList.toggle('nav-open', sidebar.classList.contains('open'));
+            const open = sidebar.classList.contains('open');
+            document.body.classList.toggle('nav-open', open);
+            document.getElementById('menuToggle').setAttribute('aria-expanded', open ? 'true' : 'false');
             syncNavHint();
         });
         syncNavHint();
@@ -63,35 +65,31 @@ const App = {
         document.getElementById('modalClose').addEventListener('click', () => this.closeModal());
         document.getElementById('modalCancel').addEventListener('click', () => this.closeModal());
         document.getElementById('modalOverlay').addEventListener('click', (e) => {
-            if (e.target === e.currentTarget) this.closeModal();
+            if (e.target === e.currentTarget && !this._progressOpen()) this.closeModal();
         });
 
         // Dialog behavior for the shared overlay: Escape cancels, and Tab
         // cycles inside the modal instead of walking the page behind it.
         document.addEventListener('keydown', (e) => {
+            // The mandatory mode picker: Escape must not skip the choice and
+            // Tab must not walk the page behind its scrim.
+            const onboarding = document.getElementById('modeOnboardingModal');
+            if (onboarding && onboarding.style.display !== 'none') {
+                if (e.key === 'Escape') { e.preventDefault(); return; }
+                if (e.key === 'Tab') this._trapTab(onboarding, e);
+                return;
+            }
             const overlay = document.getElementById('modalOverlay');
             if (!overlay || overlay.style.display === 'none') return;
             if (e.key === 'Escape') {
+                // A running bulk operation cannot be undone by hiding its
+                // progress dialog; Escape is ignored until it finishes.
+                if (this._progressOpen()) { e.preventDefault(); return; }
                 e.preventDefault();
                 this.closeModal();
                 return;
             }
-            if (e.key === 'Tab') {
-                const focusables = Array.from(overlay.querySelectorAll(
-                    'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-                )).filter(el => !el.disabled && el.offsetParent !== null);
-                if (!focusables.length) { e.preventDefault(); return; }
-                const first = focusables[0];
-                const last = focusables[focusables.length - 1];
-                const active = document.activeElement;
-                if (e.shiftKey && (active === first || !overlay.contains(active))) {
-                    e.preventDefault();
-                    last.focus();
-                } else if (!e.shiftKey && (active === last || !overlay.contains(active))) {
-                    e.preventDefault();
-                    first.focus();
-                }
-            }
+            if (e.key === 'Tab') this._trapTab(overlay, e);
         });
 
         // Initialize mode. localStorage is only an instant-render hint for
@@ -209,6 +207,28 @@ const App = {
     seq() { return this._navSeq; },
     stale(seq) { return seq !== this._navSeq; },
 
+    /** Bump the render generation for in-page state changes (filter, search,
+        pagination) so a slow response for the previous state can never repaint
+        over the newer one. route() bumps for navigation; this is the in-page
+        counterpart. */
+    bumpSeq() { this._navSeq++; return this._navSeq; },
+
+    /** Query params carried by the current hash (#/page?key=value). */
+    routeQuery() { return this._routeQuery || new URLSearchParams(); },
+
+    /** Rewrite the hash without adding a history entry or firing hashchange,
+        so the URL mirrors page state without re-triggering route(). */
+    syncUrl(page, params = {}) {
+        const qs = new URLSearchParams();
+        Object.entries(params).forEach(([k, v]) => {
+            if (v !== undefined && v !== null && v !== '' && v !== 0 && v !== false) {
+                qs.set(k, String(v));
+            }
+        });
+        const url = '#/' + page + (qs.toString() ? '?' + qs.toString() : '');
+        if (window.location.hash !== url) history.replaceState(null, '', url);
+    },
+
     /** Destroy every live Chart.js instance. Charts are bound to canvases
         that route() is about to discard; Chart.js keeps them in its global
         registry, so without this each SPA navigation leaks one set. */
@@ -223,7 +243,12 @@ const App = {
     },
 
     route() {
-        const hash = window.location.hash.slice(2) || 'dashboard';
+        const raw = window.location.hash.slice(2) || 'dashboard';
+        // Filters/pagination/detail views ride in the hash query so every
+        // stateful view is deep-linkable and survives reload + Back.
+        const [name, qs] = raw.split('?');
+        const hash = name;
+        this._routeQuery = new URLSearchParams(qs || '');
         // Own-property check: a plain lookup also resolves inherited keys, so
         // "#/constructor" or "#/toString" would return a function and blow up
         // with a confusing TypeError instead of redirecting to the dashboard.
@@ -250,6 +275,12 @@ const App = {
             Bounces.campaignFilter = 0;
             Bounces.page = 1;
         }
+        // Same convention for the unsubscribe detail view: its selection and
+        // open campaign are page-local and must not survive navigation.
+        if (hash !== 'unsubscribes' && typeof Unsubscribes !== 'undefined') {
+            Unsubscribes.activeCampaign = null;
+            Unsubscribes.selectedEmails.clear();
+        }
 
         // Release charts bound to the outgoing page's canvases
         this.destroyCharts();
@@ -267,20 +298,22 @@ const App = {
 
         // Render page
         const content = document.getElementById('contentArea');
-        content.innerHTML = '<div class="loading-spinner">Loading...</div>';
+        content.innerHTML = '<div class="loading-spinner">Loading…</div>';
         try {
             const res = page.render();
             if (res && typeof res.catch === 'function') {
                 res.catch(err => {
                     console.error(`Error rendering page ${hash}:`, err);
-                    if (this.stale(seq)) return;
-                    content.innerHTML = `<div class="empty-state"><h3>Failed to load ${App.escapeHtml(page.title)}</h3><p>${App.escapeHtml(err?.message || '')}</p></div>`;
+                    // currentPage (not the render generation): in-page seq
+                    // bumps must not suppress this navigation-level error UI.
+                    if (this.currentPage !== hash) return;
+                    content.innerHTML = `<div class="empty-state"><h2>Failed to load ${App.escapeHtml(page.title)}</h2><p>${App.escapeHtml(err?.message || '')}</p></div>`;
                 });
             }
         } catch (err) {
             console.error(`Error rendering page ${hash}:`, err);
-            if (this.stale(seq)) return;
-            content.innerHTML = `<div class="empty-state"><h3>Failed to load ${App.escapeHtml(page.title)}</h3><p>${App.escapeHtml(err?.message || '')}</p></div>`;
+            if (this.currentPage !== hash) return;
+            content.innerHTML = `<div class="empty-state"><h2>Failed to load ${App.escapeHtml(page.title)}</h2><p>${App.escapeHtml(err?.message || '')}</p></div>`;
         }
     },
 
@@ -288,7 +321,9 @@ const App = {
         const dot = document.querySelector('.status-dot');
         const text = document.querySelector('.status-text');
         try {
-            await API.get('/api/lists?per_page=1&minimal=true');
+            // silent: the status dot IS the failure UI; a toast per poll
+            // during an outage would stack one per check on top of it.
+            await API.get('/api/lists?per_page=1&minimal=true', true);
             dot.className = 'status-dot connected';
             text.textContent = 'Connected';
         } catch {
@@ -350,17 +385,42 @@ const App = {
         close so keyboard users land back on the control that triggered it. */
     _lastFocused: null,
 
+    /** True while a bulk operation's progress dialog is on screen. */
+    _progressOpen() {
+        return !!document.getElementById('progressBar');
+    },
+
+    /** Keep Tab/Shift+Tab cycling inside `container` (focus trap). */
+    _trapTab(container, e) {
+        const focusables = Array.from(container.querySelectorAll(
+            'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        )).filter(el => !el.disabled && el.offsetParent !== null);
+        if (!focusables.length) { e.preventDefault(); return; }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement;
+        if (e.shiftKey && (active === first || !container.contains(active))) {
+            e.preventDefault();
+            last.focus();
+        } else if (!e.shiftKey && (active === last || !container.contains(active))) {
+            e.preventDefault();
+            first.focus();
+        }
+    },
+
     /** Show the shared overlay as a real dialog: remember the trigger and
         move focus inside. Tab cycling is trapped by the document-level
-        keydown handler registered in init(). */
+        keydown handler registered in init(). Focus lands on Cancel first:
+        auto-focusing the danger-styled Confirm made a stray Enter confirm
+        destructive deletes. */
     _openModalOverlay() {
         this._lastFocused = document.activeElement;
         const overlay = document.getElementById('modalOverlay');
         overlay.style.display = 'flex';
         const confirm = document.getElementById('modalConfirm');
         const cancel = document.getElementById('modalCancel');
-        const target = (confirm && confirm.style.display !== 'none' && confirm)
-            || (cancel && cancel.style.display !== 'none' && cancel)
+        const target = (cancel && cancel.style.display !== 'none' && cancel)
+            || (confirm && confirm.style.display !== 'none' && confirm)
             || overlay.querySelector('button, [href], input, select, textarea');
         if (target && target.focus) target.focus();
     },
@@ -398,7 +458,7 @@ const App = {
         document.getElementById('modalTitle').textContent = title;
         document.getElementById('modalBody').innerHTML = `
             <p>${this.escapeHtml(message)}</p>
-            <div id="progressPhase" style="margin-top:14px;font-weight:600;color:var(--text-primary)">Starting...</div>
+            <div id="progressPhase" style="margin-top:14px;font-weight:600;color:var(--text-primary)">Starting…</div>
             <div style="margin-top:10px;background:var(--bg-input);border-radius:9999px;height:12px;overflow:hidden;border:1px solid var(--glass-border);box-shadow:inset 0 1px 3px rgba(0,0,0,0.2)">
                 <div id="progressBar" style="height:100%;width:0%;background:linear-gradient(90deg,var(--primary),var(--emerald));border-radius:9999px;box-shadow:0 0 12px var(--primary-glow);transition:width 0.3s cubic-bezier(0.16,1,0.3,1)"></div>
             </div>
@@ -417,7 +477,7 @@ const App = {
         const msgEl = document.getElementById('progressMessage');
         if (!phaseEl || !barEl) return;
         const phaseLabels = {
-            starting: 'Starting...',
+            starting: 'Starting…',
             fetching: 'Fetching hard bounces',
             identifying: 'Identifying blacklist bounces',
             reclassifying: 'Reclassifying hard → soft',
@@ -488,6 +548,14 @@ const App = {
         html += `<span class="pagination-info">${App.formatNumber(total)} records</span>`;
         html += '</div>';
         return html;
+    },
+
+    /** Bulk deletes can leave the current page past the last page; without a
+        clamp the re-render shows an empty "no records" page even though
+        earlier pages still hold rows. Returns the page to render. */
+    clampPage(page, total, perPage) {
+        const totalPages = Math.max(1, Math.ceil((total || 0) / perPage));
+        return Math.min(Math.max(1, page), totalPages);
     },
 
     // ── Multi-select (bulk actions) ──────────────────────
@@ -634,7 +702,7 @@ const App = {
         const d = new Date(dateStr);
         // Wrapped in .cell-date: without it "Oct 1, 2026" broke across two
         // lines in the narrow Date/Created table columns, doubling row height.
-        return `<span class="cell-date">${d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}</span>`;
+        return `<span class="cell-date">${d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}</span>`;
     },
 
     /** Shorten a chart axis label without cutting mid-word: the old
@@ -649,7 +717,7 @@ const App = {
     formatDateTime(dateStr) {
         if (!dateStr) return '-';
         const d = new Date(dateStr);
-        return d.toLocaleString('en-US', {
+        return d.toLocaleString(undefined, {
             year: 'numeric', month: 'short', day: 'numeric',
             hour: '2-digit', minute: '2-digit'
         });
@@ -721,6 +789,9 @@ const Templates = {
 
     async render() {
         const seq = App.seq();
+        // Deep-linkable state: #/templates?q=sequence
+        const rq = App.routeQuery();
+        if (rq.get('q') !== null) this._filter = rq.get('q') || '';
         try {
             const result = await API.get('/api/templates');
             if (App.stale(seq)) return;
@@ -743,7 +814,7 @@ const Templates = {
                 <div class="search-bar">
                     <div class="search-input">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                        <input type="search" id="tplSearch" placeholder="Search templates by name..."
+                        <input type="search" id="tplSearch" placeholder="Search templates by name…"
                             aria-label="Search templates"
                             value="${App.escapeHtml(this._filter)}" onkeydown="if(event.key==='Enter')Templates.search()">
                     </div>
@@ -754,22 +825,22 @@ const Templates = {
                     </div>
                 </div>
                 ${App.selection.bar('templates')}
-                <div class="table-wrapper"><table>
+                <div class="table-wrapper" tabindex="0" role="region" aria-label="Scrollable data table"><table>
                     <thead><tr>
                         <th class="col-select">${App.selection.headbox('templates', 'Select all templates shown')}</th>
                         <th>ID</th><th>Name</th><th>Type</th><th>Default</th><th>Created</th><th>Updated</th><th class="cell-actions">Actions</th>
                     </tr></thead><tbody>`;
 
             if (!templates.length) {
-                html += '<tr><td colspan="8"><div class="empty-state"><h3>No templates found</h3></div></td></tr>';
+                html += '<tr><td colspan="8"><div class="empty-state"><h2>No templates found</h2></div></td></tr>';
             }
             templates.forEach(t => {
                 const name = App.escapeHtml(t.name || '');
                 html += `<tr class="${App.selection.has('templates', t.id) ? 'row-selected' : ''}">
                     <td class="col-select">${App.selection.rowbox('templates', t.id, `Select ${t.name}`)}</td>
                     <td>${t.id}</td>
-                    <td><strong>${name}</strong></td>
-                    <td><span class="badge badge-info">${t.type || '-'}</span></td>
+                    <td><strong class="cell-clamp" title="${name}">${name}</strong></td>
+                    <td><span class="badge badge-info">${App.escapeHtml(t.type || '-')}</span></td>
                     <td>${t.is_default ? '<span class="badge badge-success">Default</span>' : '-'}</td>
                     <td>${App.formatDate(t.created_at)}</td>
                     <td>${App.formatDate(t.updated_at)}</td>
@@ -787,16 +858,18 @@ const Templates = {
 
             html += '</tbody></table></div>';
             if (App.stale(seq)) return;
+            App.syncUrl('templates', { q: this._filter });
             App.setContent(html);
         } catch (err) {
             console.error('Templates load error:', err);
             if (App.stale(seq)) return;
-            App.setContent(`<div class="empty-state"><h3>Failed to load templates</h3><p>${App.escapeHtml(err.message || '')}</p></div>`);
+            App.setContent(`<div class="empty-state"><h2>Failed to load templates</h2><p>${App.escapeHtml(err.message || '')}</p></div>`);
         }
     },
 
     search() {
         this._filter = document.getElementById('tplSearch')?.value || '';
+        App.bumpSeq();
         this.render();
     },
 
@@ -815,7 +888,7 @@ const Templates = {
     showCreate() {
         App.setContent(`
             <div class="inline-form">
-                <h3 style="margin-bottom:16px">Create Template</h3>
+                <h2 style="margin-bottom:16px">Create Template</h2>
                 <div class="form-group"><label>Name</label><input type="text" id="tplName" placeholder="Template name"></div>
                 <div class="form-group">
                     <label>Type</label>
@@ -835,7 +908,7 @@ const Templates = {
         if (!t) { App.toast('Template not found', 'error'); return; }
         App.setContent(`
             <div class="inline-form">
-                <h3 style="margin-bottom:16px">Edit Template #${t.id}</h3>
+                <h2 style="margin-bottom:16px">Edit Template #${t.id}</h2>
                 <div class="form-group"><label>Name</label><input type="text" id="editTplName" value="${App.escapeHtml(t.name || '')}"></div>
                 <div class="form-group"><label>Body (HTML)</label><textarea id="editTplBody" rows="15">${App.escapeHtml(t.body || '')}</textarea></div>
                 <div class="form-actions">
@@ -946,6 +1019,11 @@ const Bounces = {
 
     async render() {
         const seq = App.seq();
+        // Deep-linkable state: #/bounces?page=2&type=soft&campaign=6
+        const rq = App.routeQuery();
+        if (rq.get('page')) this.page = Math.max(1, parseInt(rq.get('page'), 10) || 1);
+        if (rq.get('type') !== null) this.typeFilter = rq.get('type') || '';
+        if (rq.get('campaign') !== null) this.campaignFilter = parseInt(rq.get('campaign'), 10) || 0;
         try {
             const fetchCampaigns = !this.campaigns.length
                 ? API.get('/api/campaigns?per_page=500&order_by=created_at&order=DESC')
@@ -961,6 +1039,10 @@ const Bounces = {
             const data = bounceRes?.data || {};
             const pageBounces = data.results || [];
             const total = data.total || 0;
+            // A delete can strand the view past the last page; clamp and
+            // re-fetch instead of painting a false "no bounces" page.
+            const clamped = App.clampPage(this.page, total, this.perPage);
+            if (clamped !== this.page) { this.page = clamped; return this.render(); }
             this.total = total;
             this._rows = pageBounces;
 
@@ -1016,9 +1098,9 @@ const Bounces = {
             // keeps a 600px min-width on phones, which pushed the centred
             // message off-screen behind the pinned action column.
             if (!pageBounces.length) {
-                html += `<div class="card"><div class="empty-state"><h3>No ${this._typeLabel()} found</h3></div></div>`;
+                html += `<div class="card"><div class="empty-state"><h2>No ${this._typeLabel()} found</h2></div></div>`;
             } else {
-                html += `<div class="table-wrapper"><table>
+                html += `<div class="table-wrapper" tabindex="0" role="region" aria-label="Scrollable data table"><table>
                     <thead><tr>
                         <th class="col-select">${App.selection.headbox('bounces', 'Select all bounces on this page')}</th>
                         <th>ID</th><th>Email</th><th>Campaign</th><th>Source</th><th>Type</th><th>Date</th><th class="cell-actions">Actions</th>
@@ -1042,26 +1124,31 @@ const Bounces = {
 
             html += App.renderPagination(this.page, total, this.perPage, 'Bounces.goToPage');
             if (App.stale(seq)) return;
+            App.syncUrl('bounces', {
+                page: this.page, type: this.typeFilter, campaign: this.campaignFilter,
+            });
             App.setContent(html);
         } catch (err) {
             if (App.stale(seq)) return;
-            App.setContent(`<div class="empty-state"><h3>Failed to load bounces</h3><p>${App.escapeHtml(err.message || '')}</p></div>`);
+            App.setContent(`<div class="empty-state"><h2>Failed to load bounces</h2><p>${App.escapeHtml(err.message || '')}</p></div>`);
         }
     },
 
     filterCampaign(val) {
         this.campaignFilter = parseInt(val) || 0;
         this.page = 1;
+        App.bumpSeq();
         this.render();
     },
 
     filterType(val) {
         this.typeFilter = val || '';
         this.page = 1;
+        App.bumpSeq();
         this.render();
     },
 
-    goToPage(p) { this.page = p; this.render(); },
+    goToPage(p) { this.page = p; App.bumpSeq(); this.render(); },
 
     /** IDs (as strings) of the bounce rows currently on screen. */
     pageIds() {
@@ -1079,7 +1166,7 @@ const Bounces = {
         if (!await App.confirm('Delete Bounces',
                 `Permanently delete ${ids.length} selected bounce record(s)? Continue?`)) return;
 
-        App.showProgress('Delete Bounces', `Deleting ${ids.length} selected bounce(s). Please wait...`);
+        App.showProgress('Delete Bounces', `Deleting ${ids.length} selected bounce(s). Please wait…`);
         try {
             const params = ids.map(id => `ids=${id}`).join('&');
             const result = await API.del(`/api/bounces?${params}`);
@@ -1116,6 +1203,10 @@ const Bounces = {
     },
 
     async remove(id) {
+        // Irreversible delete from a sticky action column: every other
+        // destructive action in the app confirms first, this one must too.
+        if (!await App.confirm('Delete Bounce',
+                'Permanently delete this bounce record? Continue?')) return;
         try {
             await API.del(`/api/bounces/${id}`);
             App.toast('Bounce deleted', 'success');
@@ -1146,7 +1237,7 @@ const Bounces = {
             ? `${typeDesc}bounces for "${this._campaignLabel()}"`
             : `ALL ${typeDesc}bounce records`;
         if (!await App.confirm('Delete Bounces', `This will permanently delete ${label}. Continue?`)) return;
-        App.showProgress('Delete Bounces', `Deleting ${label}. Please wait...`);
+        App.showProgress('Delete Bounces', `Deleting ${label}. Please wait…`);
         try {
             const params = new URLSearchParams();
             if (this.typeFilter) params.set('bounce_type', this.typeFilter);
@@ -1169,7 +1260,7 @@ const Bounces = {
     },
 
     async exportBounces() {
-        App.showProgress('Export Bounces', 'Preparing export...');
+        App.showProgress('Export Bounces', 'Preparing export…');
         try {
             const params = new URLSearchParams();
             if (this.typeFilter) params.set('bounce_type', this.typeFilter);
@@ -1194,7 +1285,7 @@ const Bounces = {
 
     async ingestBounces() {
         App.showProgress('Ingest New Bounces',
-            'Scanning unseen bounce emails, classifying each, and creating matching records in ListMonk. Only truly invalid addresses become hard bounces. Please wait...');
+            'Scanning unseen bounce emails, classifying each, and creating matching records in ListMonk. Only truly invalid addresses become hard bounces. Please wait…');
         try {
             const result = await API.post('/api/bounces/ingest');
             if (result && result.error) {

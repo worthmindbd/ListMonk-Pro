@@ -23,14 +23,16 @@ const Deliverability = {
         App.setContent(this.loadingHtml());
 
         try {
-            this.checklistData = await API.get('/api/deliverability/checklist');
+            // silent: an upstream outage (now a 502) renders in this page's
+            // own error state below — a toast on top would say it twice.
+            this.checklistData = await API.get('/api/deliverability/checklist', true);
             this.checkedAt = new Date();
             if (App.stale(this._seq)) return;
             this.renderPage();
         } catch (err) {
             console.error('Deliverability error:', err);
             if (App.stale(this._seq)) return;
-            App.setContent(`<div class="empty-state"><h3>Failed to load deliverability checklist</h3><p>${App.escapeHtml(err?.message || '')}</p></div>`);
+            App.setContent(`<div class="empty-state"><h2>Failed to load deliverability checklist</h2><p>ListMonk could not be reached — fix the connection and refresh.</p><p>${App.escapeHtml(err?.message || '')}</p></div>`);
         } finally {
             this.isLoading = false;
         }
@@ -188,9 +190,9 @@ const Deliverability = {
             <section class="card deliv-audit">
                 <header class="card-header deliv-audit-head">
                     <div>
-                        <h3 class="card-title">Pre-flight audit</h3>
+                        <h2 class="card-title">Pre-flight audit</h2>
                         <p class="deliv-sub">
-                            Read live from Listmonk${this.checkedAt ? ` · checked ${this.checkedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}` : ''}
+                            Read live from Listmonk${this.checkedAt ? ` · checked ${this.checkedAt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}` : ''}
                         </p>
                     </div>
                     <div class="page-actions">
@@ -207,7 +209,7 @@ const Deliverability = {
         `;
 
         if (!buckets.some(b => b.items.length)) {
-            html += `<div class="empty-state"><h3>No checks reported</h3><p>Listmonk returned an empty audit.</p></div>`;
+            html += `<div class="empty-state"><h2>No checks reported</h2><p>Listmonk returned an empty audit.</p></div>`;
         } else {
             buckets.filter(b => b.items.length).forEach(b => {
                 html += this.groupHtml(b.group, b.items);
@@ -240,7 +242,7 @@ const Deliverability = {
         return `
             <div class="deliv-group">
                 <div class="deliv-group-rail">
-                    <h4 class="deliv-group-label">${App.escapeHtml(group.label)}</h4>
+                    <h3 class="deliv-group-label">${App.escapeHtml(group.label)}</h3>
                     ${group.blurb ? `<p class="deliv-group-blurb">${App.escapeHtml(group.blurb)}</p>` : ''}
                     <span class="deliv-group-count ${needsWork ? 'has-attention' : ''}">
                         ${scoredItems.length ? passed : ''} ${scoredItems.length ? '/' : ''} ${total}
@@ -364,21 +366,21 @@ const Deliverability = {
     notesHtml() {
         return `
             <section class="card deliv-notes">
-                <h3 class="card-title">Why these rules exist</h3>
+                <h2 class="card-title">Why these rules exist</h2>
                 <div class="deliv-notes-grid">
                     <article class="deliv-note">
                         <span class="deliv-note-index">01</span>
-                        <h4>Tracking pixels cost more than they return</h4>
+                        <h3>Tracking pixels cost more than they return</h3>
                         <p>Google and Microsoft weigh 1&times;1 pixels and redirect wrappers heavily. In cold outreach the open rate is the wrong prize: removing them makes the message indistinguishable from a personal reply, which is what primary-inbox placement rewards.</p>
                     </article>
                     <article class="deliv-note">
                         <span class="deliv-note-index">02</span>
-                        <h4>The unsubscribe header is a bulk-mail label</h4>
+                        <h3>The unsubscribe header is a bulk-mail label</h3>
                         <p>Gmail and Outlook read <code>List-Unsubscribe</code> as a declaration of bulk mail and sort accordingly. A plain-text opt-out line does the same job for a prospect without handing the mailbox provider that label.</p>
                     </article>
                     <article class="deliv-note">
                         <span class="deliv-note-index">03</span>
-                        <h4>A steady drip beats a fast burst</h4>
+                        <h3>A steady drip beats a fast burst</h3>
                         <p>Batches of 100 at a single worker spread sends evenly, so no provider sees a spike. A spike is the most common trigger for temporary throttling, and a throttled domain keeps losing deliverability after the campaign ends.</p>
                     </article>
                 </div>
@@ -396,7 +398,7 @@ const Deliverability = {
         );
         if (!ok) return;
 
-        App.showProgress('Applying Preset', `Updating Listmonk settings for ${modeName}...`);
+        App.showProgress('Applying Preset', `Updating Listmonk settings for ${modeName}…`);
         try {
             await API.post('/api/deliverability/apply-preset', { mode });
             App.closeModal();

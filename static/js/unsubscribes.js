@@ -49,7 +49,7 @@ const Unsubscribes = {
 
     async render() {
         this._seq = App.seq();
-        App.setContent('<div class="loading-spinner">Loading unsubscribes...</div>');
+        App.setContent('<div class="loading-spinner">Loading unsubscribes…</div>');
 
         try {
             const [statsRes, statusRes, groupsRes, settingsRes] = await Promise.allSettled([
@@ -64,6 +64,14 @@ const Unsubscribes = {
             this.campaignGroups = groupsRes.status === 'fulfilled' ? (groupsRes.value.data || []) : [];
             this.settings = settingsRes.status === 'fulfilled' ? settingsRes.value : { blocklist_enabled: false };
 
+            // Deep-linkable detail view: #/unsubscribes?campaign=6
+            const rq = App.routeQuery();
+            const wanted = parseInt(rq.get('campaign') || '', 10);
+            if (!this.activeCampaign && Number.isFinite(wanted) && wanted) {
+                const group = this.campaignGroups.find(g => g.campaign_id === wanted);
+                if (group) this.activeCampaign = group;
+            }
+
             // If we're in detail view, stay there
             if (this.activeCampaign) {
                 await this.loadCampaignRecords(this.activeCampaign.campaign_id);
@@ -73,7 +81,7 @@ const Unsubscribes = {
             }
         } catch (err) {
             if (App.stale(this._seq)) return;
-            App.setContent(`<div class="empty-state"><h3>Failed to load unsubscribes</h3><p>${App.escapeHtml(err.message || '')}</p></div>`);
+            App.setContent(`<div class="empty-state"><h2>Failed to load unsubscribes</h2><p>${App.escapeHtml(err.message || '')}</p></div>`);
         }
     },
 
@@ -113,7 +121,7 @@ const Unsubscribes = {
             <!-- IMAP Status -->
             <div class="card unsub-monitor-card" style="margin-bottom:20px">
                 <div class="card-header">
-                    <h3 class="card-title">IMAP Unsubscribe Monitor</h3>
+                    <h2 class="card-title">IMAP Unsubscribe Monitor</h2>
                     <div class="page-actions">
                         ${imapBadge}
                         <button class="btn" onclick="Unsubscribes.exportAllCSV()">
@@ -182,7 +190,7 @@ const Unsubscribes = {
             <!-- Campaign Groups -->
             <div class="card" style="margin-top:20px">
                 <div class="card-header">
-                    <h3 class="card-title">Unsubscribes by Campaign</h3>
+                    <h2 class="card-title">Unsubscribes by Campaign</h2>
                     <span style="color:var(--text-muted);font-size:0.85rem">${groups.length} campaign(s)</span>
                 </div>
 
@@ -191,7 +199,7 @@ const Unsubscribes = {
         if (!groups.length) {
             html += `
                 <div class="empty-state" style="padding:40px">
-                    <h3>No unsubscribe campaigns detected</h3>
+                    <h2>No unsubscribe campaigns detected</h2>
                     <p>The system monitors your inbox every hour. Unsubscribes will be grouped by campaign month.</p>
                 </div>`;
         } else {
@@ -202,7 +210,7 @@ const Unsubscribes = {
                 const isClickable = Number.isInteger(g.campaign_id);
                 const isSelected = App.selection.has('unsub_campaigns', g.campaign_id);
                 html += `
-                    <div class="unsub-campaign-card ${isSelected ? 'selected' : ''}" ${isClickable ? `onclick="Unsubscribes.openCampaign(${g.campaign_id})"` : 'style="cursor:default;opacity:0.75"'}>
+                    <div class="unsub-campaign-card ${isSelected ? 'selected' : ''}" ${isClickable ? `role="button" tabindex="0" aria-label="Open unsubscribe records for ${cleanName}" onclick="Unsubscribes.openCampaign(${g.campaign_id})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();Unsubscribes.openCampaign(${g.campaign_id})}"` : 'style="cursor:default;opacity:0.75"'}>
                         <div class="unsub-campaign-header">
                             <div class="unsub-campaign-info">
                                 ${isClickable ? `<span onclick="event.stopPropagation()" style="margin-right:10px">${App.selection.rowbox('unsub_campaigns', g.campaign_id, `Select ${this.cleanCampaignName(g.campaign_name)}`)}</span>` : ''}
@@ -231,8 +239,10 @@ const Unsubscribes = {
         this.activeCampaign = this.campaignGroups.find(g => g.campaign_id === campaignId) || { campaign_id: campaignId, campaign_key: 'unknown', campaign_name: 'No matching campaign', count: 0 };
         this.campaignPage = 1;
         this.selectedEmails.clear();
+        // The detail view is addressable so Back/reload return to it.
+        App.syncUrl('unsubscribes', { campaign: campaignId });
 
-        App.setContent('<div class="loading-spinner">Loading campaign records...</div>');
+        App.setContent('<div class="loading-spinner">Loading campaign records…</div>');
 
         await this.loadCampaignRecords(campaignId);
         this.renderDetailView();
@@ -273,9 +283,9 @@ const Unsubscribes = {
                             <h3 class="card-title" style="margin:0">${cleanName}</h3>
                         </div>
                         <div class="page-actions">
-                            <button class="btn ${hasSelected ? 'btn-danger' : ''}" onclick="Unsubscribes.bulkDeleteSelected()" ${!hasSelected ? 'disabled' : ''}>
+                            <button id="unsubBulkDeleteBtn" class="btn ${hasSelected ? 'btn-danger' : ''}" onclick="Unsubscribes.bulkDeleteSelected()" ${!hasSelected ? 'disabled' : ''}>
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                                Delete Selected${hasSelected ? ` (${this.selectedEmails.size})` : ''}
+                                <span id="unsubBulkDeleteLabel">Delete Selected${hasSelected ? ` (${this.selectedEmails.size})` : ''}</span>
                             </button>
                             <button class="btn" onclick="Unsubscribes.exportCampaignCSV(${camp.campaign_id})">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -307,9 +317,9 @@ const Unsubscribes = {
 
             <!-- Records table -->
             <div class="card">
-                <div class="table-wrapper"><table>
+                <div class="table-wrapper" tabindex="0" role="region" aria-label="Scrollable data table"><table>
                     <thead><tr>
-                        <th style="width:30px"><input type="checkbox" aria-label="Select all records on this page" onchange="Unsubscribes.toggleSelectAll(this)" ${this._isPageFullySelected() ? 'checked' : ''}/></th>
+                        <th style="width:30px"><input type="checkbox" id="unsubSelectAllBox" aria-label="Select all records on this page" onchange="Unsubscribes.toggleSelectAll(this)" ${this._isPageFullySelected() ? 'checked' : ''}/></th>
                         <th>#</th><th>Email</th><th>Name</th><th>Type</th><th>Date</th><th>Actions</th>
                     </tr></thead><tbody>`;
 
@@ -324,7 +334,7 @@ const Unsubscribes = {
             const isChecked = this.selectedEmails.has(r.email);
 
             html += `<tr>
-                <td><input type="checkbox" value="${email}" aria-label="Select ${email}" onchange="Unsubscribes.toggleSelect(${i})" ${isChecked ? 'checked' : ''}/></td>
+                <td><input type="checkbox" class="unsub-row-select" value="${email}" aria-label="Select ${email}" onchange="Unsubscribes.toggleSelect(${i}, this)" ${isChecked ? 'checked' : ''}/></td>
                 <td>${idx}</td>
                 <td><strong>${email}</strong></td>
                 <td>${name}</td>
@@ -349,6 +359,7 @@ const Unsubscribes = {
     backToList() {
         this.activeCampaign = null;
         this.selectedEmails.clear();
+        App.syncUrl('unsubscribes', {});
         this.renderListView();
     },
 
@@ -364,16 +375,20 @@ const Unsubscribes = {
         return emails.length > 0 && emails.every(e => this.selectedEmails.has(e));
     },
 
-    toggleSelect(idx) {
+    toggleSelect(idx, checkbox) {
         const records = this.campaignRecords.results || [];
         const email = records[idx]?.email;
         if (!email) return;
-        if (this.selectedEmails.has(email)) {
-            this.selectedEmails.delete(email);
-        } else {
+        const checked = checkbox ? checkbox.checked : !this.selectedEmails.has(email);
+        if (checked) {
             this.selectedEmails.add(email);
+        } else {
+            this.selectedEmails.delete(email);
         }
-        this.renderDetailView();
+        if (checkbox) checkbox.closest('tr')?.classList.toggle('row-selected', checked);
+        // Targeted control refresh: a full table re-render on every checkbox
+        // click reset the scroll position and dropped keyboard focus.
+        this._syncDetailSelection();
     },
 
     toggleSelectAll(checkbox) {
@@ -385,7 +400,30 @@ const Unsubscribes = {
         } else {
             emails.forEach(e => this.selectedEmails.delete(e));
         }
-        this.renderDetailView();
+        document.querySelectorAll('.unsub-row-select').forEach(box => {
+            box.checked = checkbox.checked;
+            box.closest('tr')?.classList.toggle('row-selected', checkbox.checked);
+        });
+        this._syncDetailSelection();
+    },
+
+    /** Refresh the selection-dependent controls in place (no re-render). */
+    _syncDetailSelection() {
+        const count = this.selectedEmails.size;
+        const btn = document.getElementById('unsubBulkDeleteBtn');
+        const label = document.getElementById('unsubBulkDeleteLabel');
+        if (btn && label) {
+            btn.disabled = count === 0;
+            btn.classList.toggle('btn-danger', count > 0);
+            label.textContent = count ? `Delete Selected (${count})` : 'Delete Selected';
+        }
+        const head = document.getElementById('unsubSelectAllBox');
+        if (head) {
+            const emails = this._pageEmails();
+            const onPage = emails.filter(e => this.selectedEmails.has(e)).length;
+            head.checked = emails.length > 0 && onPage === emails.length;
+            head.indeterminate = onPage > 0 && onPage < emails.length;
+        }
     },
 
     /* ── Pagination ───────────────────────────────────────── */

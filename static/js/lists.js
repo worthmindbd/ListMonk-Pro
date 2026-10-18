@@ -9,13 +9,23 @@ const Lists = {
 
     async render() {
         const seq = App.seq();
+        // Deep-linkable state: #/lists?page=2&q=aevora
+        const rq = App.routeQuery();
+        if (rq.get('page')) this.page = Math.max(1, parseInt(rq.get('page'), 10) || 1);
+        if (rq.get('q') !== null) this.query = rq.get('q') || '';
         try {
-            const params = `page=${this.page}&per_page=${this.perPage}${this.query ? '&query=' + encodeURIComponent(this.query) : ''}`;
+            // Free text goes through the backend's safe ILIKE builder
+            // (`search`); `query` is ListMonk's raw-SQL passthrough.
+            const params = `page=${this.page}&per_page=${this.perPage}${this.query ? '&search=' + encodeURIComponent(this.query) : ''}`;
             const result = await API.get(`/api/lists?${params}`);
             if (App.stale(seq)) return;
             const data = result?.data || {};
             const lists = data.results || [];
             const total = data.total || 0;
+            // A bulk delete can strand the view past the last page; clamp and
+            // re-fetch instead of painting a false "no lists" page.
+            const clamped = App.clampPage(this.page, total, this.perPage);
+            if (clamped !== this.page) { this.page = clamped; return this.render(); }
             this._rows = lists;
 
             App.selection.register('lists', {
@@ -31,7 +41,7 @@ const Lists = {
                 <div class="search-bar">
                     <div class="search-input">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                        <input type="search" id="listSearch" placeholder="Search lists..."
+                        <input type="search" id="listSearch" placeholder="Search lists…"
                             aria-label="Search lists"
                             value="${App.escapeHtml(this.query)}" onkeydown="if(event.key==='Enter')Lists.search()">
                     </div>
@@ -41,14 +51,14 @@ const Lists = {
                     </div>
                 </div>
                 ${App.selection.bar('lists')}
-                <div class="table-wrapper"><table>
+                <div class="table-wrapper" tabindex="0" role="region" aria-label="Scrollable data table"><table>
                     <thead><tr>
                         <th class="col-select">${App.selection.headbox('lists', 'Select all lists on this page')}</th>
                         <th>ID</th><th>Name</th><th>Type</th><th>Optin</th><th>Subscribers</th><th>Status</th><th>Created</th><th class="cell-actions">Actions</th>
                     </tr></thead><tbody>`;
 
             if (!lists.length) {
-                html += '<tr><td colspan="9"><div class="empty-state"><h3>No lists found</h3></div></td></tr>';
+                html += '<tr><td colspan="9"><div class="empty-state"><h2>No lists found</h2></div></td></tr>';
             }
 
             lists.forEach(l => {
@@ -76,10 +86,11 @@ const Lists = {
             html += '</tbody></table></div>';
             html += App.renderPagination(this.page, total, this.perPage, 'Lists.goToPage');
             if (App.stale(seq)) return;
+            App.syncUrl('lists', { page: this.page, q: this.query });
             App.setContent(html);
         } catch {
             if (App.stale(seq)) return;
-            App.setContent('<div class="empty-state"><h3>Failed to load lists</h3></div>');
+            App.setContent('<div class="empty-state"><h2>Failed to load lists</h2></div>');
         }
     },
 
@@ -95,10 +106,11 @@ const Lists = {
     search() {
         this.query = document.getElementById('listSearch')?.value || '';
         this.page = 1;
+        App.bumpSeq();
         this.render();
     },
 
-    goToPage(p) { this.page = p; this.render(); },
+    goToPage(p) { this.page = p; App.bumpSeq(); this.render(); },
 
     /** Jump to the subscriber table pre-filtered to this list. */
     viewSubscribers(id) {
@@ -123,7 +135,7 @@ const Lists = {
     showCreate() {
         App.setContent(`
             <div class="inline-form">
-                <h3 style="margin-bottom:16px">Create List</h3>
+                <h2 style="margin-bottom:16px">Create List</h2>
                 <div class="form-grid">
                     <div class="form-group"><label>Name *</label><input type="text" id="listName" placeholder="List name"></div>
                     <div class="form-group">
@@ -178,7 +190,7 @@ const Lists = {
 
             App.setContent(`
                 <div class="inline-form">
-                    <h3 style="margin-bottom:16px">Edit List #${l.id}</h3>
+                    <h2 style="margin-bottom:16px">Edit List #${l.id}</h2>
                     <div class="form-grid">
                         <div class="form-group"><label>Name</label><input type="text" id="editListName" value="${App.escapeHtml(l.name || '')}"></div>
                         <div class="form-group">

@@ -12,6 +12,7 @@ from app.services.bounce_list import fetch_filtered_bounces_page, iter_filtered_
 from app.services.hard_bounce_cache import (
     get_all_hard_bounce_counts, get_last_updated,
 )
+from app.services.search_query import build_ilike_search
 
 router = APIRouter()
 
@@ -20,9 +21,9 @@ router = APIRouter()
 MAX_PAGE = 100
 MAX_PER_PAGE = 500
 
-# Export streams pages lazily; cap the walk so a misbehaving API cannot hold
-# the connection open indefinitely. 100 pages x 100 rows = 10k campaigns.
-EXPORT_MAX_PAGES = 100
+# Export streams pages lazily: iter_pages terminates on an empty page or once
+# ListMonk's reported total is covered, so the walk cannot run away — and an
+# explicit page cap here would silently truncate the CSV mid-stream.
 
 # The analytics type is interpolated into the upstream ListMonk URL, so it
 # must never be an arbitrary (e.g. %2F-encoded path-traversal) segment.
@@ -97,9 +98,17 @@ def _engagement_query(campaign_id: int, engagement_type: str,
 @router.get("")
 async def get_campaigns(page: int = Query(1, ge=1, le=MAX_PAGE),
                         per_page: int = Query(50, ge=1, le=MAX_PER_PAGE),
-                        query: str = "", status: str = "",
+                        query: str = "", search: str = "", status: str = "",
                         order_by: str = "created_at", order: str = "DESC"):
-    result = await listmonk.get_campaigns(page, per_page, query, status,
+    # `query` stays a raw-SQL passthrough for power users; the UI's free-text
+    # box sends `search`, which is folded into a literal ILIKE clause so plain
+    # words never reach Postgres unparsed.
+    clauses = [c for c in (
+        query.strip(),
+        build_ilike_search(search, ("campaigns.name", "campaigns.subject")),
+    ) if c]
+    combined = " AND ".join(f"({c})" for c in clauses) if clauses else ""
+    result = await listmonk.get_campaigns(page, per_page, combined, status,
                                            order_by, order)
 
     # Replace bounce counts with hard bounce counts from cache. Only do this
@@ -181,7 +190,7 @@ async def export_all_campaigns():
 
     async def rows():
         async for c in listmonk.iter_pages(
-            listmonk.get_campaigns, per_page=100, max_pages=EXPORT_MAX_PAGES,
+            listmonk.get_campaigns, per_page=100,
         ):
             if hard_counts_ready:
                 c["bounces"] = hard_counts.get(c.get("id"), 0)

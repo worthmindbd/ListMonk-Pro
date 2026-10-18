@@ -12,6 +12,10 @@ const Analytics = {
     replyStats: null,
     campaignReplyStats: null,
     replyByCampaign: {},
+    /** Generation counter for campaign-scoped side stats & chart loads, so a
+        slow response for the previous campaign/window cannot repaint over the
+        newer selection. */
+    _sideSeq: 0,
 
     isColdMode() {
         return App.currentMode === 'cold_email';
@@ -19,14 +23,21 @@ const Analytics = {
 
     async render() {
         this._seq = App.seq();
-        // Set default date range: last 30 days
+        // Deep-linkable state: #/analytics?campaign=6&from=…&to=…
+        const rq = App.routeQuery();
+        if (rq.get('campaign')) this.selectedCampaignId = parseInt(rq.get('campaign'), 10) || 0;
+        if (rq.get('from')) this.fromDate = rq.get('from');
+        if (rq.get('to')) this.toDate = rq.get('to');
+        // Set default date range: last 30 days (LOCAL calendar days — an
+        // toISOString() date is the UTC day, which shifts near local midnight).
         const now = new Date();
         const thirtyDaysAgo = new Date(now);
         thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-        if (!this.fromDate) this.fromDate = thirtyDaysAgo.toISOString().split('T')[0];
-        if (!this.toDate) this.toDate = now.toISOString().split('T')[0];
+        const localDay = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        if (!this.fromDate) this.fromDate = localDay(thirtyDaysAgo);
+        if (!this.toDate) this.toDate = localDay(now);
 
-        App.setContent('<div class="loading-spinner">Loading analytics...</div>');
+        App.setContent('<div class="loading-spinner">Loading analytics…</div>');
 
         // Fetch campaigns, unsubscribe stats, and accurate totals in parallel.
         // Cold email mode additionally pulls prospect reply stats (overall
@@ -67,7 +78,7 @@ const Analytics = {
             this.replyStats = null;
             this.replyByCampaign = {};
             if (App.stale(this._seq)) return;
-            App.setContent(`<div class="empty-state"><h3>Failed to load analytics</h3><p>${App.escapeHtml(err?.message || '')}</p></div>`);
+            App.setContent(`<div class="empty-state"><h2>Failed to load analytics</h2><p>${App.escapeHtml(err?.message || '')}</p></div>`);
         }
     },
 
@@ -145,7 +156,7 @@ const Analytics = {
             <!-- Campaign Comparison Chart -->
             <div class="card" style="margin-bottom:20px">
                 <div class="card-header">
-                    <h3 class="card-title">Campaign Comparison</h3>
+                    <h2 class="card-title">Campaign Comparison</h2>
                     <button class="btn btn-sm" onclick="Analytics.exportAllCampaigns()">Export Summary CSV</button>
                 </div>
                 <div class="chart-container" style="height:300px">
@@ -156,7 +167,7 @@ const Analytics = {
             <!-- Campaign Selector & Date Range -->
             <div class="card" style="margin-bottom:20px">
                 <div class="card-header">
-                    <h3 class="card-title">Campaign Analytics</h3>
+                    <h2 class="card-title">Campaign Analytics</h2>
                 </div>
                 <div class="an-filter-grid">
                     <div class="form-group">
@@ -194,7 +205,7 @@ const Analytics = {
             <div class="charts-grid">
                 <div class="card">
                     <div class="card-header">
-                        <h3 class="card-title">Views Over Time</h3>
+                        <h2 class="card-title">Views Over Time</h2>
                         <button class="btn btn-sm" onclick="Analytics.exportSubscribers('views')">Export Who Opened</button>
                     </div>
                     <div class="chart-container"><canvas id="viewsChart"></canvas></div>
@@ -202,7 +213,7 @@ const Analytics = {
                 ${isCold ? '' : `
                 <div class="card">
                     <div class="card-header">
-                        <h3 class="card-title">Clicks Over Time</h3>
+                        <h2 class="card-title">Clicks Over Time</h2>
                         <button class="btn btn-sm" onclick="Analytics.exportSubscribers('clicks')">Export Who Clicked</button>
                     </div>
                     <div class="chart-container"><canvas id="clicksChart"></canvas></div>
@@ -212,7 +223,7 @@ const Analytics = {
             <div class="charts-grid" style="margin-top:20px">
                 <div class="card">
                     <div class="card-header">
-                        <h3 class="card-title">Bounces Over Time</h3>
+                        <h2 class="card-title">Bounces Over Time</h2>
                         <button class="btn btn-sm" onclick="Analytics.exportSubscribers('bounces')">Export Who Bounced</button>
                     </div>
                     <div class="chart-container"><canvas id="bouncesChart"></canvas></div>
@@ -220,7 +231,7 @@ const Analytics = {
                 ${isCold ? '' : `
                 <div class="card">
                     <div class="card-header">
-                        <h3 class="card-title">Top Links</h3>
+                        <h2 class="card-title">Top Links</h2>
                     </div>
                     <div class="chart-container"><canvas id="linksChart"></canvas></div>
                 </div>`}
@@ -230,12 +241,15 @@ const Analytics = {
             ${isCold ? '' : `
             <div class="card" style="margin-top:20px">
                 <div class="card-header">
-                    <h3 class="card-title">Link Click Details</h3>
+                    <h2 class="card-title">Link Click Details</h2>
                 </div>
                 <div id="linksTable"></div>
             </div>`}
         `;
 
+        App.syncUrl('analytics', {
+            campaign: this.selectedCampaignId, from: this.fromDate, to: this.toDate,
+        });
         App.setContent(html);
 
         // Render comparison chart
@@ -301,6 +315,8 @@ const Analytics = {
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
+                // A lone campaign otherwise stretches into one full-width slab.
+                datasets: { bar: { maxBarThickness: 64 } },
                 plugins: {
                     legend: {
                         labels: {
@@ -339,6 +355,7 @@ const Analytics = {
 
     async onCampaignChange(val) {
         this.selectedCampaignId = parseInt(val);
+        App.bumpSeq();
         await this.loadCampaignSideStats();
         this.renderPage();
     },
@@ -346,6 +363,7 @@ const Analytics = {
     // Per-campaign unsubscribe count plus (cold email only) reply stats, which
     // the campaign stat cards render alongside sent/views/clicks.
     async loadCampaignSideStats() {
+        const seq = ++this._sideSeq;
         if (!this.selectedCampaignId) {
             this.campaignUnsubCount = 0;
             this.campaignReplyStats = null;
@@ -360,6 +378,7 @@ const Analytics = {
         }
 
         const [unsubRes, replyRes] = await Promise.allSettled(requests);
+        if (seq !== this._sideSeq) return;
         this.campaignUnsubCount = unsubRes.status === 'fulfilled' ? (unsubRes.value?.campaign_count || 0) : 0;
         this.campaignReplyStats = replyRes?.status === 'fulfilled' ? (replyRes.value || null) : null;
     },
@@ -367,9 +386,11 @@ const Analytics = {
     onDateChange() {
         this.fromDate = document.getElementById('analyticsFrom').value;
         this.toDate = document.getElementById('analyticsTo').value;
+        App.bumpSeq();
     },
 
     async loadCampaignAnalytics() {
+        const seq = ++this._sideSeq;
         this.fromDate = document.getElementById('analyticsFrom')?.value || this.fromDate;
         this.toDate = document.getElementById('analyticsTo')?.value || this.toDate;
 
@@ -394,6 +415,7 @@ const Analytics = {
             isCold ? null : API.get(`/api/campaigns/analytics/links?${baseParams}`),
         ]);
         if (campId !== this.selectedCampaignId) return;
+        if (seq !== this._sideSeq) return;
 
         const viewsData = viewsRes.status === 'fulfilled' ? (viewsRes.value?.data || []) : [];
         const bouncesData = bouncesRes.status === 'fulfilled' ? (bouncesRes.value?.data || []) : [];
@@ -441,8 +463,11 @@ const Analytics = {
         }
 
         const labels = data.map(d => {
-            const date = new Date(d.timestamp);
-            return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            // ListMonk's day buckets are UTC-midnight instants; parsing them
+            // as such shifts every label one day early west of UTC. Treat the
+            // date part as a LOCAL calendar day instead.
+            const date = new Date(`${String(d.timestamp).slice(0, 10)}T00:00:00`);
+            return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
         });
         const values = data.map(d => d.count || 0);
 
@@ -594,7 +619,7 @@ const Analytics = {
             return;
         }
 
-        let html = '<div class="table-wrapper"><table><thead><tr><th>#</th><th>URL</th><th>Clicks</th></tr></thead><tbody>';
+        let html = '<div class="table-wrapper" tabindex="0" role="region" aria-label="Scrollable data table"><table><thead><tr><th>#</th><th>URL</th><th>Clicks</th></tr></thead><tbody>';
         data.forEach((d, i) => {
             const safeUrl = App.escapeHtml(d.url);
             // --primary-soft, not --accent: the raw indigo is a CTA fill and
@@ -622,7 +647,7 @@ const Analytics = {
         if (!campId) { App.toast('Select a campaign first', 'error'); return; }
 
         const labels = { views: 'who opened', clicks: 'who clicked', bounces: 'who bounced' };
-        App.toast(`Exporting ${labels[type] || type}... this may take a moment`, 'info');
+        App.toast(`Exporting ${labels[type] || type}… this may take a moment`, 'info');
 
         try {
             const params = new URLSearchParams();

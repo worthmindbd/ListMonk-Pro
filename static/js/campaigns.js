@@ -11,9 +11,16 @@ const Campaigns = {
 
     async render() {
         const seq = App.seq();
+        // Deep-linkable state: #/campaigns?page=2&q=welcome&status=running
+        const rq = App.routeQuery();
+        if (rq.get('page')) this.page = Math.max(1, parseInt(rq.get('page'), 10) || 1);
+        if (rq.get('q') !== null) this.query = rq.get('q') || '';
+        if (rq.get('status') !== null) this.statusFilter = rq.get('status') || '';
         try {
             let params = `page=${this.page}&per_page=${this.perPage}`;
-            if (this.query) params += `&query=${encodeURIComponent(this.query)}`;
+            // Free text goes through the backend's safe ILIKE builder
+            // (`search`); `query` is ListMonk's raw-SQL passthrough.
+            if (this.query) params += `&search=${encodeURIComponent(this.query)}`;
             if (this.statusFilter) params += `&status=${this.statusFilter}`;
 
             const result = await API.get(`/api/campaigns?${params}`);
@@ -21,6 +28,10 @@ const Campaigns = {
             const data = result?.data || {};
             const campaigns = data.results || [];
             const total = data.total || 0;
+            // A bulk delete can strand the view past the last page; clamp and
+            // re-fetch instead of painting a false "no campaigns" page.
+            const clamped = App.clampPage(this.page, total, this.perPage);
+            if (clamped !== this.page) { this.page = clamped; return this.render(); }
             this._rows = campaigns;
 
             App.selection.register('campaigns', {
@@ -37,7 +48,7 @@ const Campaigns = {
                 <div class="search-bar">
                     <div class="search-input">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                        <input type="search" id="campSearch" placeholder="Search campaigns..."
+                        <input type="search" id="campSearch" placeholder="Search campaigns…"
                             aria-label="Search campaigns"
                             value="${App.escapeHtml(this.query)}" onkeydown="if(event.key==='Enter')Campaigns.search()">
                     </div>
@@ -58,14 +69,14 @@ const Campaigns = {
                     </div>
                 </div>
                 ${App.selection.bar('campaigns')}
-                <div class="table-wrapper"><table>
+                <div class="table-wrapper" tabindex="0" role="region" aria-label="Scrollable data table"><table>
                     <thead><tr>
                         <th class="col-select">${App.selection.headbox('campaigns', 'Select all campaigns on this page')}</th>
                         <th>ID</th><th>Name</th><th>Subject</th><th>Status</th><th>Lists</th><th>Sent</th><th>Created</th><th class="cell-actions">Actions</th>
                     </tr></thead><tbody>`;
 
             if (!campaigns.length) {
-                html += '<tr><td colspan="9"><div class="empty-state"><h3>No campaigns found</h3></div></td></tr>';
+                html += '<tr><td colspan="9"><div class="empty-state"><h2>No campaigns found</h2></div></td></tr>';
             }
 
             campaigns.forEach(c => {
@@ -102,10 +113,13 @@ const Campaigns = {
             html += '</tbody></table></div>';
             html += App.renderPagination(this.page, total, this.perPage, 'Campaigns.goToPage');
             if (App.stale(seq)) return;
+            App.syncUrl('campaigns', {
+                page: this.page, q: this.query, status: this.statusFilter,
+            });
             App.setContent(html);
         } catch {
             if (App.stale(seq)) return;
-            App.setContent('<div class="empty-state"><h3>Failed to load campaigns</h3></div>');
+            App.setContent('<div class="empty-state"><h2>Failed to load campaigns</h2></div>');
         }
     },
 
@@ -121,16 +135,18 @@ const Campaigns = {
     search() {
         this.query = document.getElementById('campSearch')?.value || '';
         this.page = 1;
+        App.bumpSeq();
         this.render();
     },
 
     filterStatus(status) {
         this.statusFilter = status;
         this.page = 1;
+        App.bumpSeq();
         this.render();
     },
 
-    goToPage(p) { this.page = p; this.render(); },
+    goToPage(p) { this.page = p; App.bumpSeq(); this.render(); },
 
     // ── Subject cell helpers ─────────────────────────────
     // ListMonk stores the subject with Go template placeholders intact, so a
@@ -176,7 +192,7 @@ const Campaigns = {
 
         App.setContent(`
             <div class="inline-form">
-                <h3 style="margin-bottom:16px">Create Campaign</h3>
+                <h2 style="margin-bottom:16px">Create Campaign</h2>
                 <div class="form-grid">
                     <div class="form-group">
                         <label>Name *</label>
@@ -289,7 +305,7 @@ const Campaigns = {
             App.setContent(`
                 <div class="inline-form">
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
-                        <h3>${App.escapeHtml(c.name)}</h3>
+                        <h2>${App.escapeHtml(c.name)}</h2>
                         <div class="action-btns">
                             <button class="btn btn-sm" onclick="Campaigns.viewAnalytics(${c.id})">View Analytics</button>
                             <button class="btn btn-sm" onclick="Campaigns.exportCampaign(${c.id})">Export CSV</button>
@@ -400,7 +416,7 @@ const Campaigns = {
 
             App.setContent(`
                 <div class="inline-form">
-                    <h3 style="margin-bottom:16px">Edit Campaign #${c.id}</h3>
+                    <h2 style="margin-bottom:16px">Edit Campaign #${c.id}</h2>
                     <div class="form-grid">
                         <div class="form-group"><label>Name</label><input type="text" id="editCampName" value="${App.escapeHtml(c.name || '')}"></div>
                         <div class="form-group"><label>Subject</label><input type="text" id="editCampSubject" value="${App.escapeHtml(c.subject || '')}"></div>

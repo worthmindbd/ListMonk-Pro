@@ -21,7 +21,7 @@ const Settings = {
             this.unblockStatus = unblock;
         } catch {
             if (App.stale(this._seq)) return;
-            App.setContent('<div class="empty-state"><h3>Failed to load settings</h3></div>');
+            App.setContent('<div class="empty-state"><h2>Failed to load settings</h2></div>');
             return;
         }
 
@@ -146,7 +146,7 @@ const Settings = {
         return `
             <div class="card" style="margin-bottom:20px">
                 <div class="card-header">
-                    <h3 class="card-title">Campaign Send Window</h3>
+                    <h2 class="card-title">Campaign Send Window</h2>
                     <div class="action-btns">
                         ${statusHtml}
                         <button class="btn btn-sm" onclick="Settings.runSchedulerNow()">Check Now</button>
@@ -170,12 +170,13 @@ const Settings = {
             </div>
 
             <div class="card">
-                <div class="card-header"><h3 class="card-title">Schedule Configuration</h3></div>
+                <div class="card-header"><h2 class="card-title">Schedule Configuration</h2></div>
 
                 <div class="form-group" style="margin-bottom:20px">
-                    <label class="checkbox-label ${enabled ? 'toggle-on' : ''}" style="font-size:1rem;padding:12px 18px;border-width:2px">
+                    <label class="checkbox-label ${enabled ? 'toggle-on' : ''}" id="schedEnabledBanner" style="font-size:1rem;padding:12px 18px;border-width:2px;display:flex;width:100%">
                         <input type="checkbox" id="schedEnabled" ${enabled ? 'checked' : ''} onchange="Settings.toggleScheduler(this.checked)">
-                        <span style="font-weight:600">${enabled ? 'Scheduler is ON' : 'Scheduler is OFF'}</span>
+                        <span style="font-weight:600" id="schedEnabledLabel">${enabled ? 'Scheduler is ON' : 'Scheduler is OFF'}</span>
+                        <span class="banner-switch" aria-hidden="true"></span>
                     </label>
                     <p style="font-size:0.85rem;color:var(--text-muted);margin-top:8px">
                         When enabled, running campaigns will auto-pause outside the send window and auto-resume when the window opens.
@@ -231,7 +232,7 @@ const Settings = {
             </div>
 
             <div class="card" style="margin-top:20px">
-                <div class="card-header"><h3 class="card-title">How it works</h3></div>
+                <div class="card-header"><h2 class="card-title">How it works</h2></div>
                 <div style="font-size:0.85rem;color:var(--text-secondary);line-height:1.8">
                     <p><strong>Every 60 seconds</strong>, the scheduler checks:</p>
                     <ul style="padding-left:20px;margin:8px 0">
@@ -260,7 +261,7 @@ const Settings = {
         return `
             <div class="card" style="margin-bottom:20px">
                 <div class="card-header">
-                    <h3 class="card-title">Auto-Unblock Status</h3>
+                    <h2 class="card-title">Auto-Unblock Status</h2>
                     <div class="action-btns">${statusBadge}</div>
                 </div>
                 <div style="display:flex;gap:20px;align-items:center;flex-wrap:wrap">
@@ -276,7 +277,7 @@ const Settings = {
             </div>
 
             <div class="card" style="margin-bottom:20px">
-                <div class="card-header"><h3 class="card-title">Manual Unblock</h3></div>
+                <div class="card-header"><h2 class="card-title">Manual Unblock</h2></div>
                 <p style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:16px">
                     Click the button below to scan for subscribers who opened or clicked campaigns but got blocklisted due to bounces.
                     They will be re-enabled and their bounce records will be deleted.
@@ -284,11 +285,11 @@ const Settings = {
                 <button class="btn btn-primary" id="runUnblockBtn" onclick="Settings.runUnblock()">
                     Run Auto-Unblock Now
                 </button>
-                <div id="unblockResult" style="margin-top:16px"></div>
+                <div id="unblockResult" role="status" aria-live="polite" style="margin-top:16px"></div>
             </div>
 
             <div class="card">
-                <div class="card-header"><h3 class="card-title">How it works</h3></div>
+                <div class="card-header"><h2 class="card-title">How it works</h2></div>
                 <div style="font-size:0.85rem;color:var(--text-secondary);line-height:1.8">
                     <p><strong>Every ${interval} hours</strong>, the system automatically:</p>
                     <ul style="padding-left:20px;margin:8px 0">
@@ -322,11 +323,25 @@ const Settings = {
         try {
             await API.put('/api/scheduler', { enabled: checked });
             App.toast(checked ? 'Scheduler enabled' : 'Scheduler disabled', 'success');
-            this.schedule = await API.get('/api/scheduler');
-            this.renderTab();
+            this.schedule = { ...(this.schedule || {}), enabled: checked };
+            // Refresh only the banner: a full tab re-render from server state
+            // used to silently discard unsaved timezone/hours/days edits.
+            this._syncSchedulerBanner();
         } catch {
+            // Put the checkbox back where the server says it is.
+            const box = document.getElementById('schedEnabled');
+            if (box) box.checked = !checked;
             // API.request already surfaced the server message.
         }
+    },
+
+    /** Update the ON/OFF banner (text + switch visual) in place. */
+    _syncSchedulerBanner() {
+        const enabled = !!this.schedule?.enabled;
+        const label = document.getElementById('schedEnabledLabel');
+        const banner = document.getElementById('schedEnabledBanner');
+        if (label) label.textContent = enabled ? 'Scheduler is ON' : 'Scheduler is OFF';
+        if (banner) banner.classList.toggle('toggle-on', enabled);
     },
 
     async saveSchedule() {
@@ -368,10 +383,14 @@ const Settings = {
 
     // ── Auto-Unblock Actions ─────────────────────────────
     async runUnblock() {
+        // Mutates real data (re-enables subscribers, deletes bounce records):
+        // needs the same confirmation as every other destructive action.
+        if (!await App.confirm('Run Auto-Unblock',
+                'This re-enables blocklisted subscribers who later engaged (opened or clicked) and deletes their false bounce records. Continue?')) return;
         const btn = document.getElementById('runUnblockBtn');
         const resultEl = document.getElementById('unblockResult');
         btn.disabled = true;
-        btn.textContent = 'Running...';
+        btn.textContent = 'Running…';
         resultEl.innerHTML = '';
 
         try {
@@ -408,7 +427,9 @@ const Settings = {
             return;
         }
         try {
-            this.schedule = await API.get('/api/scheduler');
+            // silent: failures render into #unblockResult below; a toast on
+            // every 30s poll during an outage would stack up pointlessly.
+            this.schedule = await API.get('/api/scheduler', true);
             const el = document.getElementById('schedulerCurrentTime');
             if (el) el.textContent = this.schedule.current_time || '-';
         } catch {}

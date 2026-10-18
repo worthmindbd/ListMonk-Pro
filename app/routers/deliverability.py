@@ -20,10 +20,20 @@ router = APIRouter()
 async def deliverability_checklist():
     """Run deliverability checks against current Listmonk settings."""
     try:
-        return await get_deliverability_checklist(listmonk)
+        result = await get_deliverability_checklist(listmonk)
     except Exception as e:
         logger.error(f"Deliverability check error: {e}", exc_info=True)
         raise HTTPException(status_code=502, detail=f"Deliverability check failed: {e}")
+
+    # The service reports an upstream outage in-band ("overall_status":
+    # "error"); rule 7 still demands a failure status code so monitoring and
+    # uptime probes see the outage instead of a 200.
+    if result.get("overall_status") == "error":
+        raise HTTPException(
+            status_code=502,
+            detail=f"Deliverability check failed: {result.get('error', 'ListMonk unreachable')}",
+        )
+    return result
 
 
 @router.post("/apply-preset")

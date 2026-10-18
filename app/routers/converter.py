@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse
 from typing import Optional, Tuple
 from app.services.csv_converter import detect_columns, convert_csv, preview_conversion
 from app.services.listmonk_client import listmonk
+import asyncio
 import json
 import io
 
@@ -143,7 +144,9 @@ def _parse_import_options(
 async def detect_csv_columns(file: UploadFile = File(...)):
     """Upload a CSV and detect its columns + preview rows."""
     content = await _read_upload(file)
-    result = detect_columns(content)
+    # Detection decodes the whole upload several times; keep that off the
+    # event loop so a big file cannot freeze every other request/worker.
+    result = await asyncio.to_thread(detect_columns, content)
     return result
 
 
@@ -160,7 +163,9 @@ async def preview_csv_file(
     content = await _read_upload(file)
     attrs, auto_attributes = _parse_mapping(attribute_mode, attribute_columns)
 
-    result = preview_conversion(
+    # Multi-pass CSV conversion is CPU/decode-bound; run it in a worker thread.
+    result = await asyncio.to_thread(
+        preview_conversion,
         content,
         email_column,
         name_column,
@@ -185,7 +190,11 @@ async def convert_csv_file(
     content = await _read_upload(file)
     attrs, auto_attributes = _parse_mapping(attribute_mode, attribute_columns)
 
-    result = convert_csv(content, email_column, name_column, attrs, auto_attributes=auto_attributes)
+    # Multi-pass CSV conversion is CPU/decode-bound; run it in a worker thread.
+    result = await asyncio.to_thread(
+        convert_csv, content, email_column, name_column, attrs,
+        auto_attributes=auto_attributes,
+    )
 
     if "error" in result.get("stats", {}):
         raise HTTPException(status_code=400, detail=result["stats"]["error"])
@@ -224,7 +233,11 @@ async def convert_and_import(
     content = await _read_upload(file)
     attrs, auto_attributes = _parse_mapping(attribute_mode, attribute_columns)
 
-    result = convert_csv(content, email_column, name_column, attrs, auto_attributes=auto_attributes)
+    # Multi-pass CSV conversion is CPU/decode-bound; run it in a worker thread.
+    result = await asyncio.to_thread(
+        convert_csv, content, email_column, name_column, attrs,
+        auto_attributes=auto_attributes,
+    )
 
     if "error" in result.get("stats", {}):
         raise HTTPException(status_code=400, detail=result["stats"]["error"])

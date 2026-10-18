@@ -4,6 +4,7 @@ from typing import Optional
 from app.services.listmonk_client import listmonk
 from app.services.export_service import aiter_dicts_to_csv
 from app.services.bulk_ops import parse_ids
+from app.services.search_query import build_ilike_search
 
 router = APIRouter()
 
@@ -11,9 +12,9 @@ router = APIRouter()
 MAX_PAGE = 100
 MAX_PER_PAGE = 200
 
-# Export streams pages lazily; cap the walk so a misbehaving API cannot hold
-# the connection open indefinitely. 100 pages x 100 rows = 10k subscribers.
-EXPORT_MAX_PAGES = 100
+# Export streams pages lazily: iter_pages terminates on an empty page or once
+# ListMonk's reported total is covered, so the walk cannot run away — and an
+# explicit page cap here would silently truncate the CSV mid-stream.
 
 # ListMonk has no `status` filter parameter on /api/subscribers, but its query
 # language does — this is the same clause auto_unblock uses.
@@ -44,18 +45,7 @@ def _search_to_query(search: str) -> str:
     wildcards plus backslashes are stripped so the value can only ever be a
     literal substring.
     """
-    term = (search or "").strip()
-    if not term:
-        return ""
-    for ch in ("%", "_", "\\"):
-        term = term.replace(ch, "")
-    if not term:
-        return ""
-    term = term.replace("'", "''")
-    return (
-        f"(subscribers.email ILIKE '%{term}%' "
-        f"OR subscribers.name ILIKE '%{term}%')"
-    )
+    return build_ilike_search(search, ("subscribers.email", "subscribers.name"))
 
 
 def _compose_query(query: str, search: str, status: str) -> str:
@@ -93,7 +83,6 @@ async def export_all_subscribers(query: str = "", search: str = "",
     async def rows():
         async for sub in listmonk.iter_pages(
             listmonk.get_subscribers, per_page=100,
-            max_pages=EXPORT_MAX_PAGES,
             query=query, list_id=list_id,
         ):
             yield sub
