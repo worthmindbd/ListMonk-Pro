@@ -657,6 +657,30 @@ def test_reply_stats_exclude_auto_replies_from_rate(client, tmp_path, monkeypatc
     assert data["reply_rate"] == 0.3           # 3/1000, not 5/1000
 
 
+def test_reply_stats_campaign_options_for_filter(client, tmp_path, monkeypatch):
+    """The Replies page campaign dropdown is populated from the stats response:
+    only campaigns that have replies, sorted by count descending, with names."""
+    _reply_log(tmp_path, monkeypatch, [
+        {"id": "rep_1", "sentiment": "positive", "campaign_id": 7, "campaign_name": "Mixed Leads 12K"},
+        {"id": "rep_2", "sentiment": "neutral", "campaign_id": 7, "campaign_name": "Mixed Leads 12K"},
+        {"id": "rep_3", "sentiment": "positive", "campaign_id": 9, "campaign_name": "1st Campaign"},
+        {"id": "rep_4", "sentiment": "auto_reply"},  # no campaign — excluded
+    ])
+
+    with patch(
+        "app.routers.campaigns.get_campaigns_summary",
+        new=AsyncMock(return_value={"sent": 1000}),
+    ):
+        resp = client.get("/api/replies/stats")
+
+    data = resp.json()
+    opts = data["campaign_options"]
+    assert len(opts) == 2
+    # Sorted by count descending: campaign 7 has 2 replies, campaign 9 has 1.
+    assert opts[0] == {"id": 7, "name": "Mixed Leads 12K", "count": 2}
+    assert opts[1] == {"id": 9, "name": "1st Campaign", "count": 1}
+
+
 # ── 14. Auto-unblock runs concurrently and preserves list memberships ────────
 
 @pytest.mark.asyncio

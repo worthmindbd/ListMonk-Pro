@@ -128,11 +128,14 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
     # excluded: they never receive campaign attribution (the scan skips
     # matching for them), so they cannot appear here.
     by_campaign: dict[str, int] = {}
+    campaign_names: dict[str, str] = {}
     for r in all_records:
         cid = r.get("campaign_id")
         if cid:
             key = str(cid)
             by_campaign[key] = by_campaign.get(key, 0) + 1
+            if key not in campaign_names and r.get("campaign_name"):
+                campaign_names[key] = r["campaign_name"]
 
     total_sent = await _reply_rate_sent_total(campaign_id)
     # Automated responses (OOO, ticket confirmations, generic auto-replies)
@@ -140,6 +143,13 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
     # so a flood of Zendesk acknowledgements doesn't inflate the metric.
     human_replies = total - auto_reply
     reply_rate = round((human_replies / total_sent * 100), 2) if total_sent > 0 else 0.0
+
+    # Campaign filter options for the Replies page dropdown: only campaigns
+    # that actually have replies, with their stored names.
+    campaign_options = [
+        {"id": int(k), "name": campaign_names.get(k, f"Campaign #{k}"), "count": v}
+        for k, v in sorted(by_campaign.items(), key=lambda x: -x[1])
+    ]
 
     return {
         "campaign_id": campaign_id,
@@ -153,6 +163,7 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
         "reply_rate": reply_rate,
         "positive_rate": round((positive / total_sent * 100), 2) if total_sent > 0 else 0.0,
         "by_campaign": by_campaign,
+        "campaign_options": campaign_options,
     }
 
 

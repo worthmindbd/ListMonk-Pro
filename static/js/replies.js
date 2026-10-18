@@ -7,6 +7,7 @@ const Replies = {
     perPage: 20,
     sentiment: '',
     status: '',
+    campaignId: 0,
     query: '',
     stats: null,
     repliesData: null,
@@ -34,9 +35,11 @@ const Replies = {
 
     async loadStats() {
         try {
-            this.stats = await API.get('/api/replies/stats');
+            const params = new URLSearchParams();
+            if (this.campaignId) params.append('campaign_id', this.campaignId);
+            this.stats = await API.get(`/api/replies/stats?${params.toString()}`);
         } catch (e) {
-            this.stats = { total_replies: 0, positive: 0, auto_reply: 0, negative: 0, reply_rate: 0 };
+            this.stats = { total_replies: 0, positive: 0, auto_reply: 0, negative: 0, reply_rate: 0, campaign_options: [] };
         }
     },
 
@@ -47,6 +50,7 @@ const Replies = {
         });
         if (this.sentiment) params.append('sentiment', this.sentiment);
         if (this.status) params.append('status', this.status);
+        if (this.campaignId) params.append('campaign_id', this.campaignId);
         if (this.query) params.append('q', this.query);
 
         this.repliesData = await API.get(`/api/replies?${params.toString()}`);
@@ -131,6 +135,11 @@ const Replies = {
                             <option value="archived" ${this.status === 'archived' ? 'selected' : ''}>Archived</option>
                         </select>
 
+                        <select class="form-control filter-select" id="campaignFilter" aria-label="Filter replies by campaign" onchange="Replies.filterCampaign(Number(this.value))">
+                            <option value="0" ${!this.campaignId ? 'selected' : ''}>All Campaigns</option>
+                            ${(s.campaign_options || []).map(c => `<option value="${c.id}" ${this.campaignId === c.id ? 'selected' : ''}>${App.escapeHtml(c.name)} (${c.count})</option>`).join('')}
+                        </select>
+
                         <button class="btn btn-primary scan-btn" id="btnScanInbox" onclick="Replies.scanInbox()" ${this.isScanning ? 'disabled' : ''}>
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                             <span>${this.isScanning ? 'Scanning Mailbox...' : 'Scan Mailbox Now'}</span>
@@ -154,7 +163,7 @@ const Replies = {
                     </div>
                     <h3>No Prospect Replies Found</h3>
                     <p style="color:var(--text-secondary);max-width:500px;margin:0 auto 16px auto;">
-                        ${this.query || this.sentiment || this.status ? 'No replies match your current filters. Try resetting the filters.' : 'Your prospect replies will appear here once leads respond to your cold outreach. Click "Scan Mailbox Now" to check IMAP for new incoming messages.'}
+                        ${this.query || this.sentiment || this.status || this.campaignId ? 'No replies match your current filters. Try resetting the filters.' : 'Your prospect replies will appear here once leads respond to your cold outreach. Click "Scan Mailbox Now" to check IMAP for new incoming messages.'}
                     </p>
                     <button class="btn btn-primary" onclick="Replies.scanInbox()">Scan Mailbox Now</button>
                 </div>
@@ -471,6 +480,12 @@ ${App.escapeHtml(reply.full_body || reply.body_preview || '')}
 
     filterStatus(val) {
         this.status = val;
+        this.page = 1;
+        this.render();
+    },
+
+    filterCampaign(val) {
+        this.campaignId = val || 0;
         this.page = 1;
         this.render();
     },
