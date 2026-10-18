@@ -147,6 +147,70 @@ def test_classify_human_replies_unchanged_by_bounce_rules():
     assert classify_sentiment("Out of office", "I am out of the office until Monday") == "auto_reply"
 
 
+def test_classify_ticket_system_auto_replies():
+    """Zendesk / Freshdesk ticket confirmations and generic auto-replies are
+    automated responses, not genuine prospect engagement — they must not be
+    classified as neutral or negative (which would give them campaign
+    attribution and inflate the reply rate)."""
+    # Zendesk ticket confirmation
+    assert classify_sentiment(
+        "Request received: Question About FOREVER ? - Ticket number 514499",
+        "Thank you for contacting us! Your request (514499) has been received "
+        "and is being reviewed by the FOREVER® Client Care Team. A team member "
+        "will be in touch within 24-48 hours.",
+        "support@forever.com",
+    ) == "auto_reply"
+
+    # Freshdesk ticket confirmation
+    assert classify_sentiment(
+        "RE: Question About Wildwood Management Group? - [#WNT122339]",
+        "Your message has been received, and will be processed soon.",
+        "info@wildwood-tx.com",
+    ) == "auto_reply"
+
+    # Generic ticket created notification
+    assert classify_sentiment(
+        "RAR Membership Ticket created: Question About Richmond #MEM00238485",
+        "***Membership Ticket created #MEM00238485 ***",
+        "membership@rarealtors.com",
+    ) == "auto_reply"
+
+    # Generic "we received your message" auto-reply
+    assert classify_sentiment(
+        "Re: Framediscreet",
+        "Hello!\n\nWe have received your message and are working quickly to respond.",
+        "info@framediscreet.com",
+    ) == "auto_reply"
+
+
+def test_classify_non_english_ooo():
+    """Common non-English out-of-office phrases must be caught so they don't
+    fall through to neutral and receive campaign attribution."""
+    assert classify_sentiment(
+        "Fuera de oficina",
+        "Hola\nGracias por tu mensaje.\nestaré de viaje con conectividad reducida.",
+        "eric@example.com",
+    ) == "auto_reply"
+    assert classify_sentiment(
+        "Abwesenheitsnotiz",
+        "Ich bin bis Montag außer Haus.",
+        "hans@example.de",
+    ) == "auto_reply"
+
+
+def test_classify_genuine_replies_not_caught_by_auto_patterns():
+    """The expanded auto-reply patterns must not swallow real human replies."""
+    assert classify_sentiment("Re: Hi", "hi", "md.kawser.drive2@gmail.com") == "neutral"
+    assert classify_sentiment("Re: Proposal", "Yes please, happy to connect") == "positive"
+    assert classify_sentiment("Re: Offer", "Not interested, unsubscribe") == "negative"
+    assert classify_sentiment("Re: Hello", "Who's this?") == "neutral"
+    # A reply that mentions "ticket" in a human context is still a human reply
+    assert classify_sentiment(
+        "Re: Support", "I opened a ticket last week but haven't heard back",
+        "prospect@example.com",
+    ) == "neutral"
+
+
 @pytest.mark.asyncio
 async def test_reclassify_purges_stored_bounce_records(tmp_path, monkeypatch):
     """Records the old classifier stored from DSNs (unknown-means-positive

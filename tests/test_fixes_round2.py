@@ -580,7 +580,10 @@ def test_reply_stats_scoped_to_campaign(client, tmp_path, monkeypatch):
     assert data["auto_reply"] == 1
     assert data["negative"] == 0
     assert data["total_sent"] == 200
-    assert data["reply_rate"] == 1.0
+    # Auto-replies are excluded from the reply rate: only the 1 human reply
+    # counts, not the automated response.
+    assert data["human_replies"] == 1
+    assert data["reply_rate"] == 0.5
     # The breakdown always covers every campaign, not just the scoped one.
     assert data["by_campaign"] == {"7": 2, "9": 1}
     get_campaign.assert_awaited_once_with(7)
@@ -628,6 +631,30 @@ def test_reply_stats_hide_leftover_bounce_records(client, tmp_path, monkeypatch)
     assert data["total_sent"] == 200
     assert data["reply_rate"] == 0.5           # 1/200, not 2/200
     assert data["by_campaign"] == {"7": 1, "9": 1}  # bounce not counted
+
+
+def test_reply_stats_exclude_auto_replies_from_rate(client, tmp_path, monkeypatch):
+    """Automated responses (OOO, ticket confirmations) must not inflate the
+    reply rate — only genuine human replies count toward the metric."""
+    _reply_log(tmp_path, monkeypatch, [
+        {"id": "rep_1", "sentiment": "positive"},
+        {"id": "rep_2", "sentiment": "auto_reply"},
+        {"id": "rep_3", "sentiment": "auto_reply"},
+        {"id": "rep_4", "sentiment": "neutral"},
+        {"id": "rep_5", "sentiment": "negative"},
+    ])
+
+    with patch(
+        "app.routers.campaigns.get_campaigns_summary",
+        new=AsyncMock(return_value={"sent": 1000}),
+    ):
+        resp = client.get("/api/replies/stats")
+
+    data = resp.json()
+    assert data["total_replies"] == 5
+    assert data["auto_reply"] == 2
+    assert data["human_replies"] == 3          # 5 - 2 automated
+    assert data["reply_rate"] == 0.3           # 3/1000, not 5/1000
 
 
 # ── 14. Auto-unblock runs concurrently and preserves list memberships ────────

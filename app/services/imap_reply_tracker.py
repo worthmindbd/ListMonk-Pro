@@ -45,14 +45,39 @@ CAMPAIGN_PAGE_SIZE = 100
 # "Scan Mailbox" click cannot process (and log) the same message twice.
 _reply_scan_lock = asyncio.Lock()
 
-# Sentiment detection patterns
+# Sentiment detection patterns — automated / non-human responses.
+# Covers out-of-office notices, ticket-system auto-responses (Zendesk,
+# Freshdesk, etc.), generic "we received your message" auto-replies, and
+# common non-English OOO phrases. These are never genuine prospect replies
+# and must not inflate the reply rate or receive campaign attribution.
 _OOO_PATTERNS = [
+    # ── English OOO / away ──────────────────────────────────────────────
     re.compile(r"out\s+of\s+(the\s+)?office", re.IGNORECASE),
     re.compile(r"auto(matic)?\s*(-|\s)?\s*reply", re.IGNORECASE),
     re.compile(r"away\s+from\s+(my\s+)?desk", re.IGNORECASE),
     re.compile(r"on\s+(annual\s+)?leave", re.IGNORECASE),
     re.compile(r"on\s+vacation", re.IGNORECASE),
     re.compile(r"mailbox\s+is\s+full", re.IGNORECASE),
+    # ── Non-English OOO (common cold-outreach locales) ──────────────────
+    re.compile(r"fuera\s+de\s+oficina", re.IGNORECASE),          # Spanish
+    re.compile(r"aus\s+dem\s+büro|außer\s+haus", re.IGNORECASE),  # German
+    re.compile(r"absent\s+du\s+bureau", re.IGNORECASE),           # French
+    re.compile(r"fora\s+do\s+escritório", re.IGNORECASE),         # Portuguese
+    re.compile(r"不在办公室|休假中", re.IGNORECASE),                # Chinese
+    # ── Ticket-system auto-responses ────────────────────────────────────
+    re.compile(r"request\s+(has\s+been\s+)?received", re.IGNORECASE),
+    re.compile(r"ticket\s+(created|number|#[A-Z0-9])", re.IGNORECASE),
+    re.compile(r"your\s+(message|request|inquiry)\s+has\s+been\s+received", re.IGNORECASE),
+    re.compile(r"being\s+reviewed\s+by\s+(the\s+)?.+\s*(team|support|care)", re.IGNORECASE),
+    re.compile(r"we'?ll\s+(get\s+back\s+to\s+you|be\s+in\s+touch)\s+(within|as\s+soon)", re.IGNORECASE),
+    re.compile(r"a\s+team\s+member\s+will\s+be\s+in\s+touch", re.IGNORECASE),
+    re.compile(r"zendesk|freshdesk|help\s+desk\s+ticket", re.IGNORECASE),
+    # ── Generic auto-reply / acknowledgement ────────────────────────────
+    re.compile(r"we\s+have\s+received\s+your\s+message", re.IGNORECASE),
+    re.compile(r"working\s+quickly\s+to\s+respond", re.IGNORECASE),
+    re.compile(r"this\s+is\s+an\s+automated\s+(response|message|reply)", re.IGNORECASE),
+    re.compile(r"do\s+not\s+reply\s+to\s+this\s+(email|message)", re.IGNORECASE),
+    re.compile(r"this\s+email\s+was\s+sent\s+from\s+a\s+notification", re.IGNORECASE),
 ]
 
 # Bounce / DSN detection, checked before every sentiment keyword. Mailer-daemon
@@ -797,10 +822,16 @@ async def _scan_and_track_replies_impl(
                 new_msg_ids.append(state_id)
             continue
 
-        # Match campaign (history was fetched once for the whole scan)
-        camp_id, camp_name = await match_campaign_for_reply(
-            listmonk, subject, from_email, reply_date, campaigns=campaigns,
-        )
+        # Match campaign (history was fetched once for the whole scan).
+        # Automated responses (OOO, ticket confirmations, generic auto-replies)
+        # are never genuine prospect engagement — skip attribution entirely so
+        # they don't receive a campaign tag or inflate per-campaign charts.
+        if sentiment == "auto_reply":
+            camp_id, camp_name = None, None
+        else:
+            camp_id, camp_name = await match_campaign_for_reply(
+                listmonk, subject, from_email, reply_date, campaigns=campaigns,
+            )
 
         # Note: Replies without campaign attribution are still stored with
         # campaign_id=null. While ideally we'd skip non-campaign emails, doing

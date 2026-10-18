@@ -672,3 +672,41 @@ async def test_scan_leaves_an_unattributed_reply_unlabelled(tmp_path, monkeypatc
     assert record["sentiment"] == "neutral"     # "hi" carries no interest signal
     assert record["status"] == "unread"         # so it is not a lead
     assert record["status_source"] == "auto"
+
+
+# ── Automated responses must not receive campaign attribution ────────────────
+
+_TICKET_AUTO_REPLY_RAW = (
+    b"From: FOREVER Support <support@forever.com>\r\n"
+    b"To: me@example.com\r\n"
+    b"Subject: Request received: Question About FOREVER ? - Ticket 514499\r\n"
+    b"Message-ID: <ticket-auto@example.com>\r\n"
+    b"Date: Wed, 14 Oct 2026 16:56:27 +0000\r\n"
+    b"Content-Type: text/plain; charset=\"utf-8\"\r\n"
+    b"\r\n"
+    b"Hi Kawsar,\r\n"
+    b"\r\n"
+    b"Thank you for contacting us! Your request (514499) has been received\r\n"
+    b"and is being reviewed by the FOREVER Client Care Team. A team member\r\n"
+    b"will be in touch within 24-48 hours.\r\n"
+)
+
+
+async def test_scan_skips_campaign_matching_for_auto_replies(tmp_path, monkeypatch):
+    """A ticket-system auto-response from a list member must not be attributed
+    to the campaign that targeted that list — it is not genuine prospect
+    engagement and would inflate per-campaign charts and reply rate."""
+    stats, _, rl = await _run_inbox_scan(
+        tmp_path, monkeypatch, [_TICKET_AUTO_REPLY_RAW],
+        # The sender IS on list 1 (the campaign's target list), so the
+        # list-aware fallback *would* match — but auto-replies skip matching.
+        campaign_lists=[{"id": 1}],
+    )
+
+    assert stats["new_replies"] == 1
+    assert stats["auto_reply"] == 1
+    record = rl.load_log()[0]
+    assert record["sentiment"] == "auto_reply"
+    assert record["campaign_id"] is None       # no attribution despite list match
+    assert record["campaign_name"] is None
+    assert record["status"] == "unread"        # never promoted to lead

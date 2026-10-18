@@ -77,7 +77,7 @@ const Replies = {
                 <div class="stat-card accent">
                     <div class="stat-label">Total Replies</div>
                     <div class="stat-value">${App.formatNumber(s.total_replies || 0)}</div>
-                    <div style="font-size:0.82rem;color:var(--text-muted)">Overall Reply Rate: <strong style="color:var(--accent)">${s.reply_rate || 0}%</strong></div>
+                    <div style="font-size:0.82rem;color:var(--text-muted)">Human Reply Rate: <strong style="color:var(--accent)">${s.reply_rate || 0}%</strong> <span style="opacity:0.7">(excl. ${App.formatNumber(s.auto_reply || 0)} automated)</span></div>
                 </div>
                 <div class="stat-card success">
                     <div class="stat-label"><span class="badge-dot badge-dot-positive"></span> Positive / Hot Leads</div>
@@ -90,9 +90,9 @@ const Replies = {
                     <div style="font-size:0.82rem;color:var(--text-muted)">Ambiguous replies, no clear intent</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label"><span class="badge-dot badge-dot-auto-reply"></span> Out of Office / Auto-Reply</div>
+                    <div class="stat-label"><span class="badge-dot badge-dot-auto-reply"></span> Automated / Auto-Reply</div>
                     <div class="stat-value">${App.formatNumber(s.auto_reply || 0)}</div>
-                    <div style="font-size:0.82rem;color:var(--text-muted)">Automated OOO notices</div>
+                    <div style="font-size:0.82rem;color:var(--text-muted)">OOO, ticket confirmations, auto-responses</div>
                 </div>
                 <div class="stat-card danger">
                     <div class="stat-label"><span class="badge-dot badge-dot-negative"></span> Not Interested</div>
@@ -119,7 +119,7 @@ const Replies = {
                             <option value="" ${!this.sentiment ? 'selected' : ''}>All Sentiments</option>
                             <option value="positive" ${this.sentiment === 'positive' ? 'selected' : ''}>Positive / Interested</option>
                             <option value="neutral" ${this.sentiment === 'neutral' ? 'selected' : ''}>Neutral / No Signal</option>
-                            <option value="auto_reply" ${this.sentiment === 'auto_reply' ? 'selected' : ''}>Out of Office</option>
+                            <option value="auto_reply" ${this.sentiment === 'auto_reply' ? 'selected' : ''}>Automated / Auto-Reply</option>
                             <option value="negative" ${this.sentiment === 'negative' ? 'selected' : ''}>Not Interested</option>
                         </select>
 
@@ -179,7 +179,7 @@ const Replies = {
         const sentimentConfig = {
             'positive': { label: 'Interested / Lead', colorClass: 'badge-positive', dotClass: 'badge-dot-positive' },
             'neutral': { label: 'Neutral / No Signal', colorClass: 'badge-neutral', dotClass: 'badge-dot-neutral' },
-            'auto_reply': { label: 'Out of Office', colorClass: 'badge-auto-reply', dotClass: 'badge-dot-auto-reply' },
+            'auto_reply': { label: 'Automated', colorClass: 'badge-auto-reply', dotClass: 'badge-dot-auto-reply' },
             'negative': { label: 'Not Interested', colorClass: 'badge-negative', dotClass: 'badge-dot-negative' },
         };
 

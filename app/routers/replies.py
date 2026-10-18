@@ -124,7 +124,9 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
     neutral = sum(1 for r in records if r.get("sentiment") == "neutral")
 
     # Reply counts per campaign (always from the full log, even for a scoped
-    # call) power the Analytics campaign comparison chart.
+    # call) power the Analytics campaign comparison chart. Auto-replies are
+    # excluded: they never receive campaign attribution (the scan skips
+    # matching for them), so they cannot appear here.
     by_campaign: dict[str, int] = {}
     for r in all_records:
         cid = r.get("campaign_id")
@@ -133,11 +135,16 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
             by_campaign[key] = by_campaign.get(key, 0) + 1
 
     total_sent = await _reply_rate_sent_total(campaign_id)
-    reply_rate = round((total / total_sent * 100), 2) if total_sent > 0 else 0.0
+    # Automated responses (OOO, ticket confirmations, generic auto-replies)
+    # are not genuine prospect engagement — exclude them from the reply rate
+    # so a flood of Zendesk acknowledgements doesn't inflate the metric.
+    human_replies = total - auto_reply
+    reply_rate = round((human_replies / total_sent * 100), 2) if total_sent > 0 else 0.0
 
     return {
         "campaign_id": campaign_id,
         "total_replies": total,
+        "human_replies": human_replies,
         "positive": positive,
         "auto_reply": auto_reply,
         "negative": negative,
