@@ -75,12 +75,18 @@ async def append_log(new_records: list[dict]) -> None:
 
 
 def update_reply_status(reply_id: str, new_status: str) -> bool:
-    """Update status of a single reply record."""
+    """Update status of a single reply record.
+
+    The change is recorded as ``status_source: "manual"`` so a later
+    sentiment re-classification can undo its own automatic ``lead``
+    promotion without overwriting a choice a human made.
+    """
     records = load_log()
     updated = False
     for r in records:
         if str(r.get("id")) == str(reply_id):
             r["status"] = new_status
+            r["status_source"] = "manual"
             updated = True
             break
     if updated:
@@ -103,6 +109,9 @@ def update_reply_statuses(reply_ids, new_status: str) -> int:
         if str(r.get("id")) in wanted:
             if r.get("status") != new_status:
                 r["status"] = new_status
+                # Same provenance marker as the single-record path: a bulk
+                # status choice is a human decision too.
+                r["status_source"] = "manual"
                 updated += 1
     if updated:
         save_log(records)

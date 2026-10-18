@@ -185,6 +185,17 @@ const Replies = {
 
         const sent = sentimentConfig[r.sentiment] || { label: r.sentiment || 'Reply', colorClass: 'badge-default', dotClass: 'badge-dot-auto-reply' };
         const initial = (r.from_name || r.from_email || '?').charAt(0).toUpperCase();
+        // Attribution is defined by campaign_id, never by campaign_name alone:
+        // records written by older versions carry a fabricated
+        // "Cold Outreach Campaign" label for a reply that matched nothing, and
+        // a test mail must not look like it belonged to a campaign.
+        const campLabel = r.campaign_id
+            ? (r.campaign_name || `Campaign #${r.campaign_id}`)
+            : 'Unattributed';
+        const campClass = r.campaign_id ? 'campaign-tag' : 'campaign-tag campaign-tag-unattributed';
+        const campTitle = r.campaign_id
+            ? `Campaign: ${campLabel}`
+            : 'No campaign matched this reply — it was not sent from a tracked campaign.';
 
         return `
             <div class="card reply-card ${r.status === 'lead' ? 'lead-highlight' : ''} ${App.selection.has('replies', r.id) ? 'selected' : ''}" id="card_${r.id}">
@@ -203,7 +214,7 @@ const Replies = {
                                 <span class="reply-sender-email">&lt;${App.escapeHtml(r.from_email)}&gt;</span>
                             </div>
                             <div class="reply-meta">
-                                <span class="campaign-tag">${App.escapeHtml(r.campaign_name || 'Cold Outreach')}</span>
+                                <span class="${campClass}" title="${App.escapeHtml(campTitle)}">${App.escapeHtml(campLabel)}</span>
                                 <span class="reply-date">${App.escapeHtml(r.date || '')}</span>
                             </div>
                         </div>
@@ -416,7 +427,7 @@ const Replies = {
             <div style="font-size:0.92rem;line-height:1.6">
                 <p><strong>From:</strong> ${App.escapeHtml(reply.from_name || '')} &lt;${App.escapeHtml(reply.from_email)}&gt;</p>
                 <p><strong>Subject:</strong> ${App.escapeHtml(reply.subject || '')}</p>
-                <p><strong>Campaign:</strong> ${App.escapeHtml(reply.campaign_name || 'N/A')}</p>
+                <p><strong>Campaign:</strong> ${App.escapeHtml(reply.campaign_id ? (reply.campaign_name || `Campaign #${reply.campaign_id}`) : 'Unattributed (no campaign match)')}</p>
                 <p><strong>Sentiment:</strong> <span class="badge">${App.escapeHtml(reply.sentiment)}</span></p>
                 <p><strong>Date:</strong> ${App.escapeHtml(reply.date || '')}</p>
                 <hr style="border:none;border-top:1px solid var(--border-color);margin:16px 0;">

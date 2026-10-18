@@ -3069,6 +3069,13 @@ td .tag {
     border: 1px solid var(--border-color);
 }
 
+/* A reply the scanner could not attribute to any campaign (e.g. an ad-hoc
+   test mail). Dashed + muted so it never reads as a real campaign name. */
+.campaign-tag-unattributed {
+    border-style: dashed;
+    color: var(--text-muted);
+}
+
 .reply-header-actions {
     display: flex;
     align-items: center;

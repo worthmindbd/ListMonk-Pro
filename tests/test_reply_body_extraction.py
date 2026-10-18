@@ -347,6 +347,63 @@ async def test_reclassify_stored_sentiments_noop_when_unchanged(tmp_path, monkey
     assert rl.load_log()[0]["sentiment"] == "negative"
 
 
+async def test_reclassify_demotes_auto_promoted_lead(tmp_path, monkeypatch):
+    """A reply stored as positive only because the old classifier defaulted
+    unknown bodies to positive ("hi") must lose the lead status too.
+
+    Re-tagging the sentiment alone left the card green ("Hot Lead Flagged"),
+    in the "Marked Lead" filter and counted as a lead forever — exactly the
+    false positive a lone "hi" test mail produced.
+    """
+    from app.services.imap_reply_tracker import reclassify_stored_sentiments
+
+    rl = _reply_log(tmp_path, monkeypatch, [
+        {"id": "rep_1", "message_id": "<hi@x>", "subject": "Re: Hi",
+         "full_body": "hi", "sentiment": "positive", "status": "lead"},
+    ])
+
+    assert await reclassify_stored_sentiments() == 1
+
+    record = rl.load_log()[0]
+    assert record["sentiment"] == "neutral"
+    assert record["status"] == "unread"
+    assert record["status_source"] == "auto"
+
+
+async def test_reclassify_keeps_a_human_lead_status(tmp_path, monkeypatch):
+    """A status a human set (``status_source: manual``) is never undone by a
+    sentiment correction — only the classifier's own promotion is."""
+    from app.services.imap_reply_tracker import reclassify_stored_sentiments
+
+    rl = _reply_log(tmp_path, monkeypatch, [
+        {"id": "rep_1", "message_id": "<hi@x>", "subject": "Re: Hi",
+         "full_body": "hi", "sentiment": "positive", "status": "lead",
+         "status_source": "manual"},
+    ])
+
+    assert await reclassify_stored_sentiments() == 1
+
+    record = rl.load_log()[0]
+    assert record["sentiment"] == "neutral"
+    assert record["status"] == "lead"
+    assert record["status_source"] == "manual"
+
+
+def test_status_api_marks_the_change_as_manual(tmp_path, monkeypatch):
+    """Manual status edits must outrank a later automatic correction."""
+    rl = _reply_log(tmp_path, monkeypatch, [
+        {"id": "rep_1", "message_id": "<hi@x>", "subject": "Re: Hi",
+         "full_body": "hi", "sentiment": "positive", "status": "unread",
+         "status_source": "auto"},
+    ])
+
+    assert rl.update_reply_status("rep_1", "lead") is True
+
+    record = rl.load_log()[0]
+    assert record["status"] == "lead"
+    assert record["status_source"] == "manual"
+
+
 # ── End-to-end: a scan repairs a stored empty reply ──────────────────────────
 
 async def test_scan_repairs_stored_empty_reply(tmp_path, monkeypatch):
@@ -480,10 +537,20 @@ class _InboxIMAP:
         pass
 
 
-async def _run_inbox_scan(tmp_path, monkeypatch, messages):
+async def _run_inbox_scan(
+    tmp_path, monkeypatch, messages, campaign_lists=None, campaign_created_at=None,
+):
+    """Run a reply scan against a fake inbox and one fake campaign.
+
+    The campaign date is anchored to the messages' own (fixed) October 2026
+    dates rather than ``now``: attribution only considers campaigns created
+    *on or before* the message, so a ``now - 1 day`` fixture stops covering
+    the hardcoded Oct 14 messages as soon as the wall clock moves past them —
+    which is exactly how this suite silently went red (and blocked deploys).
+    """
     import app.services.imap_reply_tracker as T
     import app.services.bounce_ingest as bi
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timezone
 
     rl = _reply_log(tmp_path, monkeypatch, [])
     monkeypatch.setattr(bi, "PROCESSED_FILE", tmp_path / "bounce_processed.json")
@@ -496,13 +563,16 @@ async def _run_inbox_scan(tmp_path, monkeypatch, messages):
     monkeypatch.setattr(T.settings, "imap_pass", "secret")
     monkeypatch.setattr(T.settings, "imap_use_ssl", False)
 
+    created_at = campaign_created_at or datetime(2026, 1, 1, tzinfo=timezone.utc)
+    lists = campaign_lists if campaign_lists is not None else [{"id": 1}]
+
     async def _campaigns(listmonk, cutoff):
         return [{
             "id": 7,
             "uuid": "camp-uuid-7",
             "name": "Cold Outreach Campaign",
-            "created_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
-            "lists": [{"id": 1}],
+            "created_at": created_at.isoformat(),
+            "lists": lists,
         }], True
 
     monkeypatch.setattr(T, "_fetch_campaigns_covering", _campaigns)
@@ -565,3 +635,40 @@ async def test_scan_skips_dsn_already_ingested_by_bounce_scanner(tmp_path, monke
     records = rl.load_log()
     assert [r["full_body"].strip() for r in records] == ["Yes. Please share."]
     assert "<inbox-dsn@example.com>" in rl.load_processed_message_ids()
+
+
+# ── Unattributed mail must not masquerade as a campaign reply ────────────────
+
+_HI_TEST_MAIL_RAW = (
+    b"From: MD Kawser <md.kawser.drive2@gmail.com>\r\n"
+    b"To: me@example.com\r\n"
+    b"Subject: Re: Hi\r\n"
+    b"Message-ID: <hi-test@example.com>\r\n"
+    b"Date: Wed, 14 Oct 2026 09:24:49 +0600\r\n"
+    b"Content-Type: text/plain; charset=\"utf-8\"\r\n"
+    b"\r\n"
+    b"hi\r\n"
+)
+
+
+async def test_scan_leaves_an_unattributed_reply_unlabelled(tmp_path, monkeypatch):
+    """A test mail that matches no campaign is stored honestly.
+
+    It used to be tagged with the fabricated campaign name "Cold Outreach
+    Campaign" and, before the neutral default, hot-flagged as an interested
+    lead simply because "hi" matched no keyword.
+    """
+    stats, _, rl = await _run_inbox_scan(
+        tmp_path, monkeypatch, [_HI_TEST_MAIL_RAW],
+        # A campaign on a list the sender is not subscribed to: neither the
+        # subject nor the list-aware fallback can attribute this mail.
+        campaign_lists=[{"id": 99}],
+    )
+
+    assert stats["new_replies"] == 1
+    record = rl.load_log()[0]
+    assert record["campaign_id"] is None
+    assert record["campaign_name"] is None      # no invented campaign label
+    assert record["sentiment"] == "neutral"     # "hi" carries no interest signal
+    assert record["status"] == "unread"         # so it is not a lead
+    assert record["status_source"] == "auto"

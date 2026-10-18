@@ -345,6 +345,40 @@ def _tidy_reply_text(text: str) -> str:
     return text.strip()
 
 
+# How a reply's status came to be. Ingestion promotes a positive reply to
+# ``lead`` automatically; the API's status endpoints record a human choice.
+# The distinction lets a classifier correction undo its own promotion without
+# overwriting a status a human deliberately set.
+STATUS_SOURCE_AUTO = "auto"
+STATUS_SOURCE_MANUAL = "manual"
+
+
+def _demote_auto_lead(record: dict) -> bool:
+    """Undo an automatic ``lead`` promotion after a sentiment correction.
+
+    Ingestion sets ``status='lead'`` purely from a positive sentiment. When a
+    later classifier run reads the same body differently, leaving the status
+    behind keeps the green "Hot Lead Flagged" state, the "Marked Lead" filter
+    and the card highlight pointing at a reply the classifier no longer
+    considers positive — a false positive that never expires.
+
+    Only the classifier's own promotion is undone: a status a human chose
+    (``status_source == 'manual'``) is never touched. Records written before
+    ``status_source`` existed are treated as automatic, because at ingestion
+    time ``lead`` could only come from a positive sentiment — a human would
+    have had to clear it first to set it by hand.
+
+    Returns True when the status was changed.
+    """
+    if record.get("status") != "lead":
+        return False
+    if record.get("status_source") == STATUS_SOURCE_MANUAL:
+        return False
+    record["status"] = "unread"
+    record["status_source"] = STATUS_SOURCE_AUTO
+    return True
+
+
 def _repairable_record_ids(records: list[dict]) -> set[str]:
     """Message-IDs of stored replies whose body could not be extracted.
 
@@ -392,10 +426,11 @@ async def apply_body_repairs(repairs: dict[str, dict]) -> int:
 
     Sentiment is re-classified from the recovered text; a repaired positive
     reply still in the default ``unread`` status becomes a ``lead``, mirroring
-    ingestion. Statuses a human has set are never overwritten. A recovered
-    body that classifies as a bounce means the record was a DSN all along —
-    it is removed from the feed instead of updated (delivery failures are
-    never replies).
+    ingestion. A correction *away* from positive undoes an automatic lead
+    promotion (see ``_demote_auto_lead``); statuses a human has set are never
+    overwritten. A recovered body that classifies as a bounce means the record
+    was a DSN all along — it is removed from the feed instead of updated
+    (delivery failures are never replies).
     """
     if not repairs:
         return 0
@@ -414,8 +449,12 @@ async def apply_body_repairs(repairs: dict[str, dict]) -> int:
             r["full_body"] = fix["full_body"]
             r["body_preview"] = fix["body_preview"]
             r["sentiment"] = fix["sentiment"]
-            if fix["sentiment"] == "positive" and r.get("status") == "unread":
-                r["status"] = "lead"
+            if fix["sentiment"] == "positive":
+                if r.get("status") == "unread":
+                    r["status"] = "lead"
+                    r["status_source"] = STATUS_SOURCE_AUTO
+            else:
+                _demote_auto_lead(r)
             changed += 1
         if changed:
             if drop_ids:
@@ -432,8 +471,10 @@ async def reclassify_stored_sentiments() -> int:
     pattern) would never reach them and their badge would stay wrong forever.
     Sentiment is derived data and is safe to overwrite; statuses a human may
     have set are never touched, except for the same ``unread`` -> ``lead``
-    promotion ingestion applies to a freshly positive reply. A body the
-    current classifier reads as a bounce is removed outright: DSNs are not
+    promotion ingestion applies to a freshly positive reply, and the inverse
+    demotion of a ``lead`` the classifier itself promoted when the correction
+    reads the reply as no longer positive (see ``_demote_auto_lead``). A body
+    the current classifier reads as a bounce is removed outright: DSNs are not
     replies (older versions stored them here, misflagged as hot leads), and
     they belong to the bounce pipeline instead.
     """
@@ -463,8 +504,16 @@ async def reclassify_stored_sentiments() -> int:
                 changed += 1
                 continue
             r["sentiment"] = sentiment
-            if sentiment == "positive" and r.get("status") == "unread":
-                r["status"] = "lead"
+            if sentiment == "positive":
+                if r.get("status") == "unread":
+                    r["status"] = "lead"
+                    r["status_source"] = STATUS_SOURCE_AUTO
+            else:
+                # The old unknown-means-positive default hot-flagged replies
+                # like a lone "hi". Correcting the badge is not enough: the
+                # auto-promoted lead status has to go with it, or the card
+                # keeps its "Hot Lead Flagged" state and lead-filter entry.
+                _demote_auto_lead(r)
             changed += 1
         if changed:
             if drop_ids:
@@ -757,8 +806,9 @@ async def _scan_and_track_replies_impl(
         # campaign_id=null. While ideally we'd skip non-campaign emails, doing
         # so risks losing valid replies when matching fails due to incomplete
         # data (deleted campaigns, changed subjects, etc.). The neutral sentiment
-        # default ensures these aren't falsely flagged as hot leads.
-
+        # default ensures these aren't falsely flagged as hot leads, and
+        # campaign_name stays null so the feed labels them "Unattributed"
+        # instead of inventing a campaign they never belonged to.
         record = {
             "id": f"rep_{uuid.uuid4().hex[:10]}",
             "message_id": msg_id,
@@ -770,9 +820,14 @@ async def _scan_and_track_replies_impl(
             "body_preview": reply_only[:200] + ("..." if len(reply_only) > 200 else ""),
             "full_body": reply_only,
             "campaign_id": camp_id,
-            "campaign_name": camp_name or "Cold Outreach Campaign",
+            # No fallback label: a reply that matched no campaign must not
+            # display as if it belonged to one.
+            "campaign_name": camp_name,
             "sentiment": sentiment,
             "status": "lead" if sentiment == "positive" else "unread",
+            # Provenance for the auto-promotion above, so a later sentiment
+            # correction can undo it without touching a human's status choice.
+            "status_source": STATUS_SOURCE_AUTO,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
