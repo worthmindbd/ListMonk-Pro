@@ -21,8 +21,10 @@ def test_classify_sentiment():
     assert classify_sentiment("Re: Followup", "Yes please, happy to connect") == "positive"
 
     # A reply matching no keyword is a real human response — neither an
-    # auto-response nor a rejection — so it falls back to positive.
-    assert classify_sentiment("Re: Inquiry", "How does this work with our existing stack?") == "positive"
+    # auto-response nor a rejection — so it falls back to neutral (not positive).
+    # False positives (marking ambiguous replies as hot leads) are worse than
+    # leaving genuinely interested prospects unflagged for manual review.
+    assert classify_sentiment("Re: Inquiry", "How does this work with our existing stack?") == "neutral"
 
 
 def test_classify_sentiment_polite_decline_is_negative():
@@ -130,11 +132,12 @@ def test_classify_automated_no_reply_senders_are_not_positive():
     assert classify_sentiment(
         "Receipt", "Thanks for your purchase.", "noreply@shop.example"
     ) == "auto_reply"
-    # A human sender with the same unknown body is still a (default) positive.
+    # A human sender with the same unknown body falls back to neutral (not
+    # positive), since the content lacks clear interest signals.
     assert classify_sentiment(
         "You have a new message", "Click here to manage your notification preferences.",
         "kate@rollerads.com",
-    ) == "positive"
+    ) == "neutral"
 
 
 def test_classify_human_replies_unchanged_by_bounce_rules():

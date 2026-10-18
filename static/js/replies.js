@@ -85,6 +85,11 @@ const Replies = {
                     <div style="font-size:0.82rem;color:var(--text-muted)">Interested & call requests</div>
                 </div>
                 <div class="stat-card">
+                    <div class="stat-label"><span class="badge-dot badge-dot-neutral"></span> Neutral / No Signal</div>
+                    <div class="stat-value">${App.formatNumber(s.neutral || 0)}</div>
+                    <div style="font-size:0.82rem;color:var(--text-muted)">Ambiguous replies, no clear intent</div>
+                </div>
+                <div class="stat-card">
                     <div class="stat-label"><span class="badge-dot badge-dot-auto-reply"></span> Out of Office / Auto-Reply</div>
                     <div class="stat-value">${App.formatNumber(s.auto_reply || 0)}</div>
                     <div style="font-size:0.82rem;color:var(--text-muted)">Automated OOO notices</div>
@@ -113,6 +118,7 @@ const Replies = {
                         <select class="form-control filter-select" id="sentimentFilter" aria-label="Filter replies by sentiment" onchange="Replies.filterSentiment(this.value)">
                             <option value="" ${!this.sentiment ? 'selected' : ''}>All Sentiments</option>
                             <option value="positive" ${this.sentiment === 'positive' ? 'selected' : ''}>Positive / Interested</option>
+                            <option value="neutral" ${this.sentiment === 'neutral' ? 'selected' : ''}>Neutral / No Signal</option>
                             <option value="auto_reply" ${this.sentiment === 'auto_reply' ? 'selected' : ''}>Out of Office</option>
                             <option value="negative" ${this.sentiment === 'negative' ? 'selected' : ''}>Not Interested</option>
                         </select>
@@ -172,6 +178,7 @@ const Replies = {
     renderReplyCard(r) {
         const sentimentConfig = {
             'positive': { label: 'Interested / Lead', colorClass: 'badge-positive', dotClass: 'badge-dot-positive' },
+            'neutral': { label: 'Neutral / No Signal', colorClass: 'badge-neutral', dotClass: 'badge-dot-neutral' },
             'auto_reply': { label: 'Out of Office', colorClass: 'badge-auto-reply', dotClass: 'badge-dot-auto-reply' },
             'negative': { label: 'Not Interested', colorClass: 'badge-negative', dotClass: 'badge-dot-negative' },
         };

@@ -174,9 +174,11 @@ def classify_sentiment(subject: str, reply_text: str, from_email: str = "") -> s
         if pat.search(reply_text):
             return "positive"
 
-    # No keyword matched: the reply is a real human response that is neither
-    # an auto-response nor a rejection, so treat it as a positive reply.
-    return "positive"
+    # No keyword matched: the reply is a real human response but lacks clear
+    # positive or negative signals. Classify as neutral rather than assuming
+    # interest — false positives (marking a lukewarm "thanks" as a hot lead)
+    # are worse than leaving a genuinely interested prospect unflagged.
+    return "neutral"
 
 
 def _clean_subject_for_matching(subj: str) -> str:
@@ -576,6 +578,7 @@ async def _scan_and_track_replies_impl(
             "new_replies": 0,
             "positive": 0,
             "negative": 0,
+            "neutral": 0,
             "auto_reply": 0,
             "bounce": 0,
             "reclassified": 0,
@@ -589,6 +592,7 @@ async def _scan_and_track_replies_impl(
         "new_replies": 0,
         "positive": 0,
         "negative": 0,
+        "neutral": 0,
         "auto_reply": 0,
         "bounce": 0,
         "repaired": 0,
@@ -748,6 +752,12 @@ async def _scan_and_track_replies_impl(
         camp_id, camp_name = await match_campaign_for_reply(
             listmonk, subject, from_email, reply_date, campaigns=campaigns,
         )
+
+        # Note: Replies without campaign attribution are still stored with
+        # campaign_id=null. While ideally we'd skip non-campaign emails, doing
+        # so risks losing valid replies when matching fails due to incomplete
+        # data (deleted campaigns, changed subjects, etc.). The neutral sentiment
+        # default ensures these aren't falsely flagged as hot leads.
 
         record = {
             "id": f"rep_{uuid.uuid4().hex[:10]}",

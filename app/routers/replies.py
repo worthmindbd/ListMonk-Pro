@@ -121,6 +121,7 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
     positive = sum(1 for r in records if r.get("sentiment") == "positive")
     auto_reply = sum(1 for r in records if r.get("sentiment") == "auto_reply")
     negative = sum(1 for r in records if r.get("sentiment") == "negative")
+    neutral = sum(1 for r in records if r.get("sentiment") == "neutral")
 
     # Reply counts per campaign (always from the full log, even for a scoped
     # call) power the Analytics campaign comparison chart.
@@ -140,6 +141,7 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
         "positive": positive,
         "auto_reply": auto_reply,
         "negative": negative,
+        "neutral": neutral,
         "total_sent": total_sent,
         "reply_rate": reply_rate,
         "positive_rate": round((positive / total_sent * 100), 2) if total_sent > 0 else 0.0,
