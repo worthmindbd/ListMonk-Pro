@@ -169,7 +169,24 @@ const Subscribers = {
 
     goToPage(p) { this.page = p; App.bumpSeq(); this.render(); },
 
-    showCreate() {
+    async showCreate() {
+        // Load lists up-front so a new lead can be put on its lists in the same
+        // step instead of "create, then reopen the edit form to add lists".
+        let lists = [];
+        let listsFailed = false;
+        try {
+            const res = await API.get('/api/lists?per_page=200&minimal=true');
+            lists = res?.data?.results || [];
+        } catch {
+            listsFailed = true;
+        }
+        if (listsFailed) {
+            App.toast('Could not load lists — you can add list memberships after creating.', 'error');
+        }
+        const listChecks = lists.map(l =>
+            `<label class="checkbox-label"><input type="checkbox" name="subLists" value="${l.id}"><span>${App.escapeHtml(l.name)}</span></label>`
+        ).join('') || '<p style="color:var(--text-muted);font-size:0.85rem">No lists available</p>';
+
         App.setContent(`
             <div class="inline-form">
                 <h2 style="margin-bottom:16px">Add Subscriber</h2>
@@ -183,6 +200,10 @@ const Subscribers = {
                         <option value="enabled">Enabled</option>
                         <option value="blocklisted">Blocklisted</option>
                     </select>
+                </div>
+                <div class="form-group">
+                    <label>Lists</label>
+                    <div class="checkbox-group">${listChecks}</div>
                 </div>
                 <div class="form-group">
                     <label>Attributes (JSON)</label>
@@ -212,8 +233,12 @@ const Subscribers = {
 
         if (!email) { App.toast('Email is required', 'error'); return; }
 
+        const lists = Array.from(document.querySelectorAll('input[name="subLists"]:checked'))
+            .map(el => parseInt(el.value, 10))
+            .filter(n => Number.isInteger(n));
+
         try {
-            await API.post('/api/subscribers', { email, name, status, attribs, lists: [] });
+            await API.post('/api/subscribers', { email, name, status, attribs, lists });
             App.toast('Subscriber created', 'success');
             this.render();
         } catch {
@@ -222,11 +247,13 @@ const Subscribers = {
     },
 
     async showDetail(id) {
+        const seq = App.seq();
         try {
             const [subRes, bounceRes] = await Promise.allSettled([
                 API.get(`/api/subscribers/${id}`),
                 API.get(`/api/subscribers/${id}/bounces`),
             ]);
+            if (App.stale(seq)) return;
             const s = subRes.status === 'fulfilled' ? (subRes.value?.data || {}) : {};
             if (!s.id) throw new Error('Subscriber not found');
 
@@ -256,6 +283,7 @@ const Subscribers = {
                 </div>
             `);
         } catch (err) {
+            if (App.stale(seq)) return;
             // Errors thrown locally (e.g. "Subscriber not found") were never
             // toasted by API.request — surface them instead of failing silently.
             if (!err?.handled) App.toast(err?.message || 'Failed to load subscriber', 'error');
@@ -371,6 +399,7 @@ const Subscribers = {
     },
 
     async blocklist(id) {
+        if (!await App.confirm('Blocklist this subscriber? They will stop receiving all mail.')) return;
         try {
             await API.put(`/api/subscribers/${id}/blocklist`);
             App.toast('Subscriber blocklisted', 'success');

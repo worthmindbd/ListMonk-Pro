@@ -170,17 +170,28 @@ const Campaigns = {
     async showCreate() {
         // Fetch lists for selection
         let lists = [];
+        let listsFailed = false;
         try {
             const res = await API.get('/api/lists?per_page=100&minimal=true');
             lists = res?.data?.results || [];
-        } catch {}
+        } catch {
+            listsFailed = true;
+        }
 
         // Fetch templates for selection
         let templates = [];
+        let templatesFailed = false;
         try {
             const res = await API.get('/api/templates');
             templates = res?.data || [];
-        } catch {}
+        } catch {
+            templatesFailed = true;
+        }
+
+        // Surface a failed dependency instead of rendering an empty picker
+        // that silently makes the form impossible to submit.
+        if (listsFailed) App.toast('Could not load lists — the campaign cannot be created until this succeeds.', 'error');
+        if (templatesFailed) App.toast('Could not load templates — you can still save without one.', 'error');
 
         let listOptions = lists.map(l =>
             `<label class="checkbox-label"><input type="checkbox" name="campLists" value="${l.id}"><span>${App.escapeHtml(l.name)}</span></label>`
@@ -548,6 +559,12 @@ const Campaigns = {
     async sendTest(id) {
         const email = document.getElementById('testSendEmail')?.value.trim();
         if (!email) { App.toast('Enter a recipient email', 'error'); return; }
+        // Cheap client-side shape check: the server validates too, but a typo
+        // otherwise costs a round-trip and a generic upstream error.
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+            App.toast('That does not look like a valid email address', 'error');
+            return;
+        }
         try {
             await API.post(`/api/campaigns/${id}/test`, { emails: [email] });
             App.toast(`Test email sent to ${email}`, 'success');

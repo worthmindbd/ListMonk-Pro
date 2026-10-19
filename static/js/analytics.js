@@ -12,10 +12,12 @@ const Analytics = {
     replyStats: null,
     campaignReplyStats: null,
     replyByCampaign: {},
-    /** Generation counter for campaign-scoped side stats & chart loads, so a
-        slow response for the previous campaign/window cannot repaint over the
-        newer selection. */
+    /** Generation counter for campaign-scoped side stats, so a slow response
+        for the previous campaign cannot repaint over the newer selection. */
     _sideSeq: 0,
+    /** Separate counter for chart analytics loads so they don't invalidate
+        in-flight side stats (and vice versa). */
+    _chartSeq: 0,
 
     isColdMode() {
         return App.currentMode === 'cold_email';
@@ -386,11 +388,13 @@ const Analytics = {
     onDateChange() {
         this.fromDate = document.getElementById('analyticsFrom').value;
         this.toDate = document.getElementById('analyticsTo').value;
-        App.bumpSeq();
+        // Don't bump seq here — the user must click "Load" to apply the new
+        // date range. Bumping seq would invalidate any in-flight analytics and
+        // leave the charts blank until Load is clicked.
     },
 
     async loadCampaignAnalytics() {
-        const seq = ++this._sideSeq;
+        const seq = ++this._chartSeq;
         this.fromDate = document.getElementById('analyticsFrom')?.value || this.fromDate;
         this.toDate = document.getElementById('analyticsTo')?.value || this.toDate;
 
@@ -415,7 +419,10 @@ const Analytics = {
             isCold ? null : API.get(`/api/campaigns/analytics/links?${baseParams}`),
         ]);
         if (campId !== this.selectedCampaignId) return;
-        if (seq !== this._sideSeq) return;
+        if (seq !== this._chartSeq) return;
+        // The theme-change listener can trigger a reload; if the user has
+        // navigated away in the meantime, don't paint on whatever page is up.
+        if (App.currentPage !== 'analytics') return;
 
         const viewsData = viewsRes.status === 'fulfilled' ? (viewsRes.value?.data || []) : [];
         const bouncesData = bouncesRes.status === 'fulfilled' ? (bouncesRes.value?.data || []) : [];

@@ -10,10 +10,26 @@ const API = {
     /** `silent` suppresses the automatic error toast — for background polls
         that surface failures in their own UI instead of stacking toasts.
         The rejection is still marked err.handled so callers stay consistent. */
-    async request(method, path, body = null, isFormData = false, silent = false) {
+    /** Default timeout for API requests (ms). Exports and scans override this. */
+    DEFAULT_TIMEOUT: 30000,
+
+    /** Set after the first 401 redirect so concurrent requests don't each
+        navigate and toast independently. */
+    _redirecting: false,
+
+    async request(method, path, body = null, isFormData = false, silent = false, timeoutMs = null) {
+        const controller = new AbortController();
+        const timeout = setTimeout(
+            () => controller.abort(),
+            timeoutMs || this.DEFAULT_TIMEOUT,
+        );
+
         const opts = {
             method,
-            headers: {},
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest',
+            },
+            signal: controller.signal,
         };
 
         if (body && !isFormData) {
@@ -25,9 +41,13 @@ const API = {
 
         try {
             const resp = await fetch(path, opts);
+            clearTimeout(timeout);
             if (!resp.ok) {
                 if (resp.status === 401) {
-                    window.location.href = '/auth/login';
+                    if (!this._redirecting) {
+                        this._redirecting = true;
+                        window.location.href = '/auth/login';
+                    }
                     throw Object.assign(new Error('Unauthorized'), { handled: true, silent: true });
                 }
                 let detail = `HTTP ${resp.status}`;
@@ -49,9 +69,13 @@ const API = {
             }
             return await resp.json();
         } catch (err) {
+            clearTimeout(timeout);
             if (!err.handled) {
-                // Network/abort failures never reached the response checks above.
-                if (!silent) App.toast(err.message, 'error');
+                // Network/abort/timeout failures never reached the response checks above.
+                const msg = err.name === 'AbortError'
+                    ? 'Request timed out — please try again'
+                    : (err.message || 'Unknown error');
+                if (!silent) App.toast(msg, 'error');
                 err.handled = true;
             }
             throw err;
@@ -78,9 +102,15 @@ const API = {
         const a = document.createElement('a');
         a.href = url;
         a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        try {
+            document.body.appendChild(a);
+            a.click();
+        } finally {
+            // Always revoke, even if the DOM insertion or click throws (e.g.
+            // a sandboxed iframe): an unreleased object URL pins the blob in
+            // memory for the lifetime of the document.
+            if (a.parentNode) a.parentNode.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
     }
 };

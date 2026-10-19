@@ -1,6 +1,18 @@
 /* ── Stripi Glassmorphism Design System ─────────────────────── */
 /* Inspired by DESIGN.md: Electric Indigo, Deep Navy Ink, Atmospheric Mesh & Glassmorphism */
 
+/* ── Z-INDEX SCALE (keep new layers on these steps) ──────────
+   0     ambient-mesh orbs / page background decoration
+   2-3   sticky table cells (.cell-actions th/td)
+   10    app shell layout
+   50    sticky top bar
+   90    mobile nav overlay (under the sidebar)
+   100   sidebar
+   200   modal overlay (shared confirm/progress dialog)
+   300   skip-link (must sit above everything it skips past)
+   1000  toast container (always visible, even over modals)
+   ─────────────────────────────────────────────────────────── */
+
 :root {
     /* ── Brand & Accent Palette (DESIGN.md) ────────────────── */
     --primary: #533afd;
@@ -104,6 +116,9 @@
 
     --font-sans: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-display: 'Outfit', 'Plus Jakarta Sans', sans-serif;
+
+    /* Horizontal-scroll affordance on wide tables (dark theme default). */
+    --table-scroll-shadow: rgba(0, 0, 0, 0.18);
 }
 
 /* ── Light Theme ───────────────────────────────────────────── */
@@ -145,6 +160,9 @@
     --glass-bg: var(--bg-surface);
     --input-bg: var(--bg-input);
     --input-border: var(--glass-border);
+    /* Softer scroll shadow so it doesn't read as a harsh black smudge on
+       light surfaces. */
+    --table-scroll-shadow: rgba(0, 55, 112, 0.08);
 }
 
 /* ── Reset & Base ──────────────────────────────────────────── */
@@ -731,7 +749,7 @@ input {
        four columns at 1440px, leaving the fifth card orphaned, and the
        six-card campaign-detail row fitted five. `auto-fit` collapses unused
        tracks, so rows with fewer cards keep their full-width cards. */
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 18px;
     margin-bottom: 24px;
 }
@@ -812,8 +830,8 @@ input {
     background:
         linear-gradient(90deg, var(--bg-surface) 30%, rgba(0, 0, 0, 0)) left center / 24px 100% no-repeat local,
         linear-gradient(270deg, var(--bg-surface) 30%, rgba(0, 0, 0, 0)) right center / 24px 100% no-repeat local,
-        linear-gradient(90deg, rgba(0, 0, 0, 0.18), rgba(0, 0, 0, 0)) left center / 14px 100% no-repeat scroll,
-        linear-gradient(270deg, rgba(0, 0, 0, 0.18), rgba(0, 0, 0, 0)) right center / 14px 100% no-repeat scroll,
+        linear-gradient(90deg, var(--table-scroll-shadow), rgba(0, 0, 0, 0)) left center / 14px 100% no-repeat scroll,
+        linear-gradient(270deg, var(--table-scroll-shadow), rgba(0, 0, 0, 0)) right center / 14px 100% no-repeat scroll,
         var(--bg-surface);
     backdrop-filter: blur(20px) saturate(180%);
     -webkit-backdrop-filter: blur(20px) saturate(180%);
@@ -1275,7 +1293,8 @@ code {
 }
 
 [data-theme="light"] .badge-success {
-    color: #059669;
+    /* emerald-700: 4.9:1 on white, ~4.6:1 on the 12% tint */
+    color: #047857;
 }
 
 .badge-warning {
@@ -1285,7 +1304,8 @@ code {
 }
 
 [data-theme="light"] .badge-warning {
-    color: #d97706;
+    /* amber-800: 7.0:1 on white */
+    color: #92400e;
 }
 
 .badge-danger {
@@ -1295,7 +1315,8 @@ code {
 }
 
 [data-theme="light"] .badge-danger {
-    color: var(--ruby);
+    /* rose-700: 5.6:1 on white */
+    color: #be123c;
 }
 
 .badge-info {
@@ -1305,7 +1326,8 @@ code {
 }
 
 [data-theme="light"] .badge-info {
-    color: #0284c7;
+    /* sky-700: 5.1:1 on white */
+    color: #0369a1;
 }
 
 .badge-primary {
@@ -2005,10 +2027,13 @@ td .tag {
 }
 
 .file-drop-zone:hover,
-.file-drop-zone.dragover {
+.file-drop-zone.dragover,
+.file-drop-zone:focus-visible {
     border-color: var(--primary);
     background: var(--primary-subdued);
     transform: scale(1.01);
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
 }
 
 .file-drop-zone svg {
@@ -2107,7 +2132,11 @@ td .tag {
     color: var(--text-muted);
     font-size: 1.6rem;
     cursor: pointer;
-    padding: 0 4px;
+    min-width: 44px;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     line-height: 1;
     transition: color 0.15s;
 }
@@ -2296,7 +2325,7 @@ td .tag {
 
 .notice-info {
     border-left-color: var(--accent);
-    background: var(--accent-soft);
+    background: var(--primary-subdued);
 }
 
 .notice-info svg {
@@ -2558,6 +2587,12 @@ td .tag {
 }
 
 /* ── Custom Scrollbar ──────────────────────────────────────── */
+/* Firefox standard properties (global) */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: var(--glass-border) transparent;
+}
+
 ::-webkit-scrollbar {
     width: 6px;
     height: 6px;
@@ -2619,6 +2654,32 @@ td .tag {
 
     .nav-link:hover svg {
         transform: none !important;
+    }
+}
+
+/* ── Reduced transparency ──────────────────────────────────────
+   The UI leans on backdrop-filter for its glass panels. Each blurred layer
+   forces GPU compositing and, when several stack (top bar over cards over a
+   blurred modal), it drops frames on low-end devices. Users who ask for less
+   transparency get opaque surfaces instead — same layout, no blur cost. */
+@media (prefers-reduced-transparency: reduce) {
+    .sidebar,
+    .top-bar,
+    .stat-card,
+    .card,
+    .table-wrapper,
+    .modal,
+    .toast,
+    .content-area,
+    .reply-card,
+    .campaign-card {
+        backdrop-filter: none !important;
+        -webkit-backdrop-filter: none !important;
+        background: var(--bg-surface-elevated) !important;
+    }
+
+    .ambient-mesh {
+        display: none !important;
     }
 }
 
@@ -3913,6 +3974,64 @@ td .tag {
     }
     .mode-choice-grid {
         grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+/* ── Print Stylesheet ───────────────────────────────────── */
+@media print {
+    .ambient-mesh,
+    .sidebar,
+    .top-bar,
+    .toast-container,
+    .modal-overlay,
+    .bulk-bar,
+    .nav-overlay,
+    .skip-link {
+        display: none !important;
+    }
+
+    body {
+        background: white !important;
+        color: black !important;
+        font-size: 12pt;
+    }
+
+    .app-layout {
+        display: block !important;
+    }
+
+    .content-area {
+        margin: 0 !important;
+        padding: 0 !important;
+        backdrop-filter: none !important;
+        background: white !important;
+    }
+
+    * {
+        box-shadow: none !important;
+        backdrop-filter: none !important;
+        text-shadow: none !important;
+    }
+
+    a {
+        color: black !important;
+        text-decoration: underline;
+    }
+
+    table {
+        border-collapse: collapse !important;
+    }
+
+    th, td {
+        border: 1px solid #ccc !important;
+        padding: 6px 8px !important;
+        color: black !important;
+    }
+
+    .badge {
+        border: 1px solid #999 !important;
+        background: white !important;
+        color: black !important;
     }
 }
 

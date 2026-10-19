@@ -167,7 +167,12 @@ const Dashboard = {
                                     <tbody>`;
 
                 campaigns.slice(0, 4).forEach(c => {
-                    html += `<tr style="cursor:pointer" onclick="Campaigns.showDetail(${c.id})">
+                    // Keyboard-equivalent of the row click: the row is a link
+                    // shortcut, so it needs a role and a focus stop of its own.
+                    html += `<tr style="cursor:pointer" tabindex="0" role="link"
+                        aria-label="View campaign ${App.escapeHtml(c.name)}"
+                        onclick="Campaigns.showDetail(${c.id})"
+                        onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();Campaigns.showDetail(${c.id})}">
                         <td><strong>${App.escapeHtml(c.name)}</strong></td>
                         <td>${App.statusBadge(c.status)}</td>
                         <td>${App.formatNumber(c.sent || c.to_send || 0)}</td>
@@ -188,6 +193,10 @@ const Dashboard = {
                 this.renderColdSentimentChart(repStats);
 
             } else {                // Newsletter Mode
+                // Drop the retained cold-email stats so a later theme-toggle
+                // re-render cannot paint a stale sentiment chart in newsletter
+                // mode.
+                this.lastRepStats = null;
                 html += `
                     <div class="stats-grid">
                         <div class="stat-card accent">

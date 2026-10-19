@@ -97,7 +97,7 @@ const Deliverability = {
         if (data.error) {
             html += `
                 <div class="notice notice-warning deliv-error-notice">
-                    ${svgIcon('alert')}
+                    ${_dSvgIcon('alert')}
                     <div>
                         <strong>Listmonk settings could not be read.</strong>
                         The audit below is empty — fix the connection and refresh.
@@ -120,7 +120,7 @@ const Deliverability = {
         const infoCount = checks.filter(c => c.status === 'info').length;
 
         const ticks = scored.map(c => {
-            const meta = statusMeta(c.status);
+            const meta = _dStatusMeta(c.status);
             return `<span class="deliv-tick is-${c.status}" title="${App.escapeHtml(c.name)} — ${meta.label}"></span>`;
         }).join('');
 
@@ -167,11 +167,11 @@ const Deliverability = {
                     <div class="deliv-preset-row">
                         ${isOptimal
                             ? `<button type="button" class="btn btn-secondary" disabled>
-                                   ${svgIcon('check')}
+                                   ${_dSvgIcon('check')}
                                    Cold-email preset active
                                </button>`
                             : `<button type="button" class="btn btn-success" onclick="Deliverability.applyPreset('cold_email')">
-                                   ${svgIcon('send')}
+                                   ${_dSvgIcon('send')}
                                    Apply cold-email preset
                                </button>`}
                         <button type="button" class="btn btn-secondary" onclick="Deliverability.applyPreset('newsletter')">
@@ -201,7 +201,7 @@ const Deliverability = {
                             <span><b class="${unresolved.length ? 'is-attention' : ''}">${unresolved.length}</b> attention</span>
                         </span>
                         <button type="button" class="btn btn-sm btn-secondary" onclick="Deliverability.render()" ${this.isLoading ? 'disabled' : ''}>
-                            ${svgIcon('refresh')}
+                            ${_dSvgIcon('refresh')}
                             Refresh
                         </button>
                     </div>
@@ -254,7 +254,7 @@ const Deliverability = {
     },
 
     checkRowHtml(check) {
-        const meta = statusMeta(check.status);
+        const meta = _dStatusMeta(check.status);
         const severity = check.status === 'fail' || check.status === 'warn' ? this.severityLabel(check.impact) : '';
         const target = check.status === 'pass' || check.status === 'info' ? '' : this.targetLabel(check);
 
@@ -415,24 +415,24 @@ const Deliverability = {
 /* ── Presentation helpers (module scope: no per-render allocation) ─────────── */
 
 const DELIVERABILITY_GLYPHS = {
-    pass: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
-    warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
-    fail: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>',
-    info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>',
+    pass: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
+    warn: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+    fail: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>',
+    info: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>',
 };
 
 const DELIVERABILITY_ICONS = {
-    refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>',
-    check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
-    send: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 2 15 22 11 13 2 9 22 2"/><line x1="22" y1="2" x2="11" y2="13"/></svg>',
-    alert: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+    refresh: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>',
+    check: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
+    send: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 2 15 22 11 13 2 9 22 2"/><line x1="22" y1="2" x2="11" y2="13"/></svg>',
+    alert: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
 };
 
-function svgIcon(name) {
+function _dSvgIcon(name) {
     return DELIVERABILITY_ICONS[name] || '';
 }
 
-function statusMeta(status) {
+function _dStatusMeta(status) {
     switch (status) {
         case 'pass':
             return { label: 'Passing', glyph: DELIVERABILITY_GLYPHS.pass };

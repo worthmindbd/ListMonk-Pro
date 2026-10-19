@@ -19,6 +19,8 @@ const Converter = {
     _autoAttributes: true,
     _previewStats: null,
     _importing: false,
+    _pollSeq: 0,
+    _pollTimer: null,
     _lists: [],
     step: 1,
 
@@ -339,6 +341,15 @@ const Converter = {
 
     // ── Handle File Upload ───────────────────────────────
     async handleFile(file) {
+        // Mirror the server's 50 MB cap so an oversized file is rejected
+        // before it is read into memory and uploaded.
+        const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+        if (file.size > MAX_UPLOAD_BYTES) {
+            const mb = (file.size / 1024 / 1024).toFixed(1);
+            App.toast(`File is too large (${mb} MB). The limit is 50 MB.`, 'error');
+            return;
+        }
+
         this.fileName = file.name;
         document.getElementById('fileName').textContent = file.name;
 
@@ -690,6 +701,12 @@ const Converter = {
     },
 
     async pollImportStatus() {
+        // Cancel any existing poll so re-renders don't stack concurrent polls.
+        if (this._pollTimer) {
+            clearTimeout(this._pollTimer);
+            this._pollTimer = null;
+        }
+
         const dialog = document.getElementById('importDialog');
         if (!dialog) return;
         dialog.innerHTML = `
@@ -701,9 +718,12 @@ const Converter = {
             </div>
         `;
 
+        let failures = 0;
+        const pollId = ++this._pollSeq;
+
         const poll = async () => {
-            // The user may have navigated away from the converter page.
-            if (!document.getElementById('importStatusText')) {
+            // Abort if a newer poll was started or the user navigated away.
+            if (pollId !== this._pollSeq || !document.getElementById('importStatusText')) {
                 this._importing = false;
                 return;
             }
@@ -718,6 +738,7 @@ const Converter = {
 
                 // The awaits above can outlive a navigation; re-check before
                 // touching the dialog elements.
+                if (pollId !== this._pollSeq) return;
                 const statusEl = document.getElementById('importStatusText');
                 if (!statusEl) {
                     this._importing = false;
@@ -759,7 +780,7 @@ const Converter = {
                     if (logsEl) logsEl.textContent = logs;
                 }
 
-                setTimeout(poll, 2000);
+                this._pollTimer = setTimeout(poll, 2000);
             } catch (err) {
                 this._importing = false;
                 const el = document.getElementById('importStatusText');
@@ -768,7 +789,6 @@ const Converter = {
             }
         };
 
-        let failures = 0;
-        setTimeout(poll, 1000);
+        this._pollTimer = setTimeout(poll, 1000);
     },
 };

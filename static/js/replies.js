@@ -430,16 +430,48 @@ const Replies = {
 
     async toggleLead(id, currentStatus) {
         const next = currentStatus === 'lead' ? 'unread' : 'lead';
-        await this.updateStatus(id, next);
-        await this.render();
+        try {
+            await API.put(`/api/replies/${encodeURIComponent(id)}/status`, { status: next });
+            App.toast(`Marked as ${next}`, 'success');
+            // Reload data in parallel instead of full render() which chains 3 calls.
+            await Promise.all([this.loadStats(), this.loadReplies()]);
+            this.renderPage();
+        } catch {
+            // API.request already surfaced the server message.
+        }
     },
 
     copyEmail(email) {
-        navigator.clipboard.writeText(email).then(() => {
-            App.toast(`Copied ${email} to clipboard`, 'success');
-        }).catch(() => {
-            App.toast(`Could not copy email`, 'error');
-        });
+        const done = () => App.toast(`Copied ${email} to clipboard`, 'success');
+        const fail = () => App.toast(`Could not copy email`, 'error');
+
+        if (navigator.clipboard?.writeText) {
+            navigator.clipboard.writeText(email).then(done).catch(() => {
+                // Clipboard API exists but was refused (insecure context,
+                // missing permission): fall back to the legacy path.
+                this._legacyCopy(email) ? done() : fail();
+            });
+            return;
+        }
+        this._legacyCopy(email) ? done() : fail();
+    },
+
+    /** Pre-Clipboard-API copy path (works on plain-HTTP dev instances). */
+    _legacyCopy(text) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '-1000px';
+        document.body.appendChild(ta);
+        try {
+            ta.select();
+            return document.execCommand('copy');
+        } catch {
+            return false;
+        } finally {
+            document.body.removeChild(ta);
+        }
     },
 
     viewFullThread(id) {

@@ -341,7 +341,7 @@ const Unsubscribes = {
                 <td>${Unsubscribes.renderSourceBadge(r)}</td>
                 <td>${App.formatDateTime(r.timestamp)}</td>
                 <td>
-                    <button class="btn btn-sm btn-danger" style="padding:2px 8px;font-size:0.75rem" onclick="Unsubscribes.deleteRecord(${i})">
+                    <button class="btn btn-sm btn-danger" style="padding:2px 8px;font-size:0.75rem" onclick="Unsubscribes.deleteRecord(${App.escapeHtml(JSON.stringify(r.email))})">
                         Remove
                     </button>
                 </td>
@@ -428,15 +428,18 @@ const Unsubscribes = {
 
     /* ── Pagination ───────────────────────────────────────── */
     async goToCampaignPage(p) {
+        // Bump the generation counter so a slower page fetch that resolves
+        // after a newer click cannot paint over it.
+        App.bumpSeq();
+        const seq = App.seq();
         this.campaignPage = p;
         await this.loadCampaignRecords(this.activeCampaign.campaign_id);
+        if (App.stale(seq)) return;
         this.renderDetailView();
     },
 
     /* ── CRUD Actions ─────────────────────────────────────── */
-    async deleteRecord(idx) {
-        const records = this.campaignRecords.results || [];
-        const email = records[idx]?.email;
+    async deleteRecord(email) {
         if (!email) return;
         if (!await App.confirm('Remove Record',
                 `Remove "${email}" from this campaign's unsubscribe list?`)) return;
@@ -536,34 +539,15 @@ const Unsubscribes = {
         }
         App.toast('Scanning inbox...', 'info');
         try {
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 60000);
-            const resp = await fetch('/api/unsubscribes/scan', {
-                method: 'POST',
-                signal: controller.signal,
-            });
-            clearTimeout(timeout);
-            if (resp.status === 401) {
-                window.location.href = '/auth/login';
-                return;
-            }
-            const result = await resp.json();
-            if (!resp.ok) {
-                App.toast(result.detail || 'Scan failed', 'error');
-            } else {
-                const imapData = result.imap || result;  // supports both old and new format
-                const linkData = result.link || {};
-                const totalProcessed = (imapData.processed || 0) + (linkData.processed || 0);
-                const msg = `Scanned ${imapData.scanned || 0} emails + ${linkData.scanned_lists || 0} lists — ${totalProcessed} unsubscribed`;
-                App.toast(msg, totalProcessed > 0 ? 'success' : 'info');
-                await this.render();
-            }
+            const result = await API.post('/api/unsubscribes/scan', {});
+            const imapData = result.imap || result;  // supports both old and new format
+            const linkData = result.link || {};
+            const totalProcessed = (imapData.processed || 0) + (linkData.processed || 0);
+            const msg = `Scanned ${imapData.scanned || 0} emails + ${linkData.scanned_lists || 0} lists — ${totalProcessed} unsubscribed`;
+            App.toast(msg, totalProcessed > 0 ? 'success' : 'info');
+            await this.render();
         } catch (err) {
-            if (err.name === 'AbortError') {
-                App.toast('Scan timed out — try again later', 'error');
-            } else {
-                App.toast(`Scan failed: ${err.message || 'Unknown error'}`, 'error');
-            }
+            // API.request already toasted the error; nothing more to do.
         } finally {
             if (scanBtn) {
                 scanBtn.disabled = false;

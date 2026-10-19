@@ -21,6 +21,12 @@ const App = {
     },
 
     init() {
+        // Guard against a second call (e.g. a future hot-reload or a duplicated
+        // bootstrap script): every listener below is added to a long-lived
+        // target, so a repeat run would stack duplicate handlers.
+        if (this._initialized) return;
+        this._initialized = true;
+
         window.addEventListener('hashchange', () => this.route());
 
         // The mobile sidebar's nav list scrolls; without a hint the clipped
@@ -54,6 +60,36 @@ const App = {
             syncNavHint();
         });
         syncNavHint();
+
+        // WAI-ARIA radio group: Arrow keys move between the two mode pills and
+        // select as they go. Without this the group only responded to Tab, so
+        // keyboard users could not switch modes the way the role promises.
+        const modeGroup = document.getElementById('modeSegmented');
+        if (modeGroup) {
+            modeGroup.addEventListener('keydown', (e) => {
+                const radios = Array.from(modeGroup.querySelectorAll('[role="radio"]'));
+                if (!radios.length) return;
+                const current = radios.indexOf(document.activeElement);
+                let next = null;
+                if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+                    next = current < 0 ? 0 : (current + 1) % radios.length;
+                } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+                    next = current < 0 ? radios.length - 1 : (current - 1 + radios.length) % radios.length;
+                } else if (e.key === 'Home') {
+                    next = 0;
+                } else if (e.key === 'End') {
+                    next = radios.length - 1;
+                }
+                if (next === null) return;
+                e.preventDefault();
+                const target = radios[next];
+                target.focus();
+                const mode = target.dataset.mode;
+                if (mode && target.getAttribute('aria-checked') !== 'true') {
+                    this.setMode(mode);
+                }
+            });
+        }
 
         // Close sidebar on content click (mobile)
         document.querySelector('.content-area').addEventListener('click', () => {
@@ -159,6 +195,9 @@ const App = {
             const active = btn.dataset.mode === mode;
             btn.classList.toggle('active', active);
             btn.setAttribute('aria-checked', active ? 'true' : 'false');
+            // Roving tabindex (WAI-ARIA radio group): Tab enters the group
+            // once, on the checked option; arrows move within it.
+            btn.setAttribute('tabindex', active ? '0' : '-1');
         });
 
         const isCold = mode === 'cold_email';
