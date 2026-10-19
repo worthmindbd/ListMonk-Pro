@@ -1,3 +1,7 @@
+# Direct dependencies are pinned to exact versions. Transitive dependencies
+# (starlette, anyio, h11, certifi, …) are intentionally left floating so
+# security patches land without a manual bump; for fully reproducible builds
+# generate a lock with:  pip freeze > requirements.lock
 fastapi==0.141.1
 uvicorn[standard]==0.52.4
 httpx==0.28.1

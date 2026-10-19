@@ -8,18 +8,43 @@ if [ ! -d "venv" ]; then
     exit 1
 fi
 
-# Check if port 8000 is already in use, kill it if so
-if lsof -i :8000 > /dev/null 2>&1; then
-    echo "⚠️ Port 8000 is already in use. Stopping existing process..."
-    kill $(lsof -t -i :8000) 2>/dev/null
+# Stop a previous instance of *this* app on port 8000. Verify the listener is
+# actually our uvicorn process first: previously this killed whatever happened
+# to hold the port, which could be an unrelated service on a shared machine.
+stop_own_listener() {
+    local pids
+    pids=$(lsof -t -i :8000 2>/dev/null || true)
+    [ -z "$pids" ] && return 0
+
+    local ours=()
+    for pid in $pids; do
+        local cmd
+        cmd=$(ps -o command= -p "$pid" 2>/dev/null || true)
+        case "$cmd" in
+            *uvicorn*app.main:app*|*"app.main:app"*) ours+=("$pid") ;;
+        esac
+    done
+
+    if [ ${#ours[@]} -eq 0 ]; then
+        echo "Error: port 8000 is held by a process that is not this app:"
+        for pid in $pids; do
+            echo "  PID $pid: $(ps -o command= -p "$pid" 2>/dev/null || echo '?')"
+        done
+        echo "Refusing to kill it. Stop it manually or use a different port."
+        exit 1
+    fi
+
+    echo "⚠️ Port 8000 is in use by a previous instance. Stopping it..."
+    kill "${ours[@]}" 2>/dev/null || true
     sleep 1
-    # Force kill if still running
     if lsof -i :8000 > /dev/null 2>&1; then
-        kill -9 $(lsof -t -i :8000) 2>/dev/null
+        kill -9 "${ours[@]}" 2>/dev/null || true
         sleep 1
     fi
     echo "✅ Previous process stopped."
-fi
+}
+
+stop_own_listener
 
 # Activate virtual environment
 source venv/bin/activate
