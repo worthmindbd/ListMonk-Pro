@@ -202,17 +202,20 @@ def _detect_delimiter(text: str) -> str:
     return best_delim
 
 
-def _prepare_reader(file_bytes: bytes) -> tuple[str, str, list[str], io.StringIO]:
+def _prepare_reader(file_bytes: bytes) -> tuple[str, str, list[str], io.StringIO, str]:
     """Decode the upload and detect its delimiter and header row.
 
-    Returns ``(text, delimiter, headers, text_io)`` where ``headers`` keeps a
-    stripped placeholder for **every** physical column — blank header cells
-    become ``""`` — so a column's index in this list is also its index in the
-    raw data rows, and ``text_io`` is positioned at the first data row, ready
-    for a ``csv.DictReader``. Filtering the blanks out here used to compact
-    the positions, so with a header like ``,name,email`` (pandas
+    Returns ``(text, delimiter, headers, text_io, encoding)`` where ``headers``
+    keeps a stripped placeholder for **every** physical column — blank header
+    cells become ``""`` — so a column's index in this list is also its index in
+    the raw data rows, and ``text_io`` is positioned at the first data row,
+    ready for a ``csv.DictReader``. Filtering the blanks out here used to
+    compact the positions, so with a header like ``,name,email`` (pandas
     ``to_csv(index=True)``) the email column resolved onto the index-number
     column and every row was mis-mapped or dropped.
+
+    ``encoding`` is returned so callers that report it in stats do not have to
+    run the (expensive) detection a second time over the same bytes.
     """
     encoding = detect_encoding(file_bytes)
     text = file_bytes.decode(encoding)
@@ -225,7 +228,7 @@ def _prepare_reader(file_bytes: bytes) -> tuple[str, str, list[str], io.StringIO
     except csv.Error:
         raw_header = []
     headers = [str(h).strip() for h in raw_header]
-    return text, delimiter, headers, text_io
+    return text, delimiter, headers, text_io, encoding
 
 
 def _column_index_map(headers: list[str]) -> dict[str, int]:
@@ -334,8 +337,7 @@ def detect_columns(file_bytes: bytes) -> dict:
     Detect columns in a CSV file.
     Returns dict with 'columns' list and 'sample_rows' (first 5 rows).
     """
-    text, delimiter, headers, text_io = _prepare_reader(file_bytes)
-    encoding = detect_encoding(file_bytes)
+    text, delimiter, headers, text_io, encoding = _prepare_reader(file_bytes)
 
     if not any(headers):
         return {"columns": [], "sample_rows": [], "encoding": encoding}
@@ -515,7 +517,7 @@ def _conversion_context(
     that failure used to import "successfully" while silently dropping all
     of the source data.
     """
-    text, delimiter, headers, _ = _prepare_reader(file_bytes)
+    text, delimiter, headers, _, encoding = _prepare_reader(file_bytes)
     if not any(headers):
         return {"error": "No columns found in CSV"}, None
 
@@ -560,6 +562,7 @@ def _conversion_context(
         "selected": selected,
         "auto": auto,
         "unresolved": unresolved,
+        "encoding": encoding,
     }
 
 
@@ -595,7 +598,7 @@ def convert_csv(
     if error:
         return {"csv_content": "", "stats": error}
 
-    encoding = detect_encoding(file_bytes)
+    encoding = ctx["encoding"]
 
     output = io.StringIO()
     writer = csv.DictWriter(output, fieldnames=["email", "name", "attributes"])
@@ -638,7 +641,7 @@ def preview_conversion(
     if error:
         return {"rows": [], "stats": error}
 
-    encoding = detect_encoding(file_bytes)
+    encoding = ctx["encoding"]
 
     take = max(0, limit)
     rows: list[dict] = []

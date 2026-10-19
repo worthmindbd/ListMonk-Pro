@@ -15,10 +15,13 @@ def _sanitize_cell(value: Any) -> Any:
 
     A leading single quote makes spreadsheet applications treat the cell as
     literal text; the quote is not displayed. Non-string values (ids, counts,
-    timestamps as numbers) are returned unchanged.
+    timestamps as numbers) are returned unchanged. Leading whitespace is
+    stripped before checking so ``" =SUM(A1)"`` cannot bypass the filter.
     """
-    if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
-        return "'" + value
+    if isinstance(value, str):
+        stripped = value.lstrip()
+        if stripped.startswith(_FORMULA_PREFIXES):
+            return "'" + value
     return value
 
 

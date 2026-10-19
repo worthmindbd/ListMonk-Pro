@@ -77,5 +77,7 @@ async def set_mode(mode: str) -> dict:
         raise ValueError(f"Invalid mode: {mode!r}")
     async with _lock:
         state = {**load_settings(), "mode": mode, "mode_selected": True}
-        _atomic_write_json(APP_SETTINGS_FILE, state)
+        # Offload blocking fsync to a worker thread so the event loop is not
+        # stalled during the atomic write.
+        await asyncio.to_thread(_atomic_write_json, APP_SETTINGS_FILE, state)
     return state

@@ -30,7 +30,7 @@ from app.services.hard_bounce_cache import start_cache_updater, schedule_hard_bo
 from app.auth import (
     verify_session, create_session, clear_session, check_credentials,
     is_login_rate_limited, record_login_failure, clear_login_failures,
-    client_ip_from_request,
+    client_ip_from_request, warn_if_default_credentials,
 )
 from app.services.task_utils import shutdown as shutdown_tasks
 from app.services.imap_reply_tracker import scan_and_track_replies
@@ -59,6 +59,10 @@ def _configure_logging() -> None:
     root.setLevel(level)
 
 
+# Configured at import time on purpose: uvicorn imports the app before it runs
+# the lifespan, and any module imported from here (auth's secret bootstrap, the
+# service layer) logs during import. Configuring later would silently discard
+# those first messages. Idempotent so a --reload reload does not stack handlers.
 _configure_logging()
 
 AUTO_UNBLOCK_INTERVAL = 6 * 60 * 60
@@ -90,6 +94,19 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "same-origin")
         response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        # CSP provides defense-in-depth against XSS. 'unsafe-inline' is
+        # required for the inline theme-init script and onclick handlers;
+        # a future migration to nonce-based CSP can tighten this.
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+            "font-src 'self' https://fonts.gstatic.com; "
+            "connect-src 'self'; frame-src 'none'; object-src 'none'",
+        )
+        response.headers.setdefault(
+            "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
+        )
         # HSTS is only meaningful (and only safe) over TLS — sending it on a
         # plain-HTTP dev instance would make browsers refuse to ever retry.
         if _is_https(request):
@@ -99,10 +116,35 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class CSRFMiddleware(BaseHTTPMiddleware):
+    """Reject state-changing API requests that lack a CORS-preflight trigger.
+
+    Browsers will not send ``X-Requested-With`` or ``Content-Type:
+    application/json`` cross-origin without a preflight, so requiring one of
+    these headers on POST/PUT/DELETE blocks cross-site form submissions even
+    when SameSite cookies are bypassed (e.g. same-origin XSS). GET requests
+    and non-API paths are unaffected.
+    """
+
+    SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method not in self.SAFE_METHODS and request.url.path.startswith("/api/"):
+            has_xrw = request.headers.get("x-requested-with", "").lower() == "xmlhttprequest"
+            has_json_ct = "application/json" in (request.headers.get("content-type") or "")
+            is_form_upload = "multipart/form-data" in (request.headers.get("content-type") or "")
+            if not (has_xrw or has_json_ct or is_form_upload):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Missing X-Requested-With or Content-Type header"},
+                )
+        return await call_next(request)
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     """Protect all routes except login and static files."""
 
-    OPEN_PATHS = {"/auth/login", "/auth/logout", "/favicon.ico"}
+    OPEN_PATHS = {"/auth/login", "/auth/logout", "/favicon.ico", "/health"}
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -123,38 +165,56 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 # ── Background Tasks ─────────────────────────────────────
 
+_BACKOFF_MAX = 3600  # Cap exponential backoff at 1 hour
+
+
+def _backoff_delay(consecutive_failures: int, base_interval: int) -> int:
+    """Exponential backoff: double the delay on each consecutive failure,
+    capped at ``_BACKOFF_MAX``. A successful run resets the counter."""
+    if consecutive_failures <= 0:
+        return base_interval
+    return min(base_interval * (2 ** consecutive_failures), _BACKOFF_MAX)
+
+
 async def auto_unblock_loop():
+    failures = 0
     while True:
         try:
             subs = await find_blocklisted_engaged(listmonk)
             if subs:
                 result = await unblock_subscribers(listmonk, subs)
                 logger.info(f"Auto-unblock: {result['success']} unblocked, {result['failed']} failed")
+            failures = 0
         except Exception as e:
-            logger.error(f"Auto-unblock error: {e}")
-        await asyncio.sleep(AUTO_UNBLOCK_INTERVAL)
+            failures += 1
+            logger.error(f"Auto-unblock error (#{failures}): {e}")
+        await asyncio.sleep(_backoff_delay(failures, AUTO_UNBLOCK_INTERVAL))
 
 
 async def imap_scan_loop():
     """Scan IMAP inbox and ListMonk link unsubscribes every hour, starting immediately on startup."""
+    failures = 0
     while True:
         try:
             imap_result = await scan_and_unsubscribe(listmonk)
             if imap_result.get("processed", 0) > 0:
                 logger.info(f"IMAP scan: {imap_result['processed']} unsubscribe(s) processed")
+            failures = 0
         except Exception as e:
-            logger.error(f"IMAP scan error: {e}")
+            failures += 1
+            logger.error(f"IMAP scan error (#{failures}): {e}")
         try:
             link_result = await scan_link_unsubscribes(listmonk)
             if link_result.get("processed", 0) > 0:
                 logger.info(f"Link scan: {link_result['processed']} unsubscribe(s) processed")
         except Exception as e:
             logger.error(f"Link unsubscribe scan error: {e}")
-        await asyncio.sleep(IMAP_SCAN_INTERVAL)
+        await asyncio.sleep(_backoff_delay(failures, IMAP_SCAN_INTERVAL))
 
 
 async def bounce_ingest_loop():
     """Ingest new bounces from the IMAP mailbox into ListMonk every hour."""
+    failures = 0
     while True:
         try:
             result = await ingest_bounce_mailbox(listmonk)
@@ -164,21 +224,26 @@ async def bounce_ingest_loop():
                     f"(hard={result.get('hard', 0)}, soft={result.get('soft', 0)})"
                 )
                 schedule_hard_bounce_update()
+            failures = 0
         except Exception as e:
-            logger.error(f"Bounce ingest error: {e}")
-        await asyncio.sleep(BOUNCE_INGEST_INTERVAL)
+            failures += 1
+            logger.error(f"Bounce ingest error (#{failures}): {e}")
+        await asyncio.sleep(_backoff_delay(failures, BOUNCE_INGEST_INTERVAL))
 
 
 async def reply_scan_loop():
     """Scan IMAP for cold outreach replies every 15 minutes."""
+    failures = 0
     while True:
         try:
             result = await scan_and_track_replies(listmonk)
             if result.get("new_replies", 0) > 0:
                 logger.info(f"Reply scan: {result['new_replies']} new prospect reply(ies) recorded")
+            failures = 0
         except Exception as e:
-            logger.error(f"Reply scan error: {e}")
-        await asyncio.sleep(REPLY_SCAN_INTERVAL)
+            failures += 1
+            logger.error(f"Reply scan error (#{failures}): {e}")
+        await asyncio.sleep(_backoff_delay(failures, REPLY_SCAN_INTERVAL))
 
 
 @asynccontextmanager
@@ -192,6 +257,19 @@ async def lifespan(app: FastAPI):
     _hard_bounce_cache_task = asyncio.create_task(start_cache_updater())
     _reply_scan_task = asyncio.create_task(reply_scan_loop())
     logger.info("Background tasks started: auto-unblock (6h), campaign scheduler (60s), IMAP+link scan (1h), bounce ingest (1h), hard bounce cache (5min), reply tracker (15min)")
+    warn_if_default_credentials()
+    logger.warning(
+        "Login rate-limit state is in-memory only and was reset on this restart. "
+        "An attacker who triggers container restarts can bypass the 10-attempt/15-minute limit."
+    )
+    # Warn when running behind a proxy without confirmed TLS — the session
+    # cookie's Secure flag depends on X-Forwarded-Proto being set correctly.
+    if os.getenv("TRUST_PROXY", "").lower() == "true":
+        logger.warning(
+            "TRUST_PROXY=true is set. Ensure your reverse proxy sends "
+            "X-Forwarded-Proto: https, otherwise session cookies will be "
+            "sent without the Secure flag over plain HTTP."
+        )
     yield
     loop_tasks = [
         _auto_unblock_task, _scheduler_task, _imap_scan_task,
@@ -208,6 +286,9 @@ async def lifespan(app: FastAPI):
 # ── App Setup ────────────────────────────────────────────
 
 app = FastAPI(title="ListMonk Pro", lifespan=lifespan)
+# Middleware execution order (outermost first): SecurityHeaders → Auth → CSRF → routes.
+# CSRF runs after auth so only authenticated requests are checked.
+app.add_middleware(CSRFMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 
@@ -330,17 +411,23 @@ async def logout(request: Request):
     return response
 
 
-# Kept for bookmarks/legacy links, but only after an explicit user action.
-@app.get("/auth/logout")
-async def logout_redirect(request: Request):
-    return RedirectResponse("/", status_code=302)
-
-
 # ── Favicon & Dashboard ───────────────────────────────────
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     return FileResponse(BASE_DIR / "static" / "favicon.png", media_type="image/png")
+
+
+@app.get("/health", include_in_schema=False)
+async def health():
+    """Liveness probe for the container healthcheck.
+
+    Deliberately does no template rendering and makes no upstream call: a
+    ListMonk outage must not mark this container unhealthy (the app serves
+    its own error UI), and the probe must stay cheap enough to run every
+    30 seconds forever.
+    """
+    return JSONResponse({"status": "ok"})
 
 
 @app.get("/")

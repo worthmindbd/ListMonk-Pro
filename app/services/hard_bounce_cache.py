@@ -46,7 +46,7 @@ async def update_hard_bounce_counts():
     without bound on large installations.
     """
     global _hard_bounce_counts, _last_updated
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     async with _update_lock:
         try:
@@ -66,7 +66,7 @@ async def update_hard_bounce_counts():
                 await _count_chunk(chunk, counts)
 
             _hard_bounce_counts = counts
-            _last_updated = datetime.now().isoformat()
+            _last_updated = datetime.now(timezone.utc).isoformat()
             logger.info(f"Hard bounce counts updated: {len(counts)} campaigns")
         except Exception as e:
             logger.error(f"Failed to update hard bounce counts: {e}", exc_info=True)

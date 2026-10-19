@@ -5,6 +5,7 @@ reply feed pagination, and manual IMAP scans.
 """
 
 import logging
+import time
 from fastapi import APIRouter, HTTPException, Query, Request
 from app.services.reply_log import (
     load_log, save_log, update_reply_status, update_reply_statuses, delete_replies,
@@ -27,6 +28,19 @@ MAX_PER_PAGE = 100
 MAX_BULK_IDS = 500
 
 VALID_REPLY_STATUSES = {"unread", "lead", "replied", "archived"}
+
+# Reply stats cache: avoids re-scanning the full log on every dashboard poll.
+_STATS_CACHE_TTL = 30  # seconds
+_stats_cache: dict = {}
+_stats_cached_at: float = 0.0
+
+
+def invalidate_reply_stats_cache() -> None:
+    """Call after any mutation to the reply log so the next stats request
+    re-derives counts from the fresh data."""
+    global _stats_cache, _stats_cached_at
+    _stats_cache = {}
+    _stats_cached_at = 0.0
 
 
 def _bulk_reply_ids(raw) -> list[str]:
@@ -107,7 +121,17 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
     With ``campaign_id`` the counts and the reply rate are scoped to that
     campaign, so the Analytics page can show per-campaign reply performance
     without re-deriving the denominator in the browser.
+
+    Results are cached for 30 seconds to avoid re-scanning the full log on
+    every dashboard poll. Mutations invalidate the cache via
+    :func:`invalidate_reply_stats_cache`.
     """
+    global _stats_cache, _stats_cached_at
+    now = time.monotonic()
+    cache_key = campaign_id
+    if cache_key in _stats_cache and (now - _stats_cached_at) < _STATS_CACHE_TTL:
+        return _stats_cache[cache_key]
+
     # Delivery-failure DSNs are never stored as replies anymore (they are
     # ingested as bounces); the sentiment filter is a defensive guard for
     # logs written by older versions, so a leftover DSN can never surface.
@@ -151,7 +175,7 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
         for k, v in sorted(by_campaign.items(), key=lambda x: -x[1])
     ]
 
-    return {
+    result = {
         "campaign_id": campaign_id,
         "total_replies": total,
         "human_replies": human_replies,
@@ -165,6 +189,9 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
         "by_campaign": by_campaign,
         "campaign_options": campaign_options,
     }
+    _stats_cache[cache_key] = result
+    _stats_cached_at = now
+    return result
 
 
 @router.get("")
@@ -188,7 +215,7 @@ async def get_replies(
     if status:
         filtered = [r for r in filtered if r.get("status") == status]
     if campaign_id:
-        filtered = [r for r in filtered if r.get("campaign_id") == campaign_id]
+        filtered = [r for r in filtered if str(r.get("campaign_id")) == str(campaign_id)]
     if q:
         query_lower = q.lower().strip()
         filtered = [
@@ -226,6 +253,7 @@ async def scan_replies():
     # ("already in progress" carries error=None and stays a 200.)
     if stats.get("error"):
         raise HTTPException(status_code=502, detail=f"IMAP scan failed: {stats['error']}")
+    invalidate_reply_stats_cache()
     return {"status": "ok", "stats": stats}
 
 
@@ -257,11 +285,11 @@ async def update_statuses(request: Request):
     if not ids:
         raise HTTPException(status_code=400, detail="No reply ids provided")
 
-    async with _log_lock:
-        updated = update_reply_statuses(ids, new_status)
+    updated = await update_reply_statuses(ids, new_status)
 
     if not updated:
         raise HTTPException(status_code=404, detail="No matching replies found")
+    invalidate_reply_stats_cache()
     return {"status": "ok", "updated": updated, "new_status": new_status}
 
 
@@ -289,7 +317,9 @@ async def blocklist_reply_senders(request: Request):
         raise HTTPException(status_code=400, detail="Selected replies have no sender email")
 
     async def _blocklist(email: str) -> None:
-        await _blocklist_sender(email)
+        res = await _blocklist_sender(email)
+        if "error" in res:
+            raise ValueError(res["error"])
 
     result = await run_bulk(sorted(emails), _blocklist)
     return {
@@ -315,14 +345,12 @@ async def update_status(reply_id: str, request: Request):
             detail=f"Status must be one of {VALID_REPLY_STATUSES}"
         )
 
-    # Same lock as every other log mutation: an unlocked load→mutate→save
-    # could be interleaved with the scanner's append (or a bulk update) and
-    # silently drop whichever write ran last.
-    async with _log_lock:
-        updated = update_reply_status(reply_id, new_status)
+    # Lock is now acquired inside update_reply_status itself.
+    updated = await update_reply_status(reply_id, new_status)
     if not updated:
         raise HTTPException(status_code=404, detail="Reply not found")
 
+    invalidate_reply_stats_cache()
     return {"status": "ok", "id": reply_id, "new_status": new_status}
 
 
@@ -332,28 +360,30 @@ async def _blocklist_sender(email: str) -> dict:
     Resolving the email server-side keeps the address out of the client-built
     ListMonk query string and validates it with the same helper the scanners
     use, so a crafted Reply-To address cannot inject query syntax.
+
+    Returns an error dict (with ``error`` key) instead of raising
+    HTTPException so that ``run_bulk`` can distinguish client errors from
+    server errors in its partial-failure report.
     """
     safe_email = safe_email_for_query((email or "").strip())
     if not safe_email:
-        raise HTTPException(status_code=400, detail="Reply has no valid sender email")
+        return {"error": "Reply has no valid sender email", "email": email}
 
     try:
         result = await listmonk.get_subscribers(1, 1, f"subscribers.email = '{safe_email}'")
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Subscriber lookup failed for {email}: {e}")
-        raise HTTPException(status_code=502, detail=f"Subscriber lookup failed: {e}")
+        return {"error": f"Subscriber lookup failed: {e}", "email": email}
     subscribers = (result.get("data") or {}).get("results") or []
     if not subscribers:
-        raise HTTPException(status_code=404, detail=f"No ListMonk subscriber found for {email}")
+        return {"error": f"No ListMonk subscriber found for {email}", "email": email}
 
     subscriber_id = subscribers[0]["id"]
     try:
         await listmonk.blocklist_subscriber(subscriber_id)
     except Exception as e:
         logger.error(f"Blocklist failed for {email}: {e}")
-        raise HTTPException(status_code=502, detail=f"Blocklist failed: {e}")
+        return {"error": f"Blocklist failed: {e}", "email": email}
 
     return {"status": "ok", "subscriber_id": subscriber_id, "email": email}
 
@@ -366,7 +396,10 @@ async def blocklist_reply_sender(reply_id: str):
     if not record:
         raise HTTPException(status_code=404, detail="Reply not found")
 
-    return await _blocklist_sender(record.get("from_email") or "")
+    result = await _blocklist_sender(record.get("from_email") or "")
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
 
 
 @router.delete("")
@@ -380,11 +413,11 @@ async def delete_replies_bulk(ids: list[str] = Query(default=[])):
     if not reply_ids:
         raise HTTPException(status_code=400, detail="No reply ids provided")
 
-    async with _log_lock:
-        removed = delete_replies(reply_ids)
+    removed = await delete_replies(reply_ids)
 
     if not removed:
         raise HTTPException(status_code=404, detail="No matching replies found")
+    invalidate_reply_stats_cache()
     return {"status": "ok", "deleted": removed}
 
 
@@ -397,4 +430,5 @@ async def delete_reply(reply_id: str):
         if len(new_records) == len(records):
             raise HTTPException(status_code=404, detail="Reply not found")
         save_log(new_records)
+        invalidate_reply_stats_cache()
     return {"status": "ok", "deleted": reply_id}

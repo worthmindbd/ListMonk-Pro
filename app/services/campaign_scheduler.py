@@ -11,6 +11,8 @@ Tracks which campaigns were auto-paused so it doesn't interfere with manual paus
 import asyncio
 import json
 import logging
+import os
+import tempfile
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
@@ -89,9 +91,6 @@ def load_schedule() -> dict:
             logger.error(f"Failed to load schedule: {e}")
     return dict(DEFAULT_SCHEDULE)
 
-
-import os
-import tempfile
 
 def save_schedule(schedule: dict):
     """Save schedule to JSON file atomically."""

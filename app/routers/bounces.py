@@ -116,14 +116,16 @@ async def delete_bounce(bounce_id: int):
 @router.delete("")
 async def delete_all_bounces(campaign_id: Optional[int] = None,
                               bounce_type: str = "",
-                              ids: list[int] = Query(default=[])):
+                              ids: list[int] = Query(default=[]),
+                              confirm: bool = Query(False)):
     """Delete bounces. If campaign_id is provided, only delete bounces for
     that campaign (iterating + deleting in parallel). If bounce_type is set
     without campaign_id, delete all matching bounces. Otherwise delete all.
 
     Supplying ``ids`` narrows the action to an explicit selection, which is
     what the Bounces page's bulk bar uses — every other mode is a filter-wide
-    sweep.
+    sweep. The unfiltered delete-all (no ids, no campaign_id, no bounce_type)
+    requires ``confirm=true`` to prevent accidental data loss.
     """
     bounce_type = _validate_bounce_type(bounce_type)
 
@@ -145,6 +147,12 @@ async def delete_all_bounces(campaign_id: Optional[int] = None,
         }
 
     if not campaign_id and not bounce_type:
+        if not confirm:
+            raise HTTPException(
+                status_code=400,
+                detail="Pass confirm=true to delete ALL bounces. This cannot be undone.",
+            )
+        logger.warning("Deleting ALL bounces (confirm=true)")
         res = await listmonk.delete_all_bounces()
         schedule_hard_bounce_update()
         return res

@@ -61,19 +61,23 @@ async def run_bulk(items, op, concurrency: int = DEFAULT_CONCURRENCY) -> dict:
 
     Returns ``{"ok": n, "errors": m, "failed": [{"id", "error"}]}`` so a UI can
     report partial failures instead of claiming a clean sweep.
+
+    Each coroutine returns its own result tuple; results are aggregated after
+    gather to avoid mutating shared state from concurrent tasks.
     """
     sem = asyncio.Semaphore(concurrency)
-    result = {"ok": 0, "errors": 0, "failed": []}
 
-    async def run(item):
+    async def run(item) -> tuple[bool, dict | None]:
+        """Returns (success, error_dict_or_None)."""
         async with sem:
             try:
                 await op(item)
-                result["ok"] += 1
+                return (True, None)
             except Exception as exc:
-                result["errors"] += 1
-                result["failed"].append({"id": item, "error": str(exc)})
                 logger.error(f"bulk action failed for {item}: {exc}")
+                return (False, {"id": item, "error": str(exc)})
 
-    await asyncio.gather(*(run(item) for item in items))
-    return result
+    outcomes = await asyncio.gather(*(run(item) for item in items))
+    ok = sum(1 for success, _ in outcomes if success)
+    failed = [err for success, err in outcomes if not success and err]
+    return {"ok": ok, "errors": len(failed), "failed": failed}

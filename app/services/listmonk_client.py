@@ -377,8 +377,10 @@ class ListMonkClient:
         }
         if campaign_uuid:
             payload["campaign_uuid"] = campaign_uuid
-        resp = await self.client.post("/webhooks/bounce", json=payload)
-        resp.raise_for_status()
+        # Use _request_raw so raise_for_status runs through the same path as
+        # every other call, but tolerate non-JSON 2xx responses from the
+        # webhook endpoint (some ListMonk versions return plain text).
+        resp = await self._request_raw("POST", "/webhooks/bounce", json=payload)
         try:
             return resp.json()
         except Exception:

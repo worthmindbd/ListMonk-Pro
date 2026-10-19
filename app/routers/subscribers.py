@@ -63,6 +63,10 @@ async def get_subscribers(page: int = Query(1, ge=1, le=MAX_PAGE),
                           query: str = "", search: str = "",
                           list_id: Optional[int] = None,
                           status: str = ""):
+    # SECURITY: `query` is a raw SQL passthrough to ListMonk's Postgres.
+    # The UI never sends it (only `search`), but any authenticated user who
+    # crafts a direct API call can execute arbitrary SQL expressions.
+    # Consider gating behind an admin role if non-admin access is ever added.
     return await listmonk.get_subscribers(
         page, per_page, _compose_query(query, search, status), list_id,
     )
@@ -133,6 +137,11 @@ async def get_subscriber_bounces(subscriber_id: int):
 
 @router.post("")
 async def create_subscriber(data: dict):
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+    email = data.get("email", "")
+    if not email or not isinstance(email, str) or "@" not in email:
+        raise HTTPException(status_code=400, detail="A valid email address is required")
     return await listmonk.create_subscriber(data)
 
 

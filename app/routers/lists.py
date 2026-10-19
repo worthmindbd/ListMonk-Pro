@@ -16,6 +16,13 @@ async def get_lists(page: int = Query(1, ge=1, le=MAX_PAGE),
                     query: str = "", search: str = "", status: str = "",
                     order_by: str = "created_at", order: str = "DESC",
                     minimal: bool = False):
+    # Validate sort parameters against known columns to prevent injection.
+    _VALID_LIST_ORDER_BY = {"created_at", "updated_at", "name", "type"}
+    if order_by not in _VALID_LIST_ORDER_BY:
+        raise HTTPException(status_code=400, detail=f"Invalid order_by: {order_by}")
+    if order.upper() not in ("ASC", "DESC"):
+        raise HTTPException(status_code=400, detail=f"Invalid order: {order}")
+    order = order.upper()
     # `query` stays a raw-SQL passthrough for power users; the UI's free-text
     # box sends `search`, which is folded into a literal ILIKE clause so plain
     # words never reach Postgres unparsed.

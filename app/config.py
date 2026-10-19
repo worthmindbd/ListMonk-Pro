@@ -78,13 +78,18 @@ class Settings:
         Ensures the directory exists. Migrates a pre-existing file from the
         repo root (legacy location) into the data dir on first access so
         existing schedules/logs are preserved after the volume switch.
+
+        Raises ``ValueError`` if the resolved path escapes the data dir
+        (path traversal protection).
         """
-        d = Path(self.data_dir)
+        d = Path(self.data_dir).resolve()
         d.mkdir(parents=True, exist_ok=True)
-        target = d / filename
+        target = (d / filename).resolve()
+        if not target.is_relative_to(d):
+            raise ValueError(f"data_path({filename!r}) resolves outside DATA_DIR")
         if not target.exists():
             legacy = _REPO_ROOT / filename
-            if legacy.exists() and legacy.resolve() != target.resolve():
+            if legacy.exists() and legacy.resolve() != target:
                 try:
                     target.write_bytes(legacy.read_bytes())
                 except OSError:

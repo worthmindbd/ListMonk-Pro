@@ -455,6 +455,7 @@ def connect_bounce_imap_rw() -> Optional[imaplib.IMAP4_SSL]:
 
 
 _INGEST_LOCK = asyncio.Lock()
+_ingest_running = False
 
 
 async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
@@ -472,13 +473,16 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
          created on or before the bounce timestamp
       3. Skip (can't attribute → don't create incomplete record)
     """
-    if _INGEST_LOCK.locked():
+    global _ingest_running
+    if _ingest_running:
         return {"scanned": 0, "ingested": 0, "skipped": 0, "errors": 0,
                 "message": "Ingest already in progress"}
 
     async with _INGEST_LOCK:
+        _ingest_running = True
         conn = await asyncio.to_thread(connect_bounce_imap_rw)
         if not conn:
+            _ingest_running = False
             return {"scanned": 0, "ingested": 0, "skipped": 0, "errors": 0,
                     "message": "Bounce IMAP not configured or connection failed"}
 
@@ -625,6 +629,7 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
             await _flush_handled()
 
         finally:
+            _ingest_running = False
             try:
                 await asyncio.to_thread(conn.logout)
             except Exception:

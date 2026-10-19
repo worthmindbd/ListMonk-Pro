@@ -262,6 +262,7 @@ async def check_imap_status() -> dict:
 
 
 _scan_lock = asyncio.Lock()
+_scan_running = False
 
 
 def _prune_existing_records(records: list[dict], valid_cids: set) -> list[dict]:
@@ -425,13 +426,16 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
     Scan IMAP inbox for unsubscribe requests and process them.
     Returns summary of actions taken.
     """
-    if _scan_lock.locked():
+    global _scan_running
+    if _scan_running:
         return {"scanned": 0, "matched": 0, "processed": 0, "errors": 0,
                 "message": "Scan already in progress"}
 
     async with _scan_lock:
+        _scan_running = True
         conn = await asyncio.to_thread(connect_imap)
         if not conn:
+            _scan_running = False
             return {"scanned": 0, "matched": 0, "processed": 0, "errors": 0,
                     "message": "IMAP not configured or connection failed"}
 
@@ -735,6 +739,7 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
             logger.error(f"IMAP scan error: {e}")
             errors += 1
         finally:
+            _scan_running = False
             try:
                 await asyncio.to_thread(conn.logout)
             except Exception:

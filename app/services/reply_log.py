@@ -74,61 +74,74 @@ async def append_log(new_records: list[dict]) -> None:
         save_log(combined)
 
 
-def update_reply_status(reply_id: str, new_status: str) -> bool:
+async def update_reply_status(reply_id: str, new_status: str) -> bool:
     """Update status of a single reply record.
 
     The change is recorded as ``status_source: "manual"`` so a later
     sentiment re-classification can undo its own automatic ``lead``
     promotion without overwriting a choice a human made.
+
+    Runs under ``_log_lock`` so concurrent scans cannot silently drop
+    records between the load and save.
     """
-    records = load_log()
-    updated = False
-    for r in records:
-        if str(r.get("id")) == str(reply_id):
-            r["status"] = new_status
-            r["status_source"] = "manual"
-            updated = True
-            break
-    if updated:
-        save_log(records)
-    return updated
+    async with _log_lock:
+        records = load_log()
+        updated = False
+        for r in records:
+            if str(r.get("id")) == str(reply_id):
+                r["status"] = new_status
+                r["status_source"] = "manual"
+                updated = True
+                break
+        if updated:
+            save_log(records)
+        return updated
 
 
-def update_reply_statuses(reply_ids, new_status: str) -> int:
+async def update_reply_statuses(reply_ids, new_status: str) -> int:
     """Set the same status on several records with a single write.
 
     Returns how many records actually changed, so a bulk action over a stale
     selection reports what really happened.
+
+    Runs under ``_log_lock`` so concurrent scans cannot silently drop
+    records between the load and save.
     """
     wanted = {str(r) for r in reply_ids if r}
     if not wanted:
         return 0
-    records = load_log()
-    updated = 0
-    for r in records:
-        if str(r.get("id")) in wanted:
-            if r.get("status") != new_status:
-                r["status"] = new_status
-                # Same provenance marker as the single-record path: a bulk
-                # status choice is a human decision too.
-                r["status_source"] = "manual"
-                updated += 1
-    if updated:
-        save_log(records)
-    return updated
+    async with _log_lock:
+        records = load_log()
+        updated = 0
+        for r in records:
+            if str(r.get("id")) in wanted:
+                if r.get("status") != new_status:
+                    r["status"] = new_status
+                    # Same provenance marker as the single-record path: a bulk
+                    # status choice is a human decision too.
+                    r["status_source"] = "manual"
+                    updated += 1
+        if updated:
+            save_log(records)
+        return updated
 
 
-def delete_replies(reply_ids) -> int:
-    """Remove several records with a single write; returns how many went."""
+async def delete_replies(reply_ids) -> int:
+    """Remove several records with a single write; returns how many went.
+
+    Runs under ``_log_lock`` so concurrent scans cannot silently drop
+    records between the load and save.
+    """
     wanted = {str(r) for r in reply_ids if r}
     if not wanted:
         return 0
-    records = load_log()
-    remaining = [r for r in records if str(r.get("id")) not in wanted]
-    removed = len(records) - len(remaining)
-    if removed:
-        save_log(remaining)
-    return removed
+    async with _log_lock:
+        records = load_log()
+        remaining = [r for r in records if str(r.get("id")) not in wanted]
+        removed = len(records) - len(remaining)
+        if removed:
+            save_log(remaining)
+        return removed
 
 
 def _load_processed_list() -> list[str]:
@@ -150,42 +163,59 @@ def load_processed_message_ids() -> set[str]:
             return {str(m) for m in data if m}
     except (FileNotFoundError, json.JSONDecodeError, IsADirectoryError, PermissionError):
         pass
-    # Seed from reply_log if processed file is missing
+    # Seed from reply_log if processed file is missing. Include both the
+    # stored message_id AND a From|Date|Subject fingerprint for older
+    # records that were stored without a message_id.
     records = load_log()
-    return {str(r.get("message_id")) for r in records if r.get("message_id")}
+    ids: set[str] = set()
+    for r in records:
+        mid = r.get("message_id")
+        if mid:
+            ids.add(str(mid))
+        # Fallback fingerprint for records without message_id
+        from_email = r.get("from_email", "")
+        date = r.get("date", "")
+        subject = r.get("subject", "")
+        if from_email and date:
+            ids.add(f"{from_email}|{date}|{subject}")
+    return ids
 
 
-def mark_processed_message_ids(message_ids) -> None:
+async def mark_processed_message_ids(message_ids) -> None:
     """Persist several handled message IDs with a single read + write.
 
     The reply scanner processes up to 200 messages per run; writing the whole
     file once per message made each scan O(n²) on disk I/O. The stored list is
     insertion-ordered and capped at MAX_PROCESSED_IDS (newest entries win), so
     a long-running installation cannot grow the file without bound.
+
+    Runs under ``_log_lock`` so concurrent scans cannot interleave reads/writes
+    on ``reply_processed.json``.
     """
     fresh = [str(m) for m in message_ids if m]
     if not fresh:
         return
-    current = _load_processed_list()
-    known = set(current)
-    added = []
-    for m in fresh:
-        if m not in known:
-            known.add(m)
-            added.append(m)
-    if not added:
-        return
-    current.extend(added)
-    if len(current) > MAX_PROCESSED_IDS:
-        current = current[-MAX_PROCESSED_IDS:]
-    _atomic_write_json(PROCESSED_FILE, current)
+    async with _log_lock:
+        current = _load_processed_list()
+        known = set(current)
+        added = []
+        for m in fresh:
+            if m not in known:
+                known.add(m)
+                added.append(m)
+        if not added:
+            return
+        current.extend(added)
+        if len(current) > MAX_PROCESSED_IDS:
+            current = current[-MAX_PROCESSED_IDS:]
+        _atomic_write_json(PROCESSED_FILE, current)
 
 
-def mark_processed_message_id(message_id: str) -> None:
+async def mark_processed_message_id(message_id: str) -> None:
     """Backwards-compatible single-ID wrapper."""
     if not message_id:
         return
-    mark_processed_message_ids([message_id])
+    await mark_processed_message_ids([message_id])
 
 
 def load_settings() -> dict:

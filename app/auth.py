@@ -94,12 +94,16 @@ def client_ip_from_request(request: Request) -> str:
 
     forwarded = request.headers.get("x-forwarded-for", "")
     if forwarded:
-        # Right-most entry is the original client: every trusted proxy
-        # APPENDS its own peer (nginx's $proxy_add_x_forwarded_for), so the
-        # entry added by the immediate trusted proxy is the only one the
-        # client cannot spoof. Reading the left-most entry instead would let
-        # an attacker rotate a fresh rate-limit bucket per attempt with a
-        # fake header.
+        # Right-most entry is the client IP as seen by the immediate trusted
+        # proxy: nginx's $proxy_add_x_forwarded_for APPENDS the peer, so the
+        # last entry is the one the client cannot spoof. Reading the left-most
+        # entry instead would let an attacker rotate a fresh rate-limit bucket
+        # per attempt with a fake header.
+        # NOTE: This assumes a single trusted proxy between the client and
+        # the app. In multi-hop chains where intermediate proxies also append,
+        # the rightmost entry may be an intermediate proxy rather than the
+        # real client. For those setups, configure TRUST_PROXY=false and
+        # terminate TLS at the outermost proxy.
         entries = [e.strip() for e in forwarded.split(",") if e.strip()]
         if entries:
             return entries[-1]
@@ -141,11 +145,15 @@ def _load_or_create_secret_key() -> str:
     except OSError:
         pass
 
-    # Fallback to appending to .env if DATA_DIR write fails
+    # Fallback to appending to .env if DATA_DIR write fails.
+    # Check for an existing SESSION_SECRET line first to avoid duplicates
+    # (python-dotenv uses the first occurrence, so later appends are ignored).
     dotenv_path = _REPO_ROOT / ".env"
     try:
-        with open(dotenv_path, "a") as f:
-            f.write(f"\nSESSION_SECRET={key}\n")
+        existing = dotenv_path.read_text(encoding="utf-8") if dotenv_path.exists() else ""
+        if "SESSION_SECRET=" not in existing:
+            with open(dotenv_path, "a", encoding="utf-8") as f:
+                f.write(f"\nSESSION_SECRET={key}\n")
         os.environ["SESSION_SECRET"] = key
         logger.info("Generated and persisted SESSION_SECRET to .env")
     except OSError:
@@ -240,6 +248,25 @@ def _constant_time_equals(a: str, b: str) -> bool:
     non-ASCII credentials a normal authentication failure.
     """
     return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
+_KNOWN_DEFAULT_CREDS = {
+    ("admin", "changeme"),
+    ("admin", "admin"),
+    ("admin", "password"),
+}
+
+
+def warn_if_default_credentials() -> None:
+    """Log a warning at startup when credentials match known defaults."""
+    user = os.getenv("DASHBOARD_USER", "")
+    passwd = os.getenv("DASHBOARD_PASS", "")
+    if (user, passwd) in _KNOWN_DEFAULT_CREDS:
+        logger.warning(
+            "⚠️  DASHBOARD_USER/DASHBOARD_PASS match known default credentials "
+            "(%s/****). Change them immediately to prevent unauthorized access.",
+            user,
+        )
 
 
 def check_credentials(username: str, password: str) -> bool:

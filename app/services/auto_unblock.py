@@ -43,18 +43,21 @@ async def find_blocklisted_clickers(client: ListMonkClient) -> list[dict]:
 
 
 async def delete_bounce_records_for_subscribers(client: ListMonkClient, subscriber_ids: list[int]) -> int:
-    """Delete all bounce records for the given subscriber IDs (bounded concurrency)."""
-    deleted = 0
+    """Delete all bounce records for the given subscriber IDs (bounded concurrency).
+
+    Each coroutine returns its own count; results are aggregated after gather
+    to avoid mutating shared state from concurrent tasks.
+    """
     sem = asyncio.Semaphore(BOUNCE_DELETE_CONCURRENCY)
 
-    async def _delete_for_subscriber(sid: int) -> None:
-        nonlocal deleted
+    async def _delete_for_subscriber(sid: int) -> int:
+        count = 0
         async with sem:
             try:
                 res = await client.get_subscriber_bounces(sid)
             except Exception as e:
                 logger.error(f"Failed to fetch bounces for subscriber {sid}: {e}")
-                return
+                return 0
 
             for b in res.get("data") or []:
                 bid = b.get("id")
@@ -62,17 +65,21 @@ async def delete_bounce_records_for_subscribers(client: ListMonkClient, subscrib
                     continue
                 try:
                     await client.delete_bounce(bid)
-                    deleted += 1
+                    count += 1
                 except Exception as e:
                     logger.error(f"Failed to delete bounce {bid}: {e}")
+        return count
 
-    await asyncio.gather(*(_delete_for_subscriber(sid) for sid in subscriber_ids))
-    return deleted
+    results = await asyncio.gather(*(_delete_for_subscriber(sid) for sid in subscriber_ids))
+    return sum(results)
 
 
 async def delete_bounce_records(client: ListMonkClient, emails: set[str]) -> int:
-    """Delete all bounce records for the given email addresses (fallback)."""
-    deleted = 0
+    """Delete all bounce records for the given email addresses (fallback).
+
+    Each coroutine returns its own count; results are aggregated after gather
+    to avoid mutating shared state from concurrent tasks.
+    """
     all_bounces = await client.paginate_all(client.get_bounces, per_page=500)
     bounce_ids_to_delete = [
         b["id"] for b in all_bounces
@@ -81,30 +88,30 @@ async def delete_bounce_records(client: ListMonkClient, emails: set[str]) -> int
 
     sem = asyncio.Semaphore(BOUNCE_DELETE_CONCURRENCY)
 
-    async def _delete(bid: int) -> None:
-        nonlocal deleted
+    async def _delete(bid: int) -> int:
         async with sem:
             try:
                 await client.delete_bounce(bid)
-                deleted += 1
+                return 1
             except Exception as e:
                 logger.error(f"Failed to delete bounce {bid}: {e}")
+                return 0
 
-    await asyncio.gather(*(_delete(bid) for bid in bounce_ids_to_delete))
-    return deleted
+    results = await asyncio.gather(*(_delete(bid) for bid in bounce_ids_to_delete))
+    return sum(results)
 
 
 async def unblock_subscribers(client: ListMonkClient, subscribers: list[dict]) -> dict:
-    """Unblock subscribers: set status to enabled + delete their bounce records."""
-    success = 0
-    failed = 0
-    unblocked = []
-    unblocked_ids = []
+    """Unblock subscribers: set status to enabled + delete their bounce records.
+
+    Each coroutine returns its own result tuple; results are aggregated after
+    gather to avoid mutating shared state from concurrent tasks.
+    """
     sem = asyncio.Semaphore(UNBLOCK_CONCURRENCY)
 
     # Step 1: Re-enable all subscribers
-    async def _unblock(s: dict) -> None:
-        nonlocal success, failed
+    async def _unblock(s: dict) -> tuple[str, int, bool]:
+        """Returns (email, subscriber_id, success)."""
         async with sem:
             try:
                 await client.update_subscriber(s["id"], {
@@ -114,15 +121,17 @@ async def unblock_subscribers(client: ListMonkClient, subscribers: list[dict]) -
                     "lists": [l["id"] for l in (s.get("lists") or [])],
                     "attribs": s.get("attribs", {}),
                 })
-                success += 1
-                unblocked.append(s["email"])
-                unblocked_ids.append(s["id"])
                 logger.info(f"Unblocked: {s['email']}")
+                return (s["email"], s["id"], True)
             except Exception as e:
-                failed += 1
                 logger.error(f"Failed to unblock {s['email']}: {e}")
+                return (s["email"], s["id"], False)
 
-    await asyncio.gather(*(_unblock(s) for s in subscribers))
+    results = await asyncio.gather(*(_unblock(s) for s in subscribers))
+    unblocked = [email for email, _, ok in results if ok]
+    unblocked_ids = [sid for _, sid, ok in results if ok]
+    success = sum(1 for _, _, ok in results if ok)
+    failed = sum(1 for _, _, ok in results if not ok)
 
     # Step 2: Delete bounce records for unblocked subscribers
     if unblocked_ids:

@@ -12,15 +12,18 @@ wraps the term in literal ILIKE matches on the given columns.
 def escape_search_term(search: str) -> str:
     """Reduce free text to a literal substring safe inside an ILIKE pattern.
 
-    LIKE wildcards and backslashes are stripped (the term must only ever match
-    literally) and single quotes are doubled so the value cannot break out of
-    its SQL string literal. Returns "" when nothing usable remains.
+    LIKE wildcards (``%``, ``_``) and backslashes are escaped with a leading
+    backslash so they match literally rather than being interpreted as
+    pattern operators. Single quotes are doubled so the value cannot break
+    out of its SQL string literal. Returns "" when nothing usable remains.
     """
     term = (search or "").strip()
     if not term:
         return ""
-    for ch in ("%", "_", "\\"):
-        term = term.replace(ch, "")
+    # Escape backslash first so we don't double-escape our own escapes.
+    term = term.replace("\\", "\\\\")
+    term = term.replace("%", "\\%")
+    term = term.replace("_", "\\_")
     if not term:
         return ""
     return term.replace("'", "''")

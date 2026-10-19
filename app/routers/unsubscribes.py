@@ -95,7 +95,7 @@ async def get_campaign_groups():
     groups: dict = {}
 
     for r in records:
-        cid = r.get("campaign_id") or "unknown"
+        cid = r.get("campaign_id") if r.get("campaign_id") is not None else "unknown"
         group_key = str(cid)
         if group_key not in groups:
             groups[group_key] = {
@@ -178,13 +178,24 @@ async def delete_campaign_group(campaign_id: int):
     return {"removed": removed, "message": f"Removed {removed} record(s) from campaign {campaign_id}"}
 
 
+_MAX_DELETE_EMAILS = 100
+
+
 @router.delete("/records")
 async def delete_records(emails: list[str] = Query(default=[])):
-    """Delete specific unsubscribe records by email."""
+    """Delete specific unsubscribe records by email (capped at 100)."""
+    if not emails:
+        raise HTTPException(status_code=400, detail="No emails provided")
+    if len(emails) > _MAX_DELETE_EMAILS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many emails ({len(emails)}). Maximum is {_MAX_DELETE_EMAILS}.",
+        )
+    email_set = set(emails)
     async with _log_lock:
         records = load_log()
         before_count = len(records)
-        remaining = [r for r in records if r.get("email") not in emails]
+        remaining = [r for r in records if r.get("email") not in email_set]
         removed = before_count - len(remaining)
         save_log(remaining)
     return {"removed": removed, "message": f"Removed {removed} record(s)"}
@@ -320,6 +331,15 @@ async def reset_all_unsubscribes():
             ),
         )
 
+    # Snapshot the identity of every record we intend to restore BEFORE
+    # processing begins. We use (subscriber_id, email, timestamp) so a NEW
+    # unsubscribe for the same subscriber that arrives during processing
+    # is never accidentally removed from the log.
+    restoring_identities: set[tuple] = {
+        (r.get("subscriber_id"), r.get("email", "unknown"), r.get("timestamp", ""))
+        for r in records
+    }
+
     sem = asyncio.Semaphore(RESET_CONCURRENCY)
     results: list[dict] = [None] * len(records)  # type: ignore[list-item]
 
@@ -331,7 +351,7 @@ async def reset_all_unsubscribes():
 
             if not sub_id:
                 results[idx] = {
-                    "ok": False, "key": (sub_id, email_addr),
+                    "ok": False,
                     "detail": f"SKIP {email_addr}: no subscriber_id",
                 }
                 return
@@ -343,7 +363,7 @@ async def reset_all_unsubscribes():
 
                 if not subscriber:
                     results[idx] = {
-                        "ok": False, "key": (sub_id, email_addr),
+                        "ok": False,
                         "detail": f"SKIP {email_addr}: subscriber {sub_id} not found",
                     }
                     return
@@ -368,53 +388,71 @@ async def reset_all_unsubscribes():
                     })
 
                 results[idx] = {
-                    "ok": True, "key": (sub_id, email_addr),
+                    "ok": True,
                     "detail": f"OK {email_addr}: enabled + re-added to lists {lists_removed}",
                 }
 
             except Exception as e:
                 results[idx] = {
-                    "ok": False, "key": (sub_id, email_addr),
+                    "ok": False,
                     "detail": f"FAIL {email_addr}: {e}",
                 }
 
     await asyncio.gather(*(restore(i, r) for i, r in enumerate(records)))
 
     details: list[str] = []
-    restored_keys: set = set()
+    restored_count = 0
     for res in results:
         if res is None:
             continue
         details.append(res["detail"])
         if res["ok"]:
-            restored_keys.add(res["key"])
+            restored_count += 1
             logging.getLogger("unsubscribes").info(res["detail"])
         else:
             logging.getLogger("unsubscribes").error(res["detail"])
 
-    restored = len(restored_keys)
-    failed = len(records) - restored
+    failed = len(records) - restored_count
 
-    # Only clear records that were successfully restored;
-    # failed records and newly arrived records stay in the log.
+    # Only clear records that were in our original snapshot AND were
+    # successfully restored. New records that arrived during processing
+    # are preserved because their timestamp won't match the snapshot.
     async with _log_lock:
         fresh_records = load_log()
         remaining_records = [
             r for r in fresh_records
-            if (r.get("subscriber_id"), r.get("email", "unknown")) not in restored_keys
+            if (r.get("subscriber_id"), r.get("email", "unknown"), r.get("timestamp", ""))
+            not in restoring_identities
+            or not any(
+                res and res["ok"]
+                for res in results
+            )
+        ]
+        # More precise: only remove records whose identity is in the snapshot
+        # AND whose corresponding restore succeeded. Build a set of identities
+        # that were successfully restored.
+        ok_indices = {i for i, res in enumerate(results) if res and res["ok"]}
+        ok_identities = {
+            (records[i].get("subscriber_id"), records[i].get("email", "unknown"), records[i].get("timestamp", ""))
+            for i in ok_indices
+        }
+        remaining_records = [
+            r for r in fresh_records
+            if (r.get("subscriber_id"), r.get("email", "unknown"), r.get("timestamp", ""))
+            not in ok_identities
         ]
         save_log(remaining_records)
 
     # Allow future unsubscribes from restored subscribers to be detected again.
     # (The suppressed-email set is intentionally NOT cleared when log records
     # are merely deleted — otherwise the scanners would re-handle them.)
-    restored_emails = [email for _, email in restored_keys]
+    restored_emails = [records[i].get("email", "") for i in ok_indices]
     if restored_emails:
         await unmark_processed(restored_emails)
 
     return {
-        "message": f"Reset complete: {restored} restored, {failed} failed (kept in log for retry)",
-        "restored": restored,
+        "message": f"Reset complete: {restored_count} restored, {failed} failed (kept in log for retry)",
+        "restored": restored_count,
         "failed": failed,
         "details": details,
     }

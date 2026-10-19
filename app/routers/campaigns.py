@@ -100,6 +100,13 @@ async def get_campaigns(page: int = Query(1, ge=1, le=MAX_PAGE),
                         per_page: int = Query(50, ge=1, le=MAX_PER_PAGE),
                         query: str = "", search: str = "", status: str = "",
                         order_by: str = "created_at", order: str = "DESC"):
+    # Validate sort parameters against known columns to prevent injection.
+    _VALID_CAMPAIGN_ORDER_BY = {"created_at", "updated_at", "name", "subject", "status"}
+    if order_by not in _VALID_CAMPAIGN_ORDER_BY:
+        raise HTTPException(status_code=400, detail=f"Invalid order_by: {order_by}")
+    if order.upper() not in ("ASC", "DESC"):
+        raise HTTPException(status_code=400, detail=f"Invalid order: {order}")
+    order = order.upper()
     # `query` stays a raw-SQL passthrough for power users; the UI's free-text
     # box sends `search`, which is folded into a literal ILIKE clause so plain
     # words never reach Postgres unparsed.
@@ -138,6 +145,8 @@ async def get_campaign_analytics(analytics_type: str,
             status_code=400,
             detail=f"Invalid analytics type: {analytics_type}. Use views, clicks, bounces, or links",
         )
+    from_date = _validate_date(from_date, "from_date")
+    to_date = _validate_date(to_date, "to_date")
     return await listmonk.get_campaign_analytics(analytics_type, campaign_id,
                                                  from_date, to_date)
 
@@ -152,6 +161,8 @@ async def export_campaign_analytics(analytics_type: str,
             status_code=400,
             detail=f"Invalid analytics type: {analytics_type}. Use views, clicks, bounces, or links",
         )
+    from_date = _validate_date(from_date, "from_date")
+    to_date = _validate_date(to_date, "to_date")
     result = await listmonk.get_campaign_analytics(analytics_type, campaign_id,
                                                    from_date, to_date)
     data = result.get("data", [])
@@ -386,6 +397,12 @@ async def preview_campaign(campaign_id: int):
 
 @router.post("")
 async def create_campaign(data: dict):
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+    if not data.get("name"):
+        raise HTTPException(status_code=400, detail="Campaign name is required")
+    if not data.get("subject"):
+        raise HTTPException(status_code=400, detail="Campaign subject is required")
     return await listmonk.create_campaign(data)
 
 

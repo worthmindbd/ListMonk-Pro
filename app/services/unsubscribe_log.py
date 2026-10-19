@@ -30,6 +30,7 @@ _DEFAULT_SETTINGS = {
 }
 
 _log_lock = asyncio.Lock()
+_migration_done = False
 
 
 def _normalize_campaign_key(key: str) -> str:
@@ -72,17 +73,20 @@ def load_log() -> list[dict]:
         # otherwise raise AttributeError on the .get() below and turn every
         # /api/unsubscribes* endpoint into a 500 until fixed by hand.
         return []
-    migrated = False
-    for r in records:
-        if not isinstance(r, dict):
-            continue
-        old_key = r.get("campaign_key", "")
-        new_key = _normalize_campaign_key(old_key)
-        if new_key != old_key:
-            r["campaign_key"] = new_key
-            migrated = True
-    if migrated:
-        save_log(records)
+    global _migration_done
+    if not _migration_done:
+        migrated = False
+        for r in records:
+            if not isinstance(r, dict):
+                continue
+            old_key = r.get("campaign_key", "")
+            new_key = _normalize_campaign_key(old_key)
+            if new_key != old_key:
+                r["campaign_key"] = new_key
+                migrated = True
+        if migrated:
+            save_log(records)
+        _migration_done = True
     return records
 
 
@@ -131,16 +135,20 @@ def load_processed_emails() -> set[str]:
     return seeded
 
 
-def save_processed_emails(emails: set[str]) -> None:
+def save_processed_emails(emails: set[str], ordered_hint: list[str] | None = None) -> None:
     """Persist handled emails as an insertion-ordered, capped list.
 
     Callers pass a set, so chronology comes from the existing file: known
     emails keep their stored order (oldest first) and new ones are appended.
     Trimming to MAX_PROCESSED_EMAILS then drops the oldest entries instead of
     letting the file grow forever.
+
+    ``ordered_hint`` lets a caller that has *already* read the file supply the
+    stored order, avoiding a second (blocking) read of the same JSON file.
     """
     wanted = {str(e).lower() for e in emails if e}
-    ordered = [e for e in _load_processed_list() if e in wanted]
+    existing_order = ordered_hint if ordered_hint is not None else _load_processed_list()
+    ordered = [e for e in existing_order if e in wanted]
     ordered.extend(sorted(wanted - set(ordered)))
     if len(ordered) > MAX_PROCESSED_EMAILS:
         ordered = ordered[-MAX_PROCESSED_EMAILS:]
@@ -150,17 +158,30 @@ def save_processed_emails(emails: set[str]) -> None:
 async def mark_processed(emails) -> None:
     """Persist emails as handled (union with the existing set)."""
     async with _log_lock:
-        current = load_processed_emails()
+        existing_order = _load_processed_list()
+        if existing_order:
+            # Fast path: the file already exists, so derive the set from the
+            # order we just read instead of reading the same JSON twice.
+            current = set(existing_order)
+        else:
+            # First run: fall back to the seeding path (writes the file).
+            current = load_processed_emails()
+            existing_order = _load_processed_list()
         current.update(str(e).lower() for e in emails if e)
-        save_processed_emails(current)
+        save_processed_emails(current, ordered_hint=existing_order)
 
 
 async def unmark_processed(emails) -> None:
     """Remove emails from the handled set so a future unsubscribe is detected."""
     async with _log_lock:
-        current = load_processed_emails()
+        existing_order = _load_processed_list()
+        if existing_order:
+            current = set(existing_order)
+        else:
+            current = load_processed_emails()
+            existing_order = _load_processed_list()
         current.difference_update(str(e).lower() for e in emails if e)
-        save_processed_emails(current)
+        save_processed_emails(current, ordered_hint=existing_order)
 
 
 def load_settings() -> dict:

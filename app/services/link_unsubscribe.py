@@ -26,6 +26,7 @@ MAX_CAMPAIGN_PAGES = 20  # Safety cap: 2000 campaigns
 CAMPAIGN_HISTORY_TTL = 900  # 15 minutes; campaign creation is rare
 
 _link_scan_lock = asyncio.Lock()
+_link_scan_running = False
 
 # Full campaign history (newest first) used for attribution, plus its load time.
 _campaign_history: list[dict] = []
@@ -203,12 +204,17 @@ async def scan_link_unsubscribes(client: ListMonkClient) -> dict:
     Serialized with a module lock so a manual scan and the hourly background
     scan cannot process (and log) the same subscribers twice.
     """
-    if _link_scan_lock.locked():
+    global _link_scan_running
+    if _link_scan_running:
         return {"scanned_lists": 0, "new_found": 0, "processed": 0, "errors": 0,
                 "message": "Link scan already in progress"}
 
     async with _link_scan_lock:
-        return await _scan_link_unsubscribes_impl(client)
+        _link_scan_running = True
+        try:
+            return await _scan_link_unsubscribes_impl(client)
+        finally:
+            _link_scan_running = False
 
 
 async def _scan_link_unsubscribes_impl(client: ListMonkClient) -> dict:

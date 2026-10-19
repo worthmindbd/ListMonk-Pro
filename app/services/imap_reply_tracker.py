@@ -44,6 +44,7 @@ CAMPAIGN_PAGE_SIZE = 100
 # Serialises reply scans so the 15-minute background loop and a manual
 # "Scan Mailbox" click cannot process (and log) the same message twice.
 _reply_scan_lock = asyncio.Lock()
+_reply_scan_running = False
 
 # Sentiment detection patterns — automated / non-human responses.
 # Covers out-of-office notices, ticket-system auto-responses (Zendesk,
@@ -644,7 +645,8 @@ async def scan_and_track_replies(
     manual "Scan Mailbox" endpoint both call this, and two overlapping scans
     would load the same processed-ID set and log duplicate replies.
     """
-    if _reply_scan_lock.locked():
+    global _reply_scan_running
+    if _reply_scan_running:
         return {
             "error": None,
             "scanned": 0,
@@ -658,7 +660,11 @@ async def scan_and_track_replies(
         }
 
     async with _reply_scan_lock:
-        return await _scan_and_track_replies_impl(listmonk, days_back)
+        _reply_scan_running = True
+        try:
+            return await _scan_and_track_replies_impl(listmonk, days_back)
+        finally:
+            _reply_scan_running = False
 
 
 async def _scan_and_track_replies_impl(
@@ -898,6 +904,6 @@ async def _scan_and_track_replies_impl(
 
     # One read+write for the whole scan instead of one per message.
     if new_msg_ids:
-        mark_processed_message_ids(new_msg_ids)
+        await mark_processed_message_ids(new_msg_ids)
 
     return stats
