@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from fastapi.testclient import TestClient
+from tests.conftest import CSRFTestClient
 from app.main import app
 from app.services.imap_reply_tracker import classify_sentiment
 from app.services.deliverability_service import get_deliverability_checklist, apply_deliverability_preset
@@ -464,7 +465,7 @@ async def test_apply_settings_merges_patch(monkeypatch):
 @pytest.fixture
 def client():
     with patch("app.main.verify_session", return_value=True):
-        yield TestClient(app)
+        yield CSRFTestClient(app)
 
 
 def test_replies_api_endpoints(client):

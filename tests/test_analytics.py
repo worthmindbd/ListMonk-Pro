@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
+from tests.conftest import CSRFTestClient
 from app.main import app
 
 
@@ -8,7 +9,7 @@ from app.main import app
 def client():
     # Bypass auth middleware for testing
     with patch("app.main.verify_session", return_value=True):
-        yield TestClient(app)
+        yield CSRFTestClient(app)
 
 
 def test_get_campaign_analytics_views(client):

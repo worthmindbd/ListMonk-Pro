@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from tests.conftest import CSRFTestClient
 
 from app.main import app
 
@@ -21,7 +22,7 @@ from app.main import app
 @pytest.fixture
 def client():
     with patch("app.main.verify_session", return_value=True):
-        yield TestClient(app, raise_server_exceptions=False)
+        yield CSRFTestClient(app, raise_server_exceptions=False)
 
 
 # ── B2: exports/sweeps walk the whole table, no silent cap ──────────────
@@ -88,8 +89,9 @@ def test_campaigns_search_becomes_escaped_ilike(client):
     assert resp.status_code == 200
     q = captured["query"]
     assert "ILIKE" in q and "campaigns.name" in q and "campaigns.subject" in q
-    assert "o''brien x" in q          # quote doubled, wildcard stripped
-    assert "%o'brien" not in q        # never the raw term
+    assert "o''brien" in q             # quote doubled
+    assert "\\%x" in q                 # % is escaped, not stripped
+    assert "%o'brien" not in q         # never the raw unescaped term
 
 
 def test_lists_search_becomes_escaped_ilike(client):

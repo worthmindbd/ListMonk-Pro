@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from tests.conftest import CSRFTestClient
 
 from app.main import app
 
@@ -25,7 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 @pytest.fixture
 def client():
     with patch("app.main.verify_session", return_value=True):
-        yield TestClient(app, raise_server_exceptions=False)
+        yield CSRFTestClient(app, raise_server_exceptions=False)
 
 
 # ── 1. Non-ASCII credentials must be a 401, never a 500 ─────────────────────
@@ -39,7 +40,7 @@ def client():
 def test_login_with_non_ascii_credentials_returns_401_not_500(monkeypatch, username, password):
     monkeypatch.setenv("DASHBOARD_USER", "admin")
     monkeypatch.setenv("DASHBOARD_PASS", "secret")
-    c = TestClient(app, raise_server_exceptions=False)
+    c = CSRFTestClient(app, raise_server_exceptions=False)
     resp = c.post("/auth/login", json={"username": username, "password": password})
     assert resp.status_code == 401, f"{username!r} returned {resp.status_code}, not 401"
 
@@ -50,7 +51,7 @@ def test_non_ascii_login_is_rate_limited(monkeypatch):
 
     monkeypatch.setenv("DASHBOARD_USER", "admin")
     monkeypatch.setenv("DASHBOARD_PASS", "secret")
-    c = TestClient(app, raise_server_exceptions=False)
+    c = CSRFTestClient(app, raise_server_exceptions=False)
     ip = "testclient"
     auth.clear_login_failures(ip)
     try:

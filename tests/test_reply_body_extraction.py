@@ -389,7 +389,7 @@ async def test_reclassify_keeps_a_human_lead_status(tmp_path, monkeypatch):
     assert record["status_source"] == "manual"
 
 
-def test_status_api_marks_the_change_as_manual(tmp_path, monkeypatch):
+async def test_status_api_marks_the_change_as_manual(tmp_path, monkeypatch):
     """Manual status edits must outrank a later automatic correction."""
     rl = _reply_log(tmp_path, monkeypatch, [
         {"id": "rep_1", "message_id": "<hi@x>", "subject": "Re: Hi",
@@ -397,7 +397,7 @@ def test_status_api_marks_the_change_as_manual(tmp_path, monkeypatch):
          "status_source": "auto"},
     ])
 
-    assert rl.update_reply_status("rep_1", "lead") is True
+    assert await rl.update_reply_status("rep_1", "lead") is True
 
     record = rl.load_log()[0]
     assert record["status"] == "lead"
@@ -417,7 +417,7 @@ async def test_scan_repairs_stored_empty_reply(tmp_path, monkeypatch):
          "from_email": "prospect@example.com", "full_body": "",
          "body_preview": "", "sentiment": "question", "status": "unread"},
     ])
-    rl.mark_processed_message_ids(["<apple-mail@example.com>"])
+    await rl.mark_processed_message_ids(["<apple-mail@example.com>"])
 
     monkeypatch.setattr(T.settings, "imap_host", "imap.example.com")
     monkeypatch.setattr(T.settings, "imap_user", "me@example.com")

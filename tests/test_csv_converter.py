@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from tests.conftest import CSRFTestClient
 
 from app.main import app
 from app.services.csv_converter import convert_csv, detect_columns, preview_conversion
@@ -15,7 +16,7 @@ def client():
     # never touch ListMonk, so the lifespan (and its background tasks) can be
     # skipped.
     with patch("app.main.verify_session", return_value=True):
-        yield TestClient(app, raise_server_exceptions=False)
+        yield CSRFTestClient(app, raise_server_exceptions=False)
 
 
 def test_detect_columns_normal():

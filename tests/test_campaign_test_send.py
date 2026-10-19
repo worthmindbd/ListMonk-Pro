@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
+from tests.conftest import CSRFTestClient
 
 from app.main import app
 
@@ -53,7 +54,7 @@ def captured(monkeypatch):
 
 
 def test_test_send_posts_full_campaign_payload(captured):
-    c = TestClient(app, raise_server_exceptions=False)
+    c = CSRFTestClient(app, raise_server_exceptions=False)
     with patch("app.main.verify_session", return_value=True):
         resp = c.post("/api/campaigns/7/test", json={"emails": ["  You@Example.COM "]})
 
@@ -69,14 +70,14 @@ def test_test_send_posts_full_campaign_payload(captured):
 
 
 def test_test_send_rejects_missing_recipient(captured):
-    c = TestClient(app, raise_server_exceptions=False)
+    c = CSRFTestClient(app, raise_server_exceptions=False)
     with patch("app.main.verify_session", return_value=True):
         resp = c.post("/api/campaigns/7/test", json={"emails": []})
     assert resp.status_code == 400
 
 
 def test_test_send_accepts_listmonk_style_subscribers_key(captured):
-    c = TestClient(app, raise_server_exceptions=False)
+    c = CSRFTestClient(app, raise_server_exceptions=False)
     with patch("app.main.verify_session", return_value=True):
         resp = c.post("/api/campaigns/7/test", json={"subscribers": ["a@x.com"]})
     assert resp.status_code == 200

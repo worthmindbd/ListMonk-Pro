@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from tests.conftest import CSRFTestClient
 
 from app.main import app
 
@@ -14,7 +15,7 @@ from app.main import app
 @pytest.fixture
 def client():
     with patch("app.main.verify_session", return_value=True):
-        yield TestClient(app)
+        yield CSRFTestClient(app)
 
 
 # ── Route shadowing ──────────────────────────────────────────────────────────

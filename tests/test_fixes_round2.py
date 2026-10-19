@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from tests.conftest import CSRFTestClient
 
 from app.main import app
 from app.services.listmonk_client import ListMonkClient
@@ -22,7 +23,7 @@ from app.services.listmonk_client import ListMonkClient
 @pytest.fixture
 def client():
     with patch("app.main.verify_session", return_value=True):
-        yield TestClient(app, raise_server_exceptions=False)
+        yield CSRFTestClient(app, raise_server_exceptions=False)
 
 
 # ── 1. RFC 3464 delivery-status fields must be parsed ────────────────────────
@@ -195,7 +196,7 @@ async def test_bounce_export_streams_rows(monkeypatch):
 
     monkeypatch.setattr(R, "iter_filtered_bounces", fake_iter)
 
-    c = TestClient(app, raise_server_exceptions=False)
+    c = CSRFTestClient(app, raise_server_exceptions=False)
     with patch("app.main.verify_session", return_value=True):
         resp = c.get("/api/bounces/export?bounce_type=hard")
 
@@ -214,7 +215,7 @@ async def test_bounce_export_404_when_empty(monkeypatch):
 
     monkeypatch.setattr(R, "iter_filtered_bounces", empty_iter)
 
-    c = TestClient(app, raise_server_exceptions=False)
+    c = CSRFTestClient(app, raise_server_exceptions=False)
     with patch("app.main.verify_session", return_value=True):
         resp = c.get("/api/bounces/export?bounce_type=hard")
 
@@ -241,7 +242,7 @@ async def test_campaign_subscriber_export_streams(monkeypatch):
 
     monkeypatch.setattr(C.listmonk, "iter_pages", fake_iter_pages)
 
-    c = TestClient(app, raise_server_exceptions=False)
+    c = CSRFTestClient(app, raise_server_exceptions=False)
     with patch("app.main.verify_session", return_value=True):
         resp = c.get("/api/campaigns/1/subscribers/views/export")
 
@@ -263,7 +264,7 @@ async def test_campaign_bounce_export_streams(monkeypatch):
 
     monkeypatch.setattr(C, "iter_filtered_bounces", fake_iter)
 
-    c = TestClient(app, raise_server_exceptions=False)
+    c = CSRFTestClient(app, raise_server_exceptions=False)
     with patch("app.main.verify_session", return_value=True):
         resp = c.get("/api/campaigns/1/subscribers/bounces/export")
 
@@ -344,7 +345,9 @@ def test_upstream_validation_error_keeps_its_status(client):
         "app.routers.campaigns.listmonk.create_campaign",
         new=AsyncMock(side_effect=exc),
     ):
-        resp = client.post("/api/campaigns", json={})
+        # Send a payload that passes local validation so the request reaches
+        # the mocked upstream call.
+        resp = client.post("/api/campaigns", json={"name": "test", "subject": "test"})
 
     assert resp.status_code == 400
     assert resp.json()["detail"] == "invalid campaign"
@@ -370,8 +373,13 @@ def test_unreachable_listmonk_is_502(client):
 async def test_reply_scan_is_serialised():
     from app.services import imap_reply_tracker as rt
 
-    async with rt._reply_scan_lock:
-        result = await rt.scan_and_track_replies(object())
+    # Simulate an in-progress scan by setting the running flag and holding the lock.
+    rt._reply_scan_running = True
+    try:
+        async with rt._reply_scan_lock:
+            result = await rt.scan_and_track_replies(object())
+    finally:
+        rt._reply_scan_running = False
 
     assert result["message"] == "Reply scan already in progress"
     assert result["new_replies"] == 0
@@ -771,16 +779,16 @@ async def test_imap_scan_looks_back_at_least_min_days(tmp_path, monkeypatch):
 
 # ── 16. Processed message IDs are persisted in one batch write ───────────────
 
-def test_processed_message_ids_are_batched(tmp_path, monkeypatch):
+async def test_processed_message_ids_are_batched(tmp_path, monkeypatch):
     import app.services.reply_log as rl
 
     monkeypatch.setattr(rl, "PROCESSED_FILE", tmp_path / "processed.json")
     monkeypatch.setattr(rl, "LOG_FILE", tmp_path / "log.json")
 
-    rl.mark_processed_message_ids(["<a>", "<b>"])
+    await rl.mark_processed_message_ids(["<a>", "<b>"])
     assert json.loads((tmp_path / "processed.json").read_text()) == ["<a>", "<b>"]
 
-    rl.mark_processed_message_ids(["<b>", "<c>"])
+    await rl.mark_processed_message_ids(["<b>", "<c>"])
     assert json.loads((tmp_path / "processed.json").read_text()) == ["<a>", "<b>", "<c>"]
 
 

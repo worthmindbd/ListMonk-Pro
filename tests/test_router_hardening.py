@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from tests.conftest import CSRFTestClient
 
 from app.main import app
 
@@ -34,7 +35,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 @pytest.fixture
 def client():
     with patch("app.main.verify_session", return_value=True):
-        yield TestClient(app, raise_server_exceptions=False)
+        yield CSRFTestClient(app, raise_server_exceptions=False)
 
 
 # ── Subscriber free-text search ──────────────────────────────────────────────
@@ -53,10 +54,14 @@ def test_search_builder_escapes_quotes_and_strips_wildcards():
     q = _search_to_query("o'brien")
     assert "o''brien" in q
     assert q.count("'") % 2 == 0 or "''" in q  # quotes are doubled, never bare
-    # LIKE wildcards and backslashes are stripped, so the term can only ever
-    # be a literal substring.
-    assert _search_to_query("100%") == _search_to_query("100")
-    assert _search_to_query("a_b\\c") == _search_to_query("abc")
+    # LIKE wildcards and backslashes are escaped (not stripped), so "100%"
+    # matches literally rather than being treated as a pattern.
+    q_pct = _search_to_query("100%")
+    assert "\\%" in q_pct  # % is escaped
+    assert "100" in q_pct
+    q_under = _search_to_query("a_b\\c")
+    assert "\\_" in q_under  # _ is escaped
+    assert "\\\\" in q_under  # \ is escaped
 
 
 def test_search_builder_rejects_empty_and_pure_wildcard_terms():
@@ -64,7 +69,10 @@ def test_search_builder_rejects_empty_and_pure_wildcard_terms():
 
     assert _search_to_query("") == ""
     assert _search_to_query("   ") == ""
-    assert _search_to_query("%%__\\\\") == ""
+    # Pure wildcard terms are now escaped rather than stripped, so they
+    # produce a valid (literal) search clause instead of "".
+    q = _search_to_query("%%__\\\\")
+    assert q != ""  # escaped wildcards still produce a clause
 
 
 def test_compose_query_combines_passthrough_search_and_status():
@@ -241,7 +249,7 @@ def test_unsub_scan_not_configured_stays_200_but_says_so(client, monkeypatch):
 ])
 def test_login_rejects_non_string_credentials_as_400(payload):
     with patch("app.main.record_login_failure") as rec:
-        c = TestClient(app, raise_server_exceptions=False)
+        c = CSRFTestClient(app, raise_server_exceptions=False)
         r = c.post("/auth/login", json=payload)
         assert r.status_code == 400
         # The attempt still counts against the rate limiter.
@@ -554,7 +562,7 @@ def test_login_limiter_trips_on_non_string_attempts(monkeypatch):
 
     monkeypatch.setenv("DASHBOARD_USER", "admin")
     monkeypatch.setenv("DASHBOARD_PASS", "secret")
-    c = TestClient(app, raise_server_exceptions=False)
+    c = CSRFTestClient(app, raise_server_exceptions=False)
     for _ in range(auth.LOGIN_MAX_ATTEMPTS):
         assert c.post("/auth/login",
                       json={"username": 123, "password": "x"}).status_code == 400
@@ -686,3 +694,83 @@ def test_deploy_workflow_gates_on_tests():
     content = (REPO_ROOT / ".github" / "workflows" / "deploy.yml").read_text()
     assert "needs: test" in content
     assert "pytest tests/ -q" in content
+
+
+# ── Supplement: container health probe ───────────────────────────────────────
+
+def test_health_endpoint_is_unauthenticated_and_cheap():
+    """The container healthcheck must not require a session and must not
+    render a template — a ListMonk/template failure must not mark the
+    container unhealthy."""
+    # Deliberately no verify_session patch: a real unauthenticated request.
+    with patch("app.main.verify_session", return_value=False):
+        r = CSRFTestClient(app, raise_server_exceptions=False).get("/health")
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok"}
+
+
+def test_health_is_in_open_paths():
+    """Without OPEN_PATHS the auth middleware would 302 the probe to the
+    login page, turning a cheap liveness check into a template render."""
+    from app.main import AuthMiddleware
+
+    assert "/health" in AuthMiddleware.OPEN_PATHS
+
+
+# ── Supplement: CSRF middleware ─────────────────────────────────────────────
+
+def test_csrf_blocks_cross_site_form_post():
+    """A cross-site HTML form can only send form-encoded bodies; requiring a
+    preflight-triggering header is what makes that harmless."""
+    with patch("app.main.verify_session", return_value=True):
+        c = TestClient(app, raise_server_exceptions=False)
+        r = c.post(
+            "/api/replies/status",
+            data={"ids": ["rep_1"]},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+    assert r.status_code == 403
+    assert "X-Requested-With" in r.json()["detail"]
+
+
+def test_csrf_allows_json_and_xrw_requests():
+    """The real UI sends X-Requested-With plus a JSON body — both must pass."""
+    with patch("app.main.verify_session", return_value=True):
+        c = TestClient(app, raise_server_exceptions=False)
+        with patch("app.routers.replies.update_reply_statuses",
+                   new=AsyncMock(return_value=1)):
+            r = c.put("/api/replies/status",
+                      json={"ids": ["rep_1"], "status": "lead"},
+                      headers={"X-Requested-With": "XMLHttpRequest"})
+    assert r.status_code == 200
+
+
+def test_csrf_ignores_safe_methods():
+    """GET/HEAD/OPTIONS must never be blocked (the healthcheck is a bare GET)."""
+    with patch("app.main.verify_session", return_value=True):
+        c = TestClient(app, raise_server_exceptions=False)
+        assert c.get("/api/app-settings").status_code in (200, 500)
+
+
+# ── Supplement: state-file path traversal guard ─────────────────────────────
+
+def test_data_path_rejects_traversal(tmp_path):
+    """data_path() must never resolve outside DATA_DIR, so a future caller
+    that passes user-controlled input cannot read/write arbitrary files."""
+    from app.config import settings
+
+    original = settings.data_dir
+    settings.data_dir = str(tmp_path / "data")
+    try:
+        # A normal filename stays inside the data dir.
+        ok = settings.data_path("schedule.json")
+        assert ok.parent == (tmp_path / "data").resolve()
+
+        for evil in ("../escaped.json", "../../etc/passwd", "sub/../../x.json"):
+            try:
+                settings.data_path(evil)
+            except ValueError:
+                continue
+            raise AssertionError(f"{evil!r} was not rejected")
+    finally:
+        settings.data_dir = original

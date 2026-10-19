@@ -245,7 +245,7 @@ async def test_streaming_csv_sanitizer():
 
 # ── 7. Processed-state files must be bounded ─────────────────────────────────
 
-def test_reply_processed_ids_are_capped(tmp_path, monkeypatch):
+async def test_reply_processed_ids_are_capped(tmp_path, monkeypatch):
     """reply_processed.json mirrors the bounce_processed.json cap: the newest
     MAX_PROCESSED_IDS entries win, so the file cannot grow forever."""
     import app.services.reply_log as rl
@@ -254,13 +254,13 @@ def test_reply_processed_ids_are_capped(tmp_path, monkeypatch):
     monkeypatch.setattr(rl, "PROCESSED_FILE", tmp_path / "processed.json")
     monkeypatch.setattr(rl, "MAX_PROCESSED_IDS", 3)
 
-    rl.mark_processed_message_ids([f"<{i}>" for i in range(5)])
+    await rl.mark_processed_message_ids([f"<{i}>" for i in range(5)])
     stored = json.loads((tmp_path / "processed.json").read_text(encoding="utf-8"))
     assert stored == ["<2>", "<3>", "<4>"]
     assert rl.load_processed_message_ids() == {"<2>", "<3>", "<4>"}
 
     # A newer entry evicts the oldest, keeping recency (not alphabetical) order.
-    rl.mark_processed_message_ids(["<5>"])
+    await rl.mark_processed_message_ids(["<5>"])
     stored = json.loads((tmp_path / "processed.json").read_text(encoding="utf-8"))
     assert stored == ["<3>", "<4>", "<5>"]
 

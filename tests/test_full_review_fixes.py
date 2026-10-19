@@ -108,11 +108,11 @@ async def test_archive_campaign_sends_archive_true():
 def replies_client():
     """Authed TestClient (the middleware otherwise answers 401)."""
     from unittest.mock import patch
-    from fastapi.testclient import TestClient
+    from tests.conftest import CSRFTestClient
     from app.main import app
 
     with patch("app.main.verify_session", return_value=True):
-        yield TestClient(app, raise_server_exceptions=False)
+        yield CSRFTestClient(app, raise_server_exceptions=False)
 
 
 def test_reply_bulk_status_rejects_non_object_body(tmp_path, monkeypatch, replies_client):
@@ -145,16 +145,18 @@ async def test_single_reply_status_update_holds_the_log_lock(monkeypatch):
     from app.routers import replies as replies_router
 
     acquired_during_write = False
-    original = rl.update_reply_status
+    load_log_called = False
 
-    def _spy(reply_id, new_status):
-        nonlocal acquired_during_write
-        acquired_during_write = replies_router._log_lock.locked()
-        return original(reply_id, new_status)
+    def _spy_load_log():
+        nonlocal acquired_during_write, load_log_called
+        load_log_called = True
+        # load_log is called inside update_reply_status while the lock is held,
+        # so checking here proves the lock was acquired before the read.
+        acquired_during_write = rl._log_lock.locked()
+        return [{"id": "rep_1", "status": "unread"}]
 
-    # The router imported its own binding of update_reply_status, so patch the
-    # router's reference (the one actually called by the endpoint).
-    monkeypatch.setattr(replies_router, "update_reply_status", _spy)
+    monkeypatch.setattr(rl, "load_log", _spy_load_log)
+    monkeypatch.setattr(rl, "save_log", lambda records: None)
 
     class _FakeRequest:
         def __init__(self, payload):
@@ -162,11 +164,6 @@ async def test_single_reply_status_update_holds_the_log_lock(monkeypatch):
 
         async def json(self):
             return self._payload
-
-    monkeypatch.setattr(
-        rl, "load_log", lambda: [{"id": "rep_1", "status": "unread"}],
-    )
-    monkeypatch.setattr(rl, "save_log", lambda records: None)
 
     resp = await replies_router.update_status("rep_1", _FakeRequest({"status": "lead"}))
     assert resp["status"] == "ok"
@@ -438,7 +435,7 @@ async def test_bounce_sweep_delete_reports_failed_ids():
     """The filter-wide sweep branch used to swallow which records failed —
     only the ids branch reported a `failed` list."""
     from unittest.mock import patch
-    from fastapi.testclient import TestClient
+    from tests.conftest import CSRFTestClient
     from app.main import app
 
     lm = AsyncMock()
@@ -460,7 +457,7 @@ async def test_bounce_sweep_delete_reports_failed_ids():
     with patch("app.main.verify_session", return_value=True), \
          patch("app.routers.bounces.listmonk", lm), \
          patch("app.routers.bounces.schedule_hard_bounce_update"):
-        client = TestClient(app, raise_server_exceptions=False)
+        client = CSRFTestClient(app, raise_server_exceptions=False)
         resp = client.delete("/api/bounces?bounce_type=hard")
 
     assert resp.status_code == 200
