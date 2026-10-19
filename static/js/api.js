@@ -10,6 +10,8 @@ const API = {
     /** `silent` suppresses the automatic error toast — for background polls
         that surface failures in their own UI instead of stacking toasts.
         The rejection is still marked err.handled so callers stay consistent. */
+    /** `timeoutMs` overrides DEFAULT_TIMEOUT — page loads on a busy ListMonk
+        pass a larger budget so a slow upstream is not read as an error. */
     /** Default timeout for API requests (ms). Exports and scans override this. */
     DEFAULT_TIMEOUT: 30000,
 
@@ -82,7 +84,7 @@ const API = {
         }
     },
 
-    get(path, silent = false) { return this.request('GET', path, null, false, silent); },
+    get(path, silent = false, timeoutMs = null) { return this.request('GET', path, null, false, silent, timeoutMs); },
     post(path, body) { return this.request('POST', path, body); },
     put(path, body) { return this.request('PUT', path, body); },
     del(path) { return this.request('DELETE', path); },

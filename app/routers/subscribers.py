@@ -8,8 +8,12 @@ from app.services.search_query import build_ilike_search
 
 router = APIRouter()
 
-# Pagination bounds (the UI requests at most 50).
-MAX_PAGE = 100
+# Pagination bounds. The Leads UI requests 25 per page and its pager is
+# clamped by the row total alone, so MAX_PAGE must stay well above the pages
+# a large installation can reach — otherwise clicking a deeper page (or
+# opening a stale deep link) 422s out of Query validation instead of showing
+# an empty page. Still bounded per the pagination-inputs rule.
+MAX_PAGE = 1000
 MAX_PER_PAGE = 200
 
 # Export streams pages lazily: iter_pages terminates on an empty page or once

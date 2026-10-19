@@ -6,10 +6,50 @@ const Subscribers = {
     query: '',
     statusFilter: '',
     listFilter: 0,
-    perPage: 50,
+    perPage: 25,
+    // Mirror of MAX_PAGE in app/routers/subscribers.py: the row total alone
+    // does not bound the pager, so a deep link or pager tap past the backend
+    // bound must be clamped here or FastAPI answers 422 and the page fails.
+    MAX_PAGE: 1000,
+    // The list dropdown changes rarely; re-fetching it on every page click
+    // doubled the latency of turning a page (lists first, then subscribers).
+    LISTS_TTL: 60000,
+    // Page-load requests get double the API default: a busy ListMonk running
+    // an ILIKE scan over a big subscriber table can legitimately take longer
+    // than 30s, and an abort there paints "Failed to load subscribers".
+    LOAD_TIMEOUT: 60000,
     _lists: [],
+    _listsCache: null,
     _rows: [],
     _editing: null,
+
+    /** Lists for the filter dropdown and edit forms, served from a short
+        cache so pagination costs one request (the leads page) instead of
+        two sequential ones (lists, then leads). */
+    async getLists() {
+        const now = Date.now();
+        if (this._listsCache && (now - this._listsCache.at) < this.LISTS_TTL) {
+            return this._listsCache.res;
+        }
+        const res = await API.get('/api/lists?per_page=200&minimal=true', false, this.LOAD_TIMEOUT);
+        this._listsCache = { at: now, res };
+        return res;
+    },
+
+    /** One page of leads for the current filters. */
+    async fetchPage() {
+        const params = new URLSearchParams({
+            page: String(this.page),
+            per_page: String(this.perPage),
+        });
+        // `search` is free text; the backend turns it into a safely
+        // escaped ILIKE expression. (ListMonk's own `query` parameter is
+        // raw SQL and rejects plain words like "info@acme".)
+        if (this.query) params.set('search', this.query);
+        if (this.statusFilter) params.set('status', this.statusFilter);
+        if (this.listFilter) params.set('list_id', String(this.listFilter));
+        return API.get(`/api/subscribers?${params.toString()}`, false, this.LOAD_TIMEOUT);
+    },
 
     async render() {
         const seq = App.seq();
@@ -19,30 +59,26 @@ const Subscribers = {
         if (rq.get('q') !== null) this.query = rq.get('q') || '';
         if (rq.get('list') !== null) this.listFilter = parseInt(rq.get('list'), 10) || 0;
         if (rq.get('status') !== null) this.statusFilter = rq.get('status') || '';
+        // Clamp against the backend's page bound before asking for the page:
+        // anything past MAX_PAGE is a guaranteed 422, not an empty table.
+        this.page = Math.min(Math.max(1, this.page), this.MAX_PAGE);
         try {
             // The list filter is a convenience: if the lists call fails, the
-            // subscriber table must still render with the other filters.
-            try {
-                const listsRes = await API.get('/api/lists?per_page=200&minimal=true');
-                this._lists = listsRes?.data?.results || [];
-            } catch {
+            // subscriber table must still render with the other filters. Both
+            // requests run together (the list fetch is cached above), so the
+            // table waits only for the leads request, not lists-then-leads.
+            const [listsRes, result] = await Promise.allSettled([
+                this.getLists(),
+                this.fetchPage(),
+            ]);
+            if (App.stale(seq)) return;
+            if (listsRes.status === 'fulfilled') {
+                this._lists = listsRes.value?.data?.results || [];
+            } else {
                 this._lists = [];
             }
-
-            const params = new URLSearchParams({
-                page: String(this.page),
-                per_page: String(this.perPage),
-            });
-            // `search` is free text; the backend turns it into a safely
-            // escaped ILIKE expression. (ListMonk's own `query` parameter is
-            // raw SQL and rejects plain words like "info@acme".)
-            if (this.query) params.set('search', this.query);
-            if (this.statusFilter) params.set('status', this.statusFilter);
-            if (this.listFilter) params.set('list_id', String(this.listFilter));
-
-            const result = await API.get(`/api/subscribers?${params.toString()}`);
-            if (App.stale(seq)) return;
-            const data = result?.data || {};
+            if (result.status === 'rejected') throw result.reason;
+            const data = result.value?.data || {};
             const subscribers = data.results || [];
             const total = data.total || 0;
             // A bulk delete can strand the view past the last page; clamp and
