@@ -31,7 +31,7 @@ from app.services.bounce_ingest import (
 )
 from app.services.reply_log import (
     append_log, load_processed_message_ids, mark_processed_message_ids,
-    load_log, save_log, _log_lock,
+    load_log, save_log, load_settings, _log_lock,
 )
 
 logger = logging.getLogger("imap_reply_tracker")
@@ -47,13 +47,18 @@ _reply_scan_lock = asyncio.Lock()
 _reply_scan_running = False
 
 # Sentiment detection patterns — automated / non-human responses.
-# Covers out-of-office notices, ticket-system auto-responses (Zendesk,
-# Freshdesk, etc.), generic "we received your message" auto-replies, and
-# common non-English OOO phrases. These are never genuine prospect replies
-# and must not inflate the reply rate or receive campaign attribution.
+# Two groups whose union is exactly what ``classify_sentiment`` tags
+# ``auto_reply``; the split only exists so the opt-in auto-blocklist feature
+# can tell a dead-end machine mailbox apart from a real human who is away.
+#
+# _MACHINE_AUTO_PATTERNS — ticket-system auto-responses (Zendesk, Freshdesk,
+# etc.), generic "we received your message" acknowledgements and explicit
+# "this is an automated message" notices. Nobody reads these mailboxes.
 _OOO_PATTERNS = [
     # ── English OOO / away ──────────────────────────────────────────────
     re.compile(r"out\s+of\s+(the\s+)?office", re.IGNORECASE),
+    # "Automatic reply:" is the subject prefix Gmail/Outlook vacation
+    # responders add — a human is away, not a machine mailbox.
     re.compile(r"auto(matic)?\s*(-|\s)?\s*reply", re.IGNORECASE),
     re.compile(r"away\s+from\s+(my\s+)?desk", re.IGNORECASE),
     re.compile(r"on\s+(annual\s+)?leave", re.IGNORECASE),
@@ -65,6 +70,9 @@ _OOO_PATTERNS = [
     re.compile(r"absent\s+du\s+bureau", re.IGNORECASE),           # French
     re.compile(r"fora\s+do\s+escritório", re.IGNORECASE),         # Portuguese
     re.compile(r"不在办公室|休假中", re.IGNORECASE),                # Chinese
+]
+
+_MACHINE_AUTO_PATTERNS = [
     # ── Ticket-system auto-responses ────────────────────────────────────
     re.compile(r"request\s+(has\s+been\s+)?received", re.IGNORECASE),
     re.compile(r"ticket\s+(created|number|#[A-Z0-9])", re.IGNORECASE),
@@ -211,6 +219,40 @@ _IMAGE_PLACEHOLDER_RE = re.compile(r"\[image:\s*[^\]]*\]", re.IGNORECASE)
 _BLANK_RUN_RE = re.compile(r"\n{3,}")
 
 
+def _auto_reply_kind(subject: str, reply_text: str, from_email: str = "") -> Optional[str]:
+    """Distinguish the two kinds of automated reply, or return ``None``.
+
+    Returns:
+        ``'machine'`` — no-reply/notification senders, ticket systems and
+        explicit "automated message" notices: a mailbox no human reads.
+        ``'ooo'``     — out-of-office / away notices written by a real
+        (temporarily away) human who will read the mail on return.
+        ``None``      — not an automated reply.
+
+    The union of both pattern groups plus the automated-sender check is
+    exactly what :func:`classify_sentiment` tags ``auto_reply``, so this
+    function can never disagree with the feed's sentiment badge.
+    """
+    combined = f"{subject}\n{reply_text}"
+
+    # Machine wording wins over away wording: a ticket system that happens to
+    # mention "out of office", or a no-reply sender carrying an away notice,
+    # is still a mailbox no human reads.
+    for pat in _MACHINE_AUTO_PATTERNS:
+        if pat.search(combined):
+            return "machine"
+
+    sender = (from_email or "").strip().lower()
+    if _AUTOMATED_SENDER_RE.match(sender.split("@", 1)[0]):
+        return "machine"
+
+    for pat in _OOO_PATTERNS:
+        if pat.search(combined):
+            return "ooo"
+
+    return None
+
+
 def classify_sentiment(subject: str, reply_text: str, from_email: str = "") -> str:
     """Classify the sentiment of a prospect reply.
 
@@ -232,22 +274,17 @@ def classify_sentiment(subject: str, reply_text: str, from_email: str = "") -> s
         if pat.search(combined):
             return "bounce"
 
-    # 2. Out of Office / Auto-reply check
-    for pat in _OOO_PATTERNS:
-        if pat.search(combined):
-            return "auto_reply"
-
-    # 3. Automated no-reply senders: their notifications are never human
-    #    sentiment, so they must not fall through to the positive default.
-    if _AUTOMATED_SENDER_RE.match(local_part):
+    # 2. Out of Office / Auto-reply check — both machine acknowledgements and
+    #    human away notices (see _auto_reply_kind for the distinction).
+    if _auto_reply_kind(subject, reply_text, from_email) is not None:
         return "auto_reply"
 
-    # 4. Negative / Unsubscribe check
+    # 3. Negative / Unsubscribe check
     for pat in _NEGATIVE_PATTERNS:
         if pat.search(reply_text) or pat.search(subject):
             return "negative"
 
-    # 5. Positive / Warm Lead check
+    # 4. Positive / Warm Lead check
     for pat in _POSITIVE_PATTERNS:
         for m in pat.finditer(reply_text):
             if _inside_conditional_offer(reply_text, m.start(), m.end()):
@@ -692,6 +729,42 @@ def _connect_imap() -> imaplib.IMAP4:
     return client
 
 
+async def blocklist_reply_sender(listmonk: ListMonkClient, email: str) -> dict:
+    """Blocklist the ListMonk subscriber behind a sender address.
+
+    Shared by the Replies API's manual blocklist actions and the reply
+    scanner's opt-in auto-blocklisting, so both resolve the email
+    server-side — that keeps the address out of client-built ListMonk query
+    strings and validates it with the same helper the scanners use, so a
+    crafted Reply-To address cannot inject query syntax.
+
+    Returns an error dict (with ``error`` key) instead of raising
+    HTTPException so bulk callers can distinguish client errors from
+    server errors in their partial-failure report.
+    """
+    safe_email = safe_email_for_query((email or "").strip())
+    if not safe_email:
+        return {"error": "Reply has no valid sender email", "email": email}
+
+    try:
+        result = await listmonk.get_subscribers(1, 1, f"subscribers.email = '{safe_email}'")
+    except Exception as e:
+        logger.error(f"Subscriber lookup failed for {email}: {e}")
+        return {"error": f"Subscriber lookup failed: {e}", "email": email}
+    subscribers = (result.get("data") or {}).get("results") or []
+    if not subscribers:
+        return {"error": f"No ListMonk subscriber found for {email}", "email": email}
+
+    subscriber_id = subscribers[0]["id"]
+    try:
+        await listmonk.blocklist_subscriber(subscriber_id)
+    except Exception as e:
+        logger.error(f"Blocklist failed for {email}: {e}")
+        return {"error": f"Blocklist failed: {e}", "email": email}
+
+    return {"status": "ok", "subscriber_id": subscriber_id, "email": email}
+
+
 async def scan_and_track_replies(
     listmonk: ListMonkClient,
     days_back: int = 14
@@ -713,6 +786,7 @@ async def scan_and_track_replies(
             "auto_reply": 0,
             "bounce": 0,
             "reclassified": 0,
+            "auto_blocklisted": 0,
             "message": "Reply scan already in progress",
         }
 
@@ -740,6 +814,7 @@ async def _scan_and_track_replies_impl(
             "auto_reply": 0,
             "bounce": 0,
             "reclassified": 0,
+            "auto_blocklisted": 0,
         }
 
     processed_ids = load_processed_message_ids()
@@ -755,7 +830,16 @@ async def _scan_and_track_replies_impl(
         "bounce": 0,
         "repaired": 0,
         "reclassified": 0,
+        "auto_blocklisted": 0,
     }
+
+    # Opt-in auto-blocklist toggles (reply_settings.json), read once per
+    # scan. ``blocked_emails`` stops a chatty ticket system from triggering
+    # one lookup + blocklist per message within the same scan.
+    block_toggles = load_settings()
+    auto_block_machine = bool(block_toggles.get("auto_blocklist_machine"))
+    auto_block_ooo = bool(block_toggles.get("auto_blocklist_ooo"))
+    blocked_emails: set[str] = set()
 
     # Fetch the campaign history once per scan, walked back far enough to
     # cover every reply in the scan window. A per-message fetch (or a single
@@ -912,6 +996,7 @@ async def _scan_and_track_replies_impl(
         # they don't receive a campaign tag or inflate per-campaign charts.
         if sentiment == "auto_reply":
             camp_id, camp_name = None, None
+            auto_kind = _auto_reply_kind(subject, reply_only, from_email)
         else:
             camp_id, camp_name = await match_campaign_for_reply(
                 listmonk, subject, from_email, reply_date, campaigns=campaigns,
@@ -945,6 +1030,27 @@ async def _scan_and_track_replies_impl(
             "status_source": STATUS_SOURCE_AUTO,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
+
+        # Opt-in auto-blocklisting of automated replies. The toggles decide
+        # which kind applies: machine mailboxes (no-reply desks, ticket
+        # systems) are dead ends for outreach; out-of-office notices belong
+        # to real humans and only get blocked when the harsher toggle is on.
+        # A failed blocklist never loses the reply — the record still feeds
+        # the page for manual triage.
+        if sentiment == "auto_reply" and (
+            (auto_kind == "machine" and auto_block_machine)
+            or (auto_kind == "ooo" and auto_block_ooo)
+        ) and from_email not in blocked_emails:
+            blocked_emails.add(from_email)
+            res = await blocklist_reply_sender(listmonk, from_email)
+            if "error" in res:
+                logger.warning(
+                    f"[ReplyTracker] Auto-blocklist failed for {from_email}: "
+                    f"{res['error']}"
+                )
+            else:
+                record["auto_blocklisted"] = True
+                stats["auto_blocklisted"] += 1
 
         new_records.append(record)
         stats["new_replies"] += 1

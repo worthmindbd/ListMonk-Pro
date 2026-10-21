@@ -12,8 +12,10 @@ from app.services.reply_log import (
     load_settings, save_settings, _log_lock,
 )
 from app.services.bulk_ops import run_bulk
-from app.services.imap_reply_tracker import scan_and_track_replies
-from app.services.imap_helpers import safe_email_for_query
+from app.services.imap_reply_tracker import (
+    scan_and_track_replies,
+    blocklist_reply_sender as _blocklist_sender_service,
+)
 from app.services.listmonk_client import listmonk
 from app.config import settings
 
@@ -317,7 +319,7 @@ async def blocklist_reply_senders(request: Request):
         raise HTTPException(status_code=400, detail="Selected replies have no sender email")
 
     async def _blocklist(email: str) -> None:
-        res = await _blocklist_sender(email)
+        res = await _blocklist_sender_service(listmonk, email)
         if "error" in res:
             raise ValueError(res["error"])
 
@@ -354,40 +356,6 @@ async def update_status(reply_id: str, request: Request):
     return {"status": "ok", "id": reply_id, "new_status": new_status}
 
 
-async def _blocklist_sender(email: str) -> dict:
-    """Blocklist the ListMonk subscriber behind a sender address.
-
-    Resolving the email server-side keeps the address out of the client-built
-    ListMonk query string and validates it with the same helper the scanners
-    use, so a crafted Reply-To address cannot inject query syntax.
-
-    Returns an error dict (with ``error`` key) instead of raising
-    HTTPException so that ``run_bulk`` can distinguish client errors from
-    server errors in its partial-failure report.
-    """
-    safe_email = safe_email_for_query((email or "").strip())
-    if not safe_email:
-        return {"error": "Reply has no valid sender email", "email": email}
-
-    try:
-        result = await listmonk.get_subscribers(1, 1, f"subscribers.email = '{safe_email}'")
-    except Exception as e:
-        logger.error(f"Subscriber lookup failed for {email}: {e}")
-        return {"error": f"Subscriber lookup failed: {e}", "email": email}
-    subscribers = (result.get("data") or {}).get("results") or []
-    if not subscribers:
-        return {"error": f"No ListMonk subscriber found for {email}", "email": email}
-
-    subscriber_id = subscribers[0]["id"]
-    try:
-        await listmonk.blocklist_subscriber(subscriber_id)
-    except Exception as e:
-        logger.error(f"Blocklist failed for {email}: {e}")
-        return {"error": f"Blocklist failed: {e}", "email": email}
-
-    return {"status": "ok", "subscriber_id": subscriber_id, "email": email}
-
-
 @router.post("/{reply_id}/blocklist")
 async def blocklist_reply_sender(reply_id: str):
     """Blocklist the ListMonk subscriber behind a prospect reply."""
@@ -396,7 +364,7 @@ async def blocklist_reply_sender(reply_id: str):
     if not record:
         raise HTTPException(status_code=404, detail="Reply not found")
 
-    result = await _blocklist_sender(record.get("from_email") or "")
+    result = await _blocklist_sender_service(listmonk, record.get("from_email") or "")
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result

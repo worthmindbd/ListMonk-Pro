@@ -27,6 +27,13 @@ _DEFAULT_SETTINGS = {
     "auto_tag_leads": True,
     "lead_tag": "lead",
     "scan_interval_minutes": 15,
+    # Opt-in auto-blocklisting of automated replies, decided per reply by the
+    # reply scanner (see imap_reply_tracker._auto_reply_kind). "machine"
+    # covers no-reply/notification senders and ticket systems — mailboxes no
+    # human reads. "ooo" additionally covers out-of-office notices written by
+    # a real (temporarily away) human, which is the more destructive choice.
+    "auto_blocklist_machine": False,
+    "auto_blocklist_ooo": False,
 }
 
 _log_lock = asyncio.Lock()

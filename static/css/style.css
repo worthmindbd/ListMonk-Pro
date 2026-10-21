@@ -3205,6 +3205,36 @@ td .tag {
     padding: 8px 12px;
 }
 
+/* Opt-in auto-blocklist switches in the replies toolbar: compact checkbox
+   labels that sit beside the scan button and never stretch like form
+   controls do. */
+.auto-blocklist-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    width: auto;
+    margin: 0;
+    padding: 6px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: var(--transition-ui);
+}
+
+.auto-blocklist-toggle:hover {
+    border-color: var(--primary);
+    color: var(--text-primary);
+}
+
+.auto-blocklist-toggle input {
+    width: auto;
+    margin: 0;
+    accent-color: var(--primary);
+}
+
 .reply-card {
     border: 1px solid var(--border-color);
     background: var(--bg-card);

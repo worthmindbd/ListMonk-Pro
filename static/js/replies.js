@@ -12,6 +12,8 @@ const Replies = {
     stats: null,
     repliesData: null,
     isScanning: false,
+    // Auto-blocklist toggles (reply settings); loaded with the page data.
+    settings: { auto_blocklist_machine: false, auto_blocklist_ooo: false },
 
     async render() {
         // An action callback (status update, bulk op) can fire after the user
@@ -31,6 +33,7 @@ const Replies = {
             await Promise.all([
                 this.loadStats(),
                 this.loadReplies(),
+                this.loadSettings(),
             ]);
             this.renderPage();
         } catch (err) {
@@ -38,6 +41,31 @@ const Replies = {
             if (App.stale(this._seq)) return;
             App.setContent(`<div class="empty-state"><h2>Failed to load replies</h2><p>${App.escapeHtml(err?.message || '')}</p></div>`);
         }
+    },
+
+    async loadSettings() {
+        try {
+            const s = await API.get('/api/replies/settings');
+            this.settings = {
+                auto_blocklist_machine: !!s.auto_blocklist_machine,
+                auto_blocklist_ooo: !!s.auto_blocklist_ooo,
+            };
+        } catch {
+            // Defaults keep the toggles renderable without a settings file.
+        }
+    },
+
+    async toggleAutoBlocklist(key, enabled) {
+        try {
+            await API.put('/api/replies/settings', { [key]: enabled });
+            this.settings[key] = enabled;
+            App.toast(`Auto-blocklist ${enabled ? 'enabled' : 'disabled'}`, 'success');
+        } catch {
+            // API.request already surfaced the server message — toasting
+            // again here showed the failure twice. Revert the checkbox.
+            this.settings[key] = !enabled;
+        }
+        if (App.currentPage === 'replies') this.renderPage();
     },
 
     async loadStats() {
@@ -151,6 +179,15 @@ const Replies = {
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                             <span>${this.isScanning ? 'Scanning Mailbox…' : 'Scan Mailbox Now'}</span>
                         </button>
+
+                        <label class="auto-blocklist-toggle" title="Automatically blocklist senders of machine auto-replies (noreply@, notifications@, ticket systems) when a scan detects them">
+                            <input type="checkbox" ${this.settings.auto_blocklist_machine ? 'checked' : ''} aria-label="Auto-blocklist machine auto-replies" onchange="Replies.toggleAutoBlocklist('auto_blocklist_machine', this.checked)">
+                            Auto-blocklist no-reply
+                        </label>
+                        <label class="auto-blocklist-toggle" title="Also blocklist out-of-office senders. Careful: these are real people who are temporarily away — they may be worth following up with later.">
+                            <input type="checkbox" ${this.settings.auto_blocklist_ooo ? 'checked' : ''} aria-label="Auto-blocklist out-of-office replies" onchange="Replies.toggleAutoBlocklist('auto_blocklist_ooo', this.checked)">
+                            Auto-blocklist OOO
+                        </label>
                     </div>
                 </div>
             </div>
@@ -246,6 +283,7 @@ const Replies = {
                     </div>
 
                     <div class="reply-header-actions">
+                        ${r.auto_blocklisted ? `<span class="sentiment-badge badge-negative" title="Sender was automatically blocklisted in ListMonk when this automated reply was detected">⛔ Auto-Blocklisted</span>` : ''}
                         <span class="sentiment-badge ${sent.colorClass}">
                             <span class="badge-dot ${sent.dotClass}"></span>${App.escapeHtml(sent.label)}
                         </span>
