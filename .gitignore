@@ -35,3 +35,6 @@ skills-lock.json
 
 # Review scratch (screenshots + browser helper from codebase reviews)
 .review_shots/
+
+# Data files
+*.csv

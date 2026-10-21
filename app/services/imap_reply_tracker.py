@@ -70,7 +70,13 @@ _OOO_PATTERNS = [
     re.compile(r"ticket\s+(created|number|#[A-Z0-9])", re.IGNORECASE),
     re.compile(r"your\s+(message|request|inquiry)\s+has\s+been\s+received", re.IGNORECASE),
     re.compile(r"being\s+reviewed\s+by\s+(the\s+)?.+\s*(team|support|care)", re.IGNORECASE),
-    re.compile(r"we'?ll\s+(get\s+back\s+to\s+you|be\s+in\s+touch)\s+(within|as\s+soon)", re.IGNORECASE),
+    # "we'll get back to you as soon as possible" — the acknowledgement every
+    # shared mailbox sends. The phrase is spelled both ways in the wild
+    # ("we'll" / "we will"); only the contraction was recognised, so an
+    # institutional auto-responder that spells it out ("We will get back to
+    # you as soon as possible.") was never caught and fell through to the
+    # positive pass, where its promotional footer read as interest.
+    re.compile(r"we\s*(?:will|'ll|ll)\s+(get\s+back\s+to\s+you|be\s+in\s+touch)\s+(within|as\s+soon)", re.IGNORECASE),
     re.compile(r"a\s+team\s+member\s+will\s+be\s+in\s+touch", re.IGNORECASE),
     re.compile(r"zendesk|freshdesk|help\s+desk\s+ticket", re.IGNORECASE),
     # ── Generic auto-reply / acknowledgement ────────────────────────────
@@ -79,6 +85,15 @@ _OOO_PATTERNS = [
     re.compile(r"this\s+is\s+an\s+automated\s+(response|message|reply)", re.IGNORECASE),
     re.compile(r"do\s+not\s+reply\s+to\s+this\s+(email|message)", re.IGNORECASE),
     re.compile(r"this\s+email\s+was\s+sent\s+from\s+a\s+notification", re.IGNORECASE),
+    # ── Nordic auto-acknowledgements (Danish / Swedish / Norwegian) ───────
+    # Institutional mailboxes (venues, municipalities, shared desks) answer in
+    # the local language: "Vi vender tilbage hurtigst muligt" is the exact
+    # Danish counterpart of "we will get back to you as soon as possible".
+    # The English rule above never sees these, so the acknowledgement used to
+    # reach the positive pass carrying a marketing footer.
+    re.compile(r"vi\s+vender\s+tilbage\s+hurtigst\s+muligt", re.IGNORECASE),
+    re.compile(r"vi\s+[åa]terkommer\s+(s[åa]\s+snart\s+som\s+m[öo]jligt|snabbt)", re.IGNORECASE),
+    re.compile(r"vi\s+kommer\s+tilbake\s+(s[åa]\s+snart\s+som\s+mulig|fort)", re.IGNORECASE),
 ]
 
 # Bounce / DSN detection, checked before every sentiment keyword. Mailer-daemon
@@ -154,6 +169,43 @@ _POSITIVE_PATTERNS = [
     re.compile(r"forwarded\s+to\s+our", re.IGNORECASE),
 ]
 
+# A positive keyword that sits inside a third-person offer is the sender's
+# own marketing copy, not interest in our proposal. Institutional
+# auto-responders append a promotional footer ("If you are interested in
+# renting a venue, please visit …"), and matching "interested" in that
+# sentence turned an acknowledgement into a Hot Lead. The offer owns the rest
+# of its sentence, so a second keyword there ("… our pricing …") is part of
+# the pitch too.
+_CONDITIONAL_OFFER_RE = re.compile(
+    r"(if\s+you(?:'re|\s+are|\s+would\s+be)\s+(?:interested|keen)\b"
+    r"|anyone\s+(?:and\s+everyone\s+)?(?:else\s+)?interested\b"
+    r"|interested\s+parties\b"
+    r"|should\s+you\s+be\s+interested\b)"
+    r"[^.!?]*[.]?",
+    re.IGNORECASE,
+)
+
+# A first-person statement of interest is the prospect's own and always
+# counts, even when the sentence also carries a third-person offer ("We are
+# interested — if you are interested too, let's talk").
+_FIRST_PERSON_PREFIX_RE = re.compile(
+    r"\b(i|we|our\s+\w+|my)\b\s*(?:'m|'re|am|are)?\s*"
+    r"(?:very\s+|really\s+|quite\s+)?$",
+    re.IGNORECASE,
+)
+
+
+def _inside_conditional_offer(text: str, start: int, end: int) -> bool:
+    """True when the text span lies inside a third-person/conditional offer."""
+    prefix = text[max(0, start - 60):start]
+    if _FIRST_PERSON_PREFIX_RE.search(prefix):
+        return False  # the prospect's own interest, not the sender's pitch
+    return any(
+        m.start() <= start and end <= m.end()
+        for m in _CONDITIONAL_OFFER_RE.finditer(text)
+    )
+
+
 # Display noise left behind by mail clients inside the plain-text part.
 _IMAGE_PLACEHOLDER_RE = re.compile(r"\[image:\s*[^\]]*\]", re.IGNORECASE)
 _BLANK_RUN_RE = re.compile(r"\n{3,}")
@@ -197,7 +249,12 @@ def classify_sentiment(subject: str, reply_text: str, from_email: str = "") -> s
 
     # 5. Positive / Warm Lead check
     for pat in _POSITIVE_PATTERNS:
-        if pat.search(reply_text):
+        for m in pat.finditer(reply_text):
+            if _inside_conditional_offer(reply_text, m.start(), m.end()):
+                # The keyword belongs to a marketing offer the sender wrote about
+                # their own product ("if you are interested in renting a
+                # venue…"), so it says nothing about interest in our offer.
+                continue
             return "positive"
 
     # No keyword matched: the reply is a real human response but lacks clear

@@ -212,6 +212,128 @@ def test_classify_genuine_replies_not_caught_by_auto_patterns():
     ) == "neutral"
 
 
+def test_classify_institutional_auto_acknowledgement():
+    """A shared mailbox's auto-acknowledgement is not a prospect reply.
+
+    Regression: the real reply from info@huset-kbh.dk was badged
+    "Interested / Lead" and auto-flagged as a Hot Lead. It is an automated
+    "thanks, we will get back to you" notice whose promotional footer
+    ("if you are interested in renting a venue…") matched the "interested"
+    keyword — that footer is the sender's own pitch, not interest in our
+    offer.
+    """
+    huset_ack = (
+        "Tak for din mail.\n"
+        "Vi vender tilbage hurtigst muligt.\n\n"
+        "Hvis du er interesseret i at leje et lokale til møde, firmaevent, "
+        "fødselsdag mm. henviser vi til bookbyen.dk.\n\n"
+        "Med venlig hilsen,\nHUSET\n"
+        "---------------------------\n"
+        "Thank you for your attention.\n"
+        "We will get back to you as soon as possible.\n\n"
+        "If you are interested in renting a venue for a meeting, team event, "
+        "birthday party, etc., please visit bookbyen.dk."
+    )
+    assert classify_sentiment(
+        "Tak for din mail! // Thanks for getting in contact with us!",
+        huset_ack,
+        "info@huset-kbh.dk",
+    ) == "auto_reply"
+
+
+def test_classify_auto_acknowledgement_spellings():
+    # "we will" spelled out is the same acknowledgement as "we'll" — only the
+    # contraction used to be recognised, so the spelled-out form fell through
+    # to the positive pass.
+    assert classify_sentiment(
+        "Re: Question About Something?",
+        "Thank you for your message. We will get back to you as soon as possible.",
+        "info@example.com",
+    ) == "auto_reply"
+    # Nordic shared mailboxes acknowledge in the local language.
+    assert classify_sentiment(
+        "Tak for din mail!",
+        "Tak for din mail.\nVi vender tilbage hurtigst muligt.",
+        "info@example.dk",
+    ) == "auto_reply"
+    assert classify_sentiment(
+        "Tack för din mail!",
+        "Vi återkommer så snart som möjligt.",
+        "info@example.se",
+    ) == "auto_reply"
+    assert classify_sentiment(
+        "Takk for din mail!",
+        "Vi kommer tilbake så snart som mulig.",
+        "info@example.no",
+    ) == "auto_reply"
+
+
+def test_classify_marketing_footer_is_not_interest():
+    """A keyword inside the sender's own marketing offer is not interest."""
+    # The offer owns its sentence, so a second keyword in it is part of the pitch.
+    assert classify_sentiment(
+        "Re: Question About Venue Hire?",
+        "Hi, we rent venues. If you are interested in renting a venue for a "
+        "meeting, please visit bookbyen.dk.",
+        "info@example.dk",
+    ) == "neutral"
+    assert classify_sentiment(
+        "Re: Offer", "If you are interested in our pricing, let me know.",
+        "prospect@example.com",
+    ) == "neutral"
+    # A first-person statement of interest still counts, even in the same
+    # sentence as a third-person offer.
+    assert classify_sentiment(
+        "Re: Proposal",
+        "We are interested — if you are interested in a white-label "
+        "partnership too, let's talk.",
+        "prospect@example.com",
+    ) == "positive"
+    assert classify_sentiment(
+        "Re: Proposal", "I'm interested. What are your pricing tiers?",
+        "prospect@example.com",
+    ) == "positive"
+
+
+@pytest.mark.asyncio
+async def test_reclassify_fixes_stored_auto_acknowledgement(tmp_path, monkeypatch):
+    """The stored auto-flagged acknowledgement is corrected on the next scan.
+
+    The record was already processed, so no later scan re-reads it — only the
+    re-classification pass can retire its "Interested / Lead" badge. The
+    classifier's own lead promotion is undone with it; a status a human set
+    is left alone.
+    """
+    import app.services.reply_log as rl
+    from app.services.imap_reply_tracker import reclassify_stored_sentiments
+
+    monkeypatch.setattr(rl, "LOG_FILE", tmp_path / "reply_log.json")
+    monkeypatch.setattr(rl, "PROCESSED_FILE", tmp_path / "reply_processed.json")
+    monkeypatch.setattr(rl, "SETTINGS_FILE", tmp_path / "reply_settings.json")
+    rl.save_log([{
+        "id": "rep_huset", "message_id": "<huset@huset-kbh.dk>",
+        "from_email": "info@huset-kbh.dk",
+        "subject": "Tak for din mail! // Thanks for getting in contact with us!",
+        "full_body": (
+            "Tak for din mail.\nVi vender tilbage hurtigst muligt.\n\n"
+            "If you are interested in renting a venue for a meeting, team "
+            "event, birthday party, etc., please visit bookbyen.dk."
+        ),
+        "sentiment": "positive",   # what the old classifier stored
+        "status": "lead",          # auto-promoted at ingestion
+        "status_source": "auto",
+        "campaign_id": 6, "campaign_name": "Mixed Leads 12K",
+    }])
+
+    changed = await reclassify_stored_sentiments()
+    assert changed == 1
+    rec = rl.load_log()[0]
+    assert rec["sentiment"] == "auto_reply"
+    assert rec["status"] == "unread"          # the auto-promotion is undone
+    assert rec["campaign_id"] is None         # and the campaign attribution
+    assert rec["campaign_name"] is None       # goes with it
+
+
 @pytest.mark.asyncio
 async def test_reclassify_purges_stored_bounce_records(tmp_path, monkeypatch):
     """Records the old classifier stored from DSNs (unknown-means-positive
