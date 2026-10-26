@@ -114,9 +114,11 @@ const Analytics = {
         // Cold email mode disables link tracking, so click metrics are hidden there
         // and prospect reply stats take their place.
         const isCold = this.isColdMode();
-        const totalReplies = this.replyStats?.total_replies || 0;
+        // Human replies, matching the reply rate shown with them (the rate
+        // excludes automated responses; the raw total does not).
+        const totalReplies = this.replyStats?.human_replies ?? this.replyStats?.total_replies ?? 0;
         const overallReplyRate = this.replyStats?.reply_rate || 0;
-        const campReplies = this.campaignReplyStats?.total_replies || 0;
+        const campReplies = this.campaignReplyStats?.human_replies ?? this.campaignReplyStats?.total_replies ?? 0;
         const campReplyRate = this.campaignReplyStats?.reply_rate || 0;
 
         let html = `
@@ -138,7 +140,7 @@ const Analytics = {
                     <div style="font-size:0.8rem;color:var(--text-muted)">${totalSent ? ((totalClicks/totalSent)*100).toFixed(1) : 0}% CTR</div>
                 </div>`}
                 <div class="stat-card" style="border-left-color:#14b8a6">
-                    <div class="stat-label">Unsubscribes (IMAP)</div>
+                    <div class="stat-label">Unsubscribes</div>
                     <div class="stat-value" style="color:#14b8a6">${App.formatNumber(totalUnsubs)}</div>
                     <div style="font-size:0.8rem;color:var(--text-muted)"><a href="#/unsubscribes" style="color:#14b8a6;text-decoration:none">View details →</a></div>
                 </div>
@@ -469,11 +471,23 @@ const Analytics = {
             return;
         }
 
-        const labels = data.map(d => {
+        // ListMonk buckets hourly for ranges under a week and daily
+        // otherwise. Day labels alone turned an hourly series into a run of
+        // identical "Oct 26" ticks, so several buckets on one calendar day
+        // get their time of day too.
+        const days = data.map(d => String(d.timestamp).slice(0, 10));
+        const hourly = new Set(days).size < days.length;
+        const labels = data.map((d, i) => {
+            if (hourly) {
+                const at = new Date(d.timestamp);
+                if (!Number.isNaN(at.getTime())) {
+                    return at.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric' });
+                }
+            }
             // ListMonk's day buckets are UTC-midnight instants; parsing them
             // as such shifts every label one day early west of UTC. Treat the
             // date part as a LOCAL calendar day instead.
-            const date = new Date(`${String(d.timestamp).slice(0, 10)}T00:00:00`);
+            const date = new Date(`${days[i]}T00:00:00`);
             return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
         });
         const values = data.map(d => d.count || 0);
@@ -661,7 +675,7 @@ const Analytics = {
             if (this.fromDate) params.set('from_date', this.fromDate);
             if (this.toDate) params.set('to_date', this.toDate);
             const qs = params.toString();
-            const result = await API.get(`/api/campaigns/${campId}/subscribers/${type}/export${qs ? '?' + qs : ''}`);
+            const result = await API.download(`/api/campaigns/${campId}/subscribers/${type}/export${qs ? '?' + qs : ''}`);
             if (result.blob) {
                 const campName = this.campaigns.find(c => c.id === campId)?.name || 'campaign';
                 const safeName = campName.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 30);
@@ -676,7 +690,7 @@ const Analytics = {
     // Export all campaigns summary (comparison chart data)
     async exportAllCampaigns() {
         try {
-            const result = await API.get('/api/campaigns/export-all');
+            const result = await API.download('/api/campaigns/export-all');
             if (result.blob) {
                 API.downloadBlob(result.blob, 'all_campaigns_summary.csv');
                 App.toast('Campaigns summary exported', 'success');

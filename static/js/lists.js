@@ -124,7 +124,7 @@ const Lists = {
 
     async exportSubscribers(id) {
         try {
-            const result = await API.get(`/api/subscribers/export-all?list_id=${id}`);
+            const result = await API.download(`/api/subscribers/export-all?list_id=${id}`);
             API.downloadBlob(result.blob, `list_${id}_subscribers.csv`);
             App.toast('List subscribers exported', 'success');
         } catch {
@@ -228,6 +228,10 @@ const Lists = {
         const description = document.getElementById('editListDesc').value.trim();
         const tags = document.getElementById('editListTags').value.split(',').map(t => t.trim()).filter(Boolean);
 
+        // Same rule as create(): an emptied name otherwise reaches ListMonk
+        // and comes back as a generic validation error.
+        if (!name) { App.toast('Name is required', 'error'); return; }
+
         try {
             await API.put(`/api/lists/${id}`, { name, type, optin, description, tags });
             App.toast('List updated', 'success');
@@ -258,7 +262,7 @@ const Lists = {
                 `Permanently delete ${ids.length} selected list(s)? Subscriber associations to those lists are removed too.`)) return;
         try {
             const params = ids.map(id => `ids=${id}`).join('&');
-            const result = await API.del(`/api/lists?${params}`);
+            const result = await API.del(`/api/lists?${params}`, API.LONG_TIMEOUT);
             const errors = result?.errors || 0;
             App.toast(`Deleted ${result?.deleted ?? ids.length} list(s)${errors ? `, ${errors} failed` : ''}`,
                 errors ? 'info' : 'success');
@@ -282,7 +286,7 @@ const Lists = {
         let exported = 0;
         for (const id of ids) {
             try {
-                const result = await API.get(`/api/subscribers/export-all?list_id=${id}`);
+                const result = await API.download(`/api/subscribers/export-all?list_id=${id}`);
                 API.downloadBlob(result.blob, `list_${id}_subscribers.csv`);
                 exported++;
             } catch {

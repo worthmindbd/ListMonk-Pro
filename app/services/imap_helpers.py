@@ -1,9 +1,15 @@
-"""Shared IMAP helpers: email validation, IMAP date formatting, body extraction."""
+"""Shared IMAP helpers: email validation, IMAP date formatting, body extraction,
+and the idempotency keys the scanners use instead of IMAP ``\\Seen``."""
 
 import email
+import email.policy
+import hashlib
+import logging
 import re
 from datetime import datetime
 from html.parser import HTMLParser
+
+logger = logging.getLogger("imap_helpers")
 
 _ENG_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -13,7 +19,9 @@ _EMAIL_RE = re.compile(r"^[\w.+-]+@[\w.-]+\.\w+$")
 
 def safe_email_for_query(email_addr: str) -> str | None:
     """Validate email format and escape for SQL query interpolation."""
-    if not _EMAIL_RE.match(email_addr):
+    # fullmatch, not match: ``$`` also matches before a trailing newline, so
+    # "a@b.com\n" used to pass and reach the query with the newline intact.
+    if not _EMAIL_RE.fullmatch(email_addr or ""):
         return None
     return email_addr.replace("'", "''")
 
@@ -21,6 +29,106 @@ def safe_email_for_query(email_addr: str) -> str | None:
 def imap_date(dt: datetime) -> str:
     """Format a datetime as an IMAP SINCE date with English month names."""
     return f"{dt.day:02d}-{_ENG_MONTHS[dt.month - 1]}-{dt.year}"
+
+
+# ─── Idempotency keys ────────────────────────────────────────────────────────
+#
+# The scanned mailboxes are read by a human too, so IMAP \Seen can never mean
+# "already handled" (AGENTS.md rule 13). Every scanner keys its persisted
+# processed set on these identifiers instead.
+
+# Identity headers fetched by the cheap pre-download peek. FROM/DATE/SUBJECT
+# are needed for the fingerprint of messages that carry no Message-ID.
+STATE_HEADER_SPEC = "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID FROM DATE SUBJECT)])"
+
+
+def message_state_id(msg: email.message.Message) -> str:
+    """Stable identifier for a message, preferring the Message-ID header.
+
+    Returns "" when neither a Message-ID nor any fingerprint material
+    (From/Date/Subject) exists: such a message has no idempotency key, and
+    callers must leave it unprocessed rather than ingest it blindly.
+    """
+    message_id = (msg.get("Message-ID") or "").strip()
+    if message_id:
+        return message_id
+    parts = [
+        str(msg.get("From") or ""),
+        str(msg.get("Date") or ""),
+        str(msg.get("Subject") or ""),
+    ]
+    if not any(p.strip() for p in parts):
+        return ""
+    fingerprint = "|".join(parts)
+    return "fp:" + hashlib.sha256(fingerprint.encode("utf-8", "replace")).hexdigest()[:32]
+
+
+def fetch_state_id(conn, msg_id: bytes) -> str:
+    """Fetch only the identity headers so processed messages need no full download.
+
+    Besides MESSAGE-ID this must include FROM/DATE/SUBJECT: messages without a
+    Message-ID are identified by a fingerprint of those headers, and fetching
+    only MESSAGE-ID used to hash every such message to the same constant —
+    after the first one was processed, all the others were silently skipped
+    forever. BODY.PEEK never sets \\Seen. Returns "" when no idempotency key
+    can be derived.
+    """
+    try:
+        status, data = conn.fetch(msg_id, STATE_HEADER_SPEC)
+    except Exception as e:
+        logger.warning(f"header fetch failed for {msg_id!r}: {e}")
+        return ""
+    if status != "OK" or not data:
+        return ""
+    raw = b""
+    for part in data:
+        if isinstance(part, tuple) and len(part) > 1 and isinstance(part[1], (bytes, bytearray)):
+            raw = bytes(part[1])
+            break
+    if not raw:
+        return ""
+    return message_state_id(email.message_from_bytes(raw, policy=email.policy.default))
+
+
+_FETCH_SEQ_RE = re.compile(rb"^\s*(\d+)\s+\(")
+
+
+def fetch_state_ids(conn, msg_ids: list[bytes], chunk: int = 200) -> dict[bytes, str]:
+    """Batched :func:`fetch_state_id`: one FETCH round trip per ``chunk`` ids.
+
+    A mailbox scanned over a 30-day window can hold thousands of messages;
+    one header round trip each made every scan take minutes. The response
+    items are matched back to their sequence numbers, and any id the server
+    did not answer for (or a response that cannot be parsed) falls back to
+    the per-message peek, so batching can only ever save work.
+    """
+    wanted = [m for m in msg_ids if m]
+    found: dict[bytes, str] = {}
+    for start in range(0, len(wanted), chunk):
+        batch = wanted[start:start + chunk]
+        try:
+            status, data = conn.fetch(b",".join(batch), STATE_HEADER_SPEC)
+        except Exception as e:
+            logger.warning(f"batched header fetch failed ({len(batch)} ids): {e}")
+            status, data = "NO", []
+        if status == "OK":
+            requested = set(batch)
+            for part in data or []:
+                if not (isinstance(part, tuple) and len(part) > 1):
+                    continue
+                head, raw = part[0], part[1]
+                match = _FETCH_SEQ_RE.match(head) if isinstance(head, (bytes, bytearray)) else None
+                if not match or not isinstance(raw, (bytes, bytearray)):
+                    continue
+                seq = match.group(1)
+                if seq in requested and seq not in found:
+                    found[seq] = message_state_id(
+                        email.message_from_bytes(bytes(raw), policy=email.policy.default)
+                    )
+        for msg_id in batch:
+            if msg_id not in found:
+                found[msg_id] = fetch_state_id(conn, msg_id)
+    return found
 
 
 def render_container_text(part: email.message.Message) -> str:

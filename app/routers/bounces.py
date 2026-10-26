@@ -22,7 +22,10 @@ _DELETE_CHUNK = 200
 # Bounce listing is the most expensive endpoint: serving page N requires
 # scanning and opener-filtering every preceding record, so an unbounded
 # per_page multiplies into tens of thousands of ListMonk queries. Cap both.
-MAX_PAGE = 100
+# The scan itself is bounded by bounce_list.MAX_LM_PAGES (30,000 raw rows),
+# so MAX_PAGE only has to reach that far: at 100 the UI's 25-per-page pager
+# 422'd on every page past 100 for any installation over 2,500 bounces.
+MAX_PAGE = 1500
 MAX_PER_PAGE = 100
 
 # ListMonk filters `type` with a Postgres enum cast, so an unknown value makes
@@ -153,9 +156,18 @@ async def delete_all_bounces(campaign_id: Optional[int] = None,
                 detail="Pass confirm=true to delete ALL bounces. This cannot be undone.",
             )
         logger.warning("Deleting ALL bounces (confirm=true)")
+        # ListMonk's delete-all answers a bare {"data": true}; count first so
+        # the response has the same {deleted, errors, failed} shape as every
+        # other branch (the UI reported "Deleted: 0" after wiping the table).
+        try:
+            before = await listmonk.get_bounces(1, 1)
+            total = int((before.get("data") or {}).get("total") or 0)
+        except Exception as e:
+            logger.warning(f"Could not count bounces before delete-all: {e}")
+            total = None
         res = await listmonk.delete_all_bounces()
         schedule_hard_bounce_update()
-        return res
+        return {**res, "deleted": total, "errors": 0, "failed": [], "all": True}
 
     # Collect only the IDs (a few bytes each) rather than materialising every
     # bounce record, which can be millions of rows with large meta payloads.

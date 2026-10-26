@@ -19,6 +19,7 @@ unsubscribe_log.json
 unsubscribe_log.json.bak
 unsubscribe_settings.json
 unsubscribe_processed.json
+unsubscribe_examined.json
 reply_log.json
 reply_log.json.bak
 reply_settings.json
@@ -28,6 +29,7 @@ app_settings.json
 bounce_processed.json*.tmp
 blocklist_restore_backup.json
 session_secret.key
+session_revocations.json
 *.bak
 uvicorn.log
 .claude/settings.json

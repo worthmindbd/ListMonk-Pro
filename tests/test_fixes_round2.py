@@ -774,7 +774,8 @@ async def test_imap_scan_looks_back_at_least_min_days(tmp_path, monkeypatch):
     await svc.scan_and_unsubscribe(client)
 
     expected = imap_date(datetime.now(timezone.utc) - timedelta(days=svc.MIN_LOOKBACK_DAYS))
-    assert fake.criteria == f"(UNSEEN SINCE {expected})"
+    # No UNSEEN: a request the human already opened must still be found.
+    assert fake.criteria == f"(SINCE {expected})"
 
 
 # ── 16. Processed message IDs are persisted in one batch write ───────────────

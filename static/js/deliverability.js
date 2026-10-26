@@ -131,7 +131,7 @@ const Deliverability = {
             note = 'Listmonk returned no readable settings, so no checks could be scored.';
         } else if (isOptimal) {
             verdict = 'Everything scored is in place';
-            note = 'Every setting this audit scores matches the cold-outreach profile: no tracking pixels, no bulk-unsubscribe header, and cadence paced by hand.';
+            note = 'Every setting this audit scores matches the cold-outreach profile: no tracking pixels, one-click unsubscribe in place, and cadence paced by hand.';
         } else {
             verdict = `${unresolved.length} of ${scored.length} scored checks need a decision`;
             note = 'The preset fixes the engine parameters it owns. Settings Listmonk manages elsewhere — bounce mailboxes, upload types — are listed in the audit below and stay manual.';
@@ -375,8 +375,8 @@ const Deliverability = {
                     </article>
                     <article class="deliv-note">
                         <span class="deliv-note-index">02</span>
-                        <h3>The unsubscribe header is a bulk-mail label</h3>
-                        <p>Gmail and Outlook read <code>List-Unsubscribe</code> as a declaration of bulk mail and sort accordingly. A plain-text opt-out line does the same job for a prospect without handing the mailbox provider that label.</p>
+                        <h3>An easy unsubscribe protects the domain</h3>
+                        <p>Gmail and Yahoo require one-click <code>List-Unsubscribe</code> (RFC 8058) from bulk senders. A prospect who cannot find a way out presses <em>Report spam</em> instead — and complaints, not the header, are what push a sending domain into the spam folder.</p>
                     </article>
                     <article class="deliv-note">
                         <span class="deliv-note-index">03</span>

@@ -306,11 +306,12 @@ class _FakeRequest:
         self.cookies = cookies
 
 
-def _token(timestamp=None, signature=None):
+def _token(timestamp=None, signature=None, nonce="n0nce"):
     from app import auth
 
     ts = str(timestamp if timestamp is not None else int(time.time()))
-    return f"{ts}:{signature if signature is not None else auth._sign(ts)}"
+    payload = f"{ts}.{nonce}"
+    return f"{payload}:{signature if signature is not None else auth._sign(payload)}"
 
 
 def test_verify_session_accepts_fresh_valid_token():
@@ -323,8 +324,7 @@ def test_verify_session_accepts_fresh_valid_token():
 def test_verify_session_rejects_tampered_signature():
     from app import auth
 
-    ts = str(int(time.time()))
-    req = _FakeRequest({auth.COOKIE_NAME: f"{ts}:{'0' * 64}"})
+    req = _FakeRequest({auth.COOKIE_NAME: _token(signature="0" * 64)})
     assert auth.verify_session(req) is False
 
 
@@ -351,7 +351,7 @@ def test_verify_session_rejects_non_numeric_timestamp_with_valid_signature():
 
     # A correctly signed but non-numeric timestamp must fail the expiry
     # parse, not crash it.
-    req = _FakeRequest({auth.COOKIE_NAME: f"notanumber:{auth._sign('notanumber')}"})
+    req = _FakeRequest({auth.COOKIE_NAME: f"notanumber.n:{auth._sign('notanumber.n')}"})
     assert auth.verify_session(req) is False
 
 

@@ -9,6 +9,7 @@ __pycache__/
 .agent/
 schedule.json
 session_secret.key
+session_revocations.json
 *.md
 docs/
 *.jpg
@@ -16,10 +17,27 @@ docs/
 # The dashboard serves static/favicon.png on the unauthenticated /favicon.ico
 # route — excluding it made that route 500 in the production image only.
 !static/favicon.png
+# Runtime state of a local dev run. COPY . . would bake it into the image,
+# and data_path() migrates legacy root files into an empty /data volume on
+# first start — a production container must never inherit a developer's
+# reply log, processed sets or onboarding state.
 unsubscribe_log.json*
 unsubscribe_settings.json
 unsubscribe_processed.json
+unsubscribe_examined.json
+reply_log.json*
+reply_settings.json
+reply_processed.json
+bounce_processed.json*
+app_settings.json
 blocklist_restore_backup.json
+*.tmp
+*.bak
+uvicorn.log
+# Lead exports and other CSVs (subscriber PII).
+*.csv
+.review_shots/
+.pytest_cache/
 skills-lock.json
 tests/
 pytest.ini

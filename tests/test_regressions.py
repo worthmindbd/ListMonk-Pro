@@ -150,23 +150,27 @@ async def test_link_scan_skips_log_deleted_but_processed_email(tmp_path, monkeyp
     assert result["new_found"] == 0
 
 
-# ── IMAP scan: messages are marked seen, undo sticks ─────────────────────────
+# ── IMAP scan: processed messages are marked seen, undo sticks ───────────────
 
 class _FakeIMAP:
     def __init__(self, raw: bytes):
         self.raw = raw
         self.flags: dict[str, str] = {}
+        self.specs: list[str] = []
 
     def select(self, mailbox):
         return ("OK", [b"1"])
 
     def search(self, charset, criteria):
-        assert "UNSEEN" in criteria
-        if self.flags:
-            return ("OK", [b""])
+        # \Seen is never trusted as "already handled" (AGENTS.md rule 13):
+        # the message stays in the result set; the examined set skips it.
+        assert "UNSEEN" not in criteria
+        if criteria.startswith("(SEEN "):
+            return ("OK", [b""])   # one-time migration seed: nothing read yet
         return ("OK", [b"1"])
 
     def fetch(self, msg_id, spec):
+        self.specs.append(spec)
         return ("OK", [(b"1 (RFC822)", self.raw)])
 
     def store(self, msg_id, op, flags):
@@ -235,6 +239,8 @@ async def test_imap_scan_marks_messages_seen_and_undo_sticks(tmp_path, monkeypat
     assert second["processed"] == 0
     assert second["scanned"] == 0
     assert len(modify_calls) == 1, "Message must not be re-processed after undo"
+    # Examining a message must never flip it to read: every fetch is a PEEK.
+    assert all("PEEK" in spec.upper() for spec in fake_conn.specs)
 
 
 # ── Security headers / preview sandbox / login throttling ────────────────────

@@ -1,7 +1,11 @@
 """
 IMAP Unsubscribe Monitor: Scans an IMAP inbox for reply emails containing
 unsubscribe keywords. When found, automatically unsubscribes the sender
-from all ListMonk lists and blocklists them.
+from all ListMonk lists and (if enabled in settings) blocklists them.
+
+Every message in the lookback window is considered regardless of IMAP
+\\Seen — the inbox is shared with a human — and unsubscribe_examined.json
+(Message-ID / fingerprint) keeps a message from being evaluated twice.
 
 Storage: unsubscribe_log.json (same pattern as schedule.json)
 """
@@ -21,9 +25,13 @@ from app.services.listmonk_client import ListMonkClient
 from app.services.unsubscribe_log import (
     load_log, save_log, append_log, load_settings,
     load_processed_emails, mark_processed,
+    load_examined_ids, mark_examined_ids, examined_state_exists,
     _log_lock,
 )
-from app.services.imap_helpers import safe_email_for_query, imap_date, extract_email_body
+from app.services.imap_helpers import (
+    safe_email_for_query, imap_date, extract_email_body,
+    fetch_state_ids, message_state_id,
+)
 
 logger = logging.getLogger("imap_unsubscribe")
 
@@ -444,7 +452,9 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
         errors = 0
         scanned = 0
         new_records = []
-        seen_skips: list = []
+        # Idempotency keys of messages that reached a final outcome (handled,
+        # or not an actionable unsubscribe request) — see EXAMINED_FILE.
+        examined_now: list[str] = []
         seen_after_persist: list = []
 
         try:
@@ -540,53 +550,95 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
 
             await asyncio.to_thread(conn.select, "INBOX")
 
-            # Only fetch UNSEEN emails, but never look back less than
-            # MIN_LOOKBACK_DAYS: anchoring on the newest campaign *month* alone
-            # means a late reply to an older campaign becomes invisible as soon
-            # as a newer campaign starts. Processed messages are marked \Seen,
-            # so clearing/resetting the log does not cause re-processing.
+            # Every message in the window is considered, read or not: the
+            # inbox is read by a human, and a "remove me" reply opened in
+            # webmail before the hourly scan used to be invisible to an
+            # UNSEEN search forever — a silently ignored opt-out (AGENTS.md
+            # rule 13). The persisted examined set, not \Seen, decides what was
+            # already handled. Never look back less than MIN_LOOKBACK_DAYS:
+            # anchoring on the newest campaign *month* alone means a late reply
+            # to an older campaign becomes invisible as soon as a newer
+            # campaign starts.
             min_since = datetime.now(timezone.utc) - timedelta(days=MIN_LOOKBACK_DAYS)
             if latest_campaign_date:
                 since_date = min(latest_campaign_date.replace(day=1), min_since)
                 logger.info(
-                    f"[IMAP] Searching unseen emails SINCE {imap_date(since_date)} "
+                    f"[IMAP] Searching emails SINCE {imap_date(since_date)} "
                     f"(campaign month, {MIN_LOOKBACK_DAYS}-day floor)"
                 )
             else:
                 # Fallback: no campaigns found at all
                 since_date = min_since
                 logger.warning(
-                    f"[IMAP] No campaigns found, searching unseen emails "
+                    f"[IMAP] No campaigns found, searching emails "
                     f"SINCE {imap_date(since_date)}"
                 )
 
             since_str = imap_date(since_date)
             status, msg_ids = await asyncio.to_thread(
-                conn.search, None, f'(UNSEEN SINCE {since_str})'
+                conn.search, None, f'(SINCE {since_str})'
             )
 
-            if status != "OK" or not msg_ids[0]:
+            if status != "OK" or not msg_ids or not msg_ids[0]:
                 return {"scanned": 0, "matched": 0, "processed": 0, "errors": 0,
-                        "message": "No unseen emails found in inbox for the campaign period"}
+                        "message": "No emails found in inbox for the campaign period"}
 
-            ids = msg_ids[0].split()
-            scanned = len(ids)
-            logger.info(f"[IMAP] Found {scanned} unseen emails in campaign period, scanning")
+            ids = [m for m in msg_ids[0].split() if m]
 
-            for msg_id in ids:
+            if not examined_state_exists():
+                # One-time migration from the \Seen-based scanner: it fetched
+                # (and so flagged \Seen) every message it ever looked at, and
+                # "Undo All" relied on that to never re-process a reverted
+                # request. Seeding the examined set with what is already \Seen
+                # keeps that history exactly as the old version treated it;
+                # from here on, read state no longer decides anything.
+                s_status, seen_ids = await asyncio.to_thread(
+                    conn.search, None, f'(SEEN SINCE {since_str})'
+                )
+                seen_list = (
+                    [m for m in seen_ids[0].split() if m]
+                    if s_status == "OK" and seen_ids and seen_ids[0] else []
+                )
+                seeded = (
+                    await asyncio.to_thread(fetch_state_ids, conn, seen_list)
+                    if seen_list else {}
+                )
+                await mark_examined_ids(seeded.values(), create=True)
+                logger.info(
+                    f"[IMAP] Seeded the examined set with {len(seeded)} "
+                    "already-read message(s) (first scan of this version)"
+                )
+
+            # Cheap identity-header peek (batched, never sets \Seen) so
+            # messages examined by an earlier scan cost no body download.
+            state_ids = await asyncio.to_thread(fetch_state_ids, conn, ids)
+            examined = set(load_examined_ids())
+            pending = [m for m in ids if not (state_ids.get(m) and state_ids[m] in examined)]
+            scanned = len(pending)
+            logger.info(
+                f"[IMAP] {len(ids)} emails in campaign period, "
+                f"{scanned} not yet examined"
+            )
+
+            for msg_id in pending:
                 try:
-                    status, data = await asyncio.to_thread(conn.fetch, msg_id, "(RFC822)")
-                    if status != "OK":
+                    # BODY.PEEK[], not RFC822: fetching RFC822 sets \Seen as a
+                    # side effect, so merely examining a message flipped the
+                    # human's unread mail to read — and a message that then
+                    # failed to process was "seen" before it could be retried.
+                    status, data = await asyncio.to_thread(conn.fetch, msg_id, "(BODY.PEEK[])")
+                    if status != "OK" or not data or not isinstance(data[0], tuple):
                         continue
 
                     raw_email = data[0][1]
                     msg = email.message_from_bytes(raw_email, policy=email.policy.default)
+                    state_id = state_ids.get(msg_id) or message_state_id(msg)
 
                     # Dedup: skip if we already processed this email (e.g. it
-                    # was handled before messages started being marked seen)
+                    # was handled before the examined set existed)
                     msg_message_id = msg.get("Message-ID", "").strip()
                     if msg_message_id and msg_message_id in processed_msg_ids:
-                        seen_skips.append(msg_id)
+                        examined_now.append(state_id)
                         continue
 
                     body = _extract_body(msg)
@@ -605,7 +657,7 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                             logger.warning(f"[IMAP] FILTERED OUT: {sender_email_preview} "
                                   f"('{subject_preview}') — keyword only in "
                                   f"quoted/template content, not in actual reply")
-                        seen_skips.append(msg_id)
+                        examined_now.append(state_id)
                         continue
 
                     matched += 1
@@ -615,12 +667,12 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                             f"[IMAP] Could not extract sender email from "
                             f"message {msg_id} ('{subject_preview}')"
                         )
-                        seen_skips.append(msg_id)
+                        examined_now.append(state_id)
                         continue
 
                     # Skip if this sender was already processed
                     if sender_email in processed_emails_set:
-                        seen_skips.append(msg_id)
+                        examined_now.append(state_id)
                         continue
 
                     matched_keyword = keyword_match.group(0).lower()
@@ -647,7 +699,7 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                     safe_email = safe_email_for_query(sender_email)
                     if not safe_email:
                         logger.warning(f"Invalid email format, skipping: {sender_email}")
-                        seen_skips.append(msg_id)
+                        examined_now.append(state_id)
                         continue
                     try:
                         result = await client.get_subscribers(
@@ -657,7 +709,7 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
 
                         if not subscribers:
                             logger.info(f"Sender {sender_email} not found in ListMonk, skipping")
-                            seen_skips.append(msg_id)
+                            examined_now.append(state_id)
                             continue
 
                         subscriber = subscribers[0]
@@ -671,7 +723,7 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                         )
                         if not campaign:
                             logger.info(f"[IMAP] No list-matched campaign for '{subject}' from {sender_email}; skipping")
-                            seen_skips.append(msg_id)
+                            examined_now.append(state_id)
                             continue
 
                         # Unsubscribe from all lists
@@ -705,6 +757,7 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                         }
                         new_records.append(record)
+                        examined_now.append(state_id)
                         seen_after_persist.append(msg_id)
                         processed_emails_set.add(sender_email)  # Prevent duplicates in same scan
                         processed += 1
@@ -719,17 +772,21 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                     errors += 1
                     logger.error(f"Failed to parse email {msg_id}: {e}")
 
-            # Persist new records first, then mark their messages \Seen so a
-            # crash cannot silently lose an unsubscribe. Skipped messages are
-            # safe to mark immediately.
+            # Persist the new records first, then the examined set, so a crash
+            # in between can only cause a re-examination (the sender is in the
+            # processed set by then), never a lost unsubscribe. Messages that
+            # failed transiently are in neither and are retried next scan.
             if new_records:
                 await append_log(new_records)
                 await mark_processed(r["email"] for r in new_records)
+            await mark_examined_ids(examined_now)
 
-            # Mark skipped messages seen immediately; successfully processed
-            # ones only after their records are persisted (a crash in between
-            # leaves them unseen so the unsubscribe can be retried).
-            for mid in seen_skips + seen_after_persist:
+            # Only the unsubscribe requests that were acted on are flagged
+            # \Seen (they are done). Everything else keeps the read state the
+            # human left it in: marking every examined message read used to
+            # wipe the unread markers of genuine prospect replies in a shared
+            # inbox.
+            for mid in seen_after_persist:
                 try:
                     await asyncio.to_thread(conn.store, mid, "+FLAGS", "\\Seen")
                 except Exception as e:

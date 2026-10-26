@@ -389,7 +389,7 @@ const Campaigns = {
 
         for (const type of types) {
             try {
-                const result = await API.get(`/api/campaigns/${id}/subscribers/${type}/export`);
+                const result = await API.download(`/api/campaigns/${id}/subscribers/${type}/export`);
                 if (result.blob) {
                     API.downloadBlob(result.blob, `campaign_${id}_${type}.csv`);
                     exported++;
@@ -581,7 +581,7 @@ const Campaigns = {
         if (!await App.confirm('Archive Campaigns',
                 `Archive ${ids.length} selected campaign(s)?`)) return;
         try {
-            const result = await API.put('/api/campaigns/archive', { ids });
+            const result = await API.put('/api/campaigns/archive', { ids }, API.LONG_TIMEOUT);
             const errors = result?.errors || 0;
             App.toast(`Archived ${result?.archived ?? ids.length} campaign(s)${errors ? `, ${errors} failed` : ''}`,
                 errors ? 'info' : 'success');
@@ -599,7 +599,7 @@ const Campaigns = {
                 `Permanently delete ${ids.length} selected campaign(s) and all their stats? This cannot be undone.`)) return;
         try {
             const params = ids.map(id => `ids=${id}`).join('&');
-            await API.del(`/api/campaigns?${params}`);
+            await API.del(`/api/campaigns?${params}`, API.LONG_TIMEOUT);
             App.toast(`${ids.length} campaign(s) deleted`, 'success');
             App.selection.clear('campaigns');
             this.render();
@@ -631,7 +631,7 @@ const Campaigns = {
     // ── Export ────────────────────────────────────────────
     async exportAll() {
         try {
-            const result = await API.get('/api/campaigns/export-all');
+            const result = await API.download('/api/campaigns/export-all');
             if (result.blob) {
                 API.downloadBlob(result.blob, 'campaigns_export.csv');
                 App.toast('Campaigns exported', 'success');

@@ -1,20 +1,27 @@
 """
 Auto-unblock service: Finds subscribers who clicked links or opened campaigns
-but are currently blocklisted, and re-enables them + deletes their bounce records.
+but are currently blocklisted because of bounces, and re-enables them +
+deletes their bounce records.
 
-Logic: If a subscriber clicked or opened, they are a real engaged user.
-Being blocklisted (usually from a bounce) is a false positive.
+Logic: If a subscriber clicked or opened, they are a real engaged user, so a
+*bounce-driven* blocklisting is a false positive. Only those are reversed:
+a blocklist with no bounce record behind it was a deliberate decision (the
+Leads/Replies "Blocklist" actions, a blocklist import, the unsubscribe
+engine), and an engaged subscriber is exactly who replies "remove me" — the
+old "anyone blocklisted who ever opened" rule re-enabled them every 6 hours.
 """
 
 import asyncio
 import logging
 from datetime import datetime, timezone
 from app.services.listmonk_client import ListMonkClient, listmonk as listmonk_singleton
+from app.services.unsubscribe_log import load_log, _load_processed_list
 
 logger = logging.getLogger("auto_unblock")
 
 QUERY_BLOCKLISTED_ENGAGED = (
     "subscribers.status = 'blocklisted' "
+    "AND subscribers.id IN (SELECT DISTINCT subscriber_id FROM bounces) "
     "AND (subscribers.id IN (SELECT DISTINCT subscriber_id FROM link_clicks) "
     "OR subscribers.id IN (SELECT DISTINCT subscriber_id FROM campaign_views))"
 )
@@ -30,11 +37,42 @@ UNBLOCK_CONCURRENCY = 10
 BOUNCE_DELETE_CONCURRENCY = 10
 
 
+def _suppressed_emails() -> set[str]:
+    """Addresses that asked to be removed and must stay blocklisted.
+
+    A subscriber the unsubscribe engine handled can also carry a bounce
+    record, so the SQL bounce criterion alone does not protect them. Both the
+    processed set (survives log deletion) and the log itself are consulted.
+    """
+    # _load_processed_list, not load_processed_emails: the latter seeds (and
+    # writes) the state file on first use, which a read-only check must not.
+    emails = set(_load_processed_list())
+    emails.update(
+        (r.get("email") or "").strip().lower()
+        for r in load_log() if isinstance(r, dict)
+    )
+    emails.discard("")
+    return emails
+
+
 async def find_blocklisted_engaged(client: ListMonkClient) -> list[dict]:
-    """Find blocklisted subscribers who clicked or opened any campaign."""
-    return await client.paginate_all(
+    """Find bounce-blocklisted subscribers who clicked or opened any campaign.
+
+    Unsubscribed addresses are excluded even when they bounced: an opt-out is
+    never undone automatically.
+    """
+    subs = await client.paginate_all(
         client.get_subscribers, per_page=500, query=QUERY_BLOCKLISTED_ENGAGED,
     )
+    suppressed = _suppressed_emails()
+    if not suppressed:
+        return subs
+    kept = [s for s in subs if (s.get("email") or "").strip().lower() not in suppressed]
+    if len(kept) != len(subs):
+        logger.info(
+            f"Auto-unblock: kept {len(subs) - len(kept)} unsubscribed subscriber(s) blocklisted"
+        )
+    return kept
 
 
 async def find_blocklisted_clickers(client: ListMonkClient) -> list[dict]:

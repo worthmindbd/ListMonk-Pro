@@ -31,18 +31,21 @@ MAX_BULK_IDS = 500
 
 VALID_REPLY_STATUSES = {"unread", "lead", "replied", "archived"}
 
+_BOOL_SETTINGS = {"auto_tag_leads", "auto_blocklist_machine", "auto_blocklist_ooo"}
+
 # Reply stats cache: avoids re-scanning the full log on every dashboard poll.
+# Keyed by campaign_id, each entry carrying its own timestamp: one shared
+# timestamp let a fresh write for campaign B extend the life of campaign A's
+# entry well past the TTL.
 _STATS_CACHE_TTL = 30  # seconds
-_stats_cache: dict = {}
-_stats_cached_at: float = 0.0
+_stats_cache: dict[int, tuple[float, dict]] = {}
 
 
 def invalidate_reply_stats_cache() -> None:
     """Call after any mutation to the reply log so the next stats request
     re-derives counts from the fresh data."""
-    global _stats_cache, _stats_cached_at
+    global _stats_cache
     _stats_cache = {}
-    _stats_cached_at = 0.0
 
 
 def _bulk_reply_ids(raw) -> list[str]:
@@ -87,7 +90,22 @@ async def update_reply_settings(request: Request):
     # Only merge keys this tracker actually owns: an arbitrary client dict
     # (including multi-megabyte junk) must not be persisted to DATA_DIR.
     allowed = set(load_settings().keys())
-    save_settings({k: v for k, v in data.items() if k in allowed})
+    patch = {k: v for k, v in data.items() if k in allowed}
+    # Typed like the defaults: the scanner reads the switches with bool(), so
+    # a string "false" stored for an auto-blocklist toggle silently ENABLED
+    # automatic blocklisting.
+    for key, value in patch.items():
+        if key in _BOOL_SETTINGS and not isinstance(value, bool):
+            raise HTTPException(status_code=400, detail=f"{key} must be a boolean")
+        if key == "lead_tag" and (not isinstance(value, str) or not value.strip()
+                                  or len(value) > 100):
+            raise HTTPException(status_code=400, detail="lead_tag must be a non-empty string")
+        if key == "scan_interval_minutes" and (
+                isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 1440):
+            raise HTTPException(
+                status_code=400, detail="scan_interval_minutes must be an integer between 1 and 1440",
+            )
+    save_settings(patch)
     return load_settings()
 
 
@@ -128,11 +146,11 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
     every dashboard poll. Mutations invalidate the cache via
     :func:`invalidate_reply_stats_cache`.
     """
-    global _stats_cache, _stats_cached_at
     now = time.monotonic()
     cache_key = campaign_id
-    if cache_key in _stats_cache and (now - _stats_cached_at) < _STATS_CACHE_TTL:
-        return _stats_cache[cache_key]
+    cached = _stats_cache.get(cache_key)
+    if cached and (now - cached[0]) < _STATS_CACHE_TTL:
+        return cached[1]
 
     # Delivery-failure DSNs are never stored as replies anymore (they are
     # ingested as bounces); the sentiment filter is a defensive guard for
@@ -191,8 +209,7 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
         "by_campaign": by_campaign,
         "campaign_options": campaign_options,
     }
-    _stats_cache[cache_key] = result
-    _stats_cached_at = now
+    _stats_cache[cache_key] = (now, result)
     return result
 
 
@@ -220,12 +237,14 @@ async def get_replies(
         filtered = [r for r in filtered if str(r.get("campaign_id")) == str(campaign_id)]
     if q:
         query_lower = q.lower().strip()
+        # `or ""`: a stored null (older records, hand edits) must not turn a
+        # search into AttributeError -> 500.
         filtered = [
             r for r in filtered
-            if query_lower in r.get("from_email", "").lower()
-            or query_lower in r.get("from_name", "").lower()
-            or query_lower in r.get("subject", "").lower()
-            or query_lower in r.get("full_body", "").lower()
+            if any(
+                query_lower in str(r.get(field) or "").lower()
+                for field in ("from_email", "from_name", "subject", "full_body")
+            )
         ]
 
     total = len(filtered)

@@ -18,7 +18,9 @@ from typing import Optional
 
 from app.config import settings
 from app.services.listmonk_client import ListMonkClient
-from app.services.imap_helpers import safe_email_for_query, extract_email_body, imap_date
+from app.services.imap_helpers import (
+    safe_email_for_query, extract_email_body, imap_date, fetch_state_id,
+)
 from app.services.imap_unsubscribe import _extract_reply_only, _match_campaign
 # Shared idempotency-key helper: Message-ID when present, otherwise a
 # From|Date|Subject fingerprint (same scheme as the bounce ingester).
@@ -139,12 +141,13 @@ _AUTOMATED_SENDER_RE = re.compile(
 
 _NEGATIVE_PATTERNS = [
     re.compile(r"not\s+interested", re.IGNORECASE),
+    re.compile(r"\b(un|dis)interested\b", re.IGNORECASE),
     re.compile(r"unsubscribe", re.IGNORECASE),
     re.compile(r"remove\s+me", re.IGNORECASE),
     re.compile(r"take\s+me\s+off", re.IGNORECASE),
     re.compile(r"stop\s+emailing", re.IGNORECASE),
     re.compile(r"do\s+not\s+(email|contact)", re.IGNORECASE),
-    re.compile(r"no\s+thanks", re.IGNORECASE),
+    re.compile(r"\bno\s+thanks\b", re.IGNORECASE),
     re.compile(r"wrong\s+person", re.IGNORECASE),
     re.compile(r"cease\s+and\s+desist", re.IGNORECASE),
     re.compile(r"report\s+(as\s+)?spam", re.IGNORECASE),
@@ -162,15 +165,19 @@ _NEGATIVE_PATTERNS = [
     re.compile(r"\bpass\s+(on\s+this|for\s+now)\b", re.IGNORECASE),
 ]
 
+# Every keyword is word-bounded: as bare substrings "yes" matched
+# "yesterday"/"eyes", "cost" matched "costume"/"Costa", "interested" matched
+# "uninterested", and "let's" matched "outlets" — each one auto-promoting an
+# ordinary reply to a Hot Lead.
 _POSITIVE_PATTERNS = [
-    re.compile(r"sounds\s+good", re.IGNORECASE),
-    re.compile(r"interested", re.IGNORECASE),
-    re.compile(r"let'?s\s+(talk|chat|connect|meet|hop\s+on)", re.IGNORECASE),
-    re.compile(r"send\s+(me\s+)?(over\s+)?(more\s+)?(info|information|details|pricing)", re.IGNORECASE),
-    re.compile(r"schedule\s+(a\s+)?(call|time|demo)", re.IGNORECASE),
-    re.compile(r"calendar|calendly", re.IGNORECASE),
-    re.compile(r"pricing|how\s+much|cost", re.IGNORECASE),
-    re.compile(r"yes(\s+please)?", re.IGNORECASE),
+    re.compile(r"\bsounds\s+good\b", re.IGNORECASE),
+    re.compile(r"\binterested\b", re.IGNORECASE),
+    re.compile(r"\blet'?s\s+(talk|chat|connect|meet|hop\s+on)\b", re.IGNORECASE),
+    re.compile(r"\bsend\s+(me\s+)?(over\s+)?(more\s+)?(info|information|details|pricing)\b", re.IGNORECASE),
+    re.compile(r"\bschedule\s+(a\s+)?(call|time|demo)\b", re.IGNORECASE),
+    re.compile(r"\bcalend(ar|ly)\b", re.IGNORECASE),
+    re.compile(r"\b(pricing|how\s+much|costs?)\b", re.IGNORECASE),
+    re.compile(r"\byes\b(\s+please)?", re.IGNORECASE),
     re.compile(r"happy\s+to\s+connect", re.IGNORECASE),
     re.compile(r"tell\s+me\s+more", re.IGNORECASE),
     re.compile(r"give\s+me\s+a\s+call", re.IGNORECASE),
@@ -214,6 +221,16 @@ def _inside_conditional_offer(text: str, start: int, end: int) -> bool:
     )
 
 
+# Typographic apostrophes (iOS/macOS smart punctuation is on by default) are
+# folded to ASCII before matching: every pattern above spells "let's",
+# "don't", "we'll" with a plain apostrophe, so "Let’s talk" was invisible.
+_SMART_APOSTROPHES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u02bc": "'"})
+
+
+def _ascii_apostrophes(text: str) -> str:
+    return (text or "").translate(_SMART_APOSTROPHES)
+
+
 # Display noise left behind by mail clients inside the plain-text part.
 _IMAGE_PLACEHOLDER_RE = re.compile(r"\[image:\s*[^\]]*\]", re.IGNORECASE)
 _BLANK_RUN_RE = re.compile(r"\n{3,}")
@@ -233,6 +250,7 @@ def _auto_reply_kind(subject: str, reply_text: str, from_email: str = "") -> Opt
     exactly what :func:`classify_sentiment` tags ``auto_reply``, so this
     function can never disagree with the feed's sentiment badge.
     """
+    subject, reply_text = _ascii_apostrophes(subject), _ascii_apostrophes(reply_text)
     combined = f"{subject}\n{reply_text}"
 
     # Machine wording wins over away wording: a ticket system that happens to
@@ -262,6 +280,7 @@ def classify_sentiment(subject: str, reply_text: str, from_email: str = "") -> s
     checks run before any keyword: a bounce is never a human sentiment, and a
     no-reply sender's notification text must not inherit keyword matches.
     """
+    subject, reply_text = _ascii_apostrophes(subject), _ascii_apostrophes(reply_text)
     combined = f"{subject}\n{reply_text}"
 
     # 1. Bounce / DSN check — before every sentiment keyword. A delivery
@@ -860,6 +879,10 @@ async def _scan_and_track_replies_impl(
         logger.warning(f"[ReplyTracker] Could not fetch campaigns: {e}")
         campaigns = []
 
+    # Stored replies whose body is still empty need their message again (the
+    # repair pass below); everything else already processed does not.
+    repair_ids = _repairable_record_ids(load_log())
+
     def _fetch_messages_sync():
         mail = _connect_imap()
         try:
@@ -880,6 +903,14 @@ async def _scan_and_track_replies_impl(
             msg_nums = msg_nums[-200:]
             messages = []
             for num in msg_nums:
+                # Identity-header peek first: the scan runs every 15 minutes
+                # over the same window, and downloading all 200 full messages
+                # (attachments included) each time re-fetched mail that was
+                # processed long ago. Only unprocessed messages, and processed
+                # ones awaiting a body repair, are downloaded.
+                state_id = fetch_state_id(mail, num)
+                if state_id and state_id in processed_ids and state_id not in repair_ids:
+                    continue
                 status, data = mail.fetch(num, "(RFC822)")
                 if status == "OK" and data and data[0]:
                     raw = data[0][1]

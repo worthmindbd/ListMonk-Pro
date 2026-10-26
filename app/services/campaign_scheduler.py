@@ -6,6 +6,7 @@ Checks every 60 seconds:
 - If current time is INSIDE the send window and campaign was auto-paused -> resume it
 
 Tracks which campaigns were auto-paused so it doesn't interfere with manual pauses.
+Disabling the scheduler resumes the campaigns it auto-paused.
 """
 
 import asyncio
@@ -172,6 +173,12 @@ async def run_scheduler_tick(client: ListMonkClient):
         schedule = load_schedule()
 
         if not schedule.get("enabled"):
+            # Nothing is enforced while disabled — but campaigns the scheduler
+            # itself paused used to stay paused forever (only an enabled,
+            # in-window tick resumes them), indistinguishable from a manual
+            # pause. Release them instead.
+            if schedule.get("auto_paused_campaigns"):
+                await _release_auto_paused(client, schedule)
             return
 
         # A schedule with no usable days is never "in window", which would make
@@ -268,6 +275,46 @@ async def run_scheduler_tick(client: ListMonkClient):
 
         except Exception as e:
             logger.error(f"Scheduler tick error: {e}")
+
+
+async def _release_auto_paused(client: ListMonkClient, schedule: dict) -> None:
+    """Resume the campaigns this scheduler paused (caller holds _SCHED_LOCK).
+
+    Only campaigns still ``paused`` are resumed: one that was cancelled,
+    finished, deleted or already resumed by hand is simply dropped from the
+    tracking list. A failed resume stays tracked, so the next tick retries.
+    """
+    tracked = list(schedule.get("auto_paused_campaigns") or [])
+    try:
+        paused = {
+            c.get("id"): c for c in await client.paginate_all(
+                client.get_campaigns, per_page=100, status="paused",
+            )
+        }
+    except Exception as e:
+        logger.error(f"Scheduler disabled, but paused campaigns could not be listed: {e}")
+        return
+
+    still_tracked = []
+    for cid in tracked:
+        if cid not in paused:
+            continue
+        try:
+            await client.change_campaign_status(cid, "running")
+            logger.info(
+                f"Auto-RESUMED campaign #{cid} '{paused[cid].get('name', '')}' "
+                "(scheduler disabled)"
+            )
+        except Exception as e:
+            still_tracked.append(cid)
+            logger.error(f"Failed to resume campaign #{cid} after disabling the scheduler: {e}")
+
+    if still_tracked != tracked:
+        schedule["auto_paused_campaigns"] = still_tracked
+        try:
+            save_schedule(schedule)
+        except OSError as e:
+            logger.error(f"Scheduler could not persist auto_paused_campaigns: {e}")
 
 
 async def scheduler_loop(client: ListMonkClient):

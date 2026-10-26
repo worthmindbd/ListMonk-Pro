@@ -66,6 +66,18 @@ def _validate_date(value: str, name: str) -> str:
     return value
 
 
+def _analytics_upper_bound(to_date: str) -> str:
+    """Make a validated YYYY-MM-DD ``to`` bound inclusive for ListMonk.
+
+    ListMonk's analytics queries filter ``created_at <= $to``, so a bare date
+    is read as that day's *midnight* and the whole last day — today, with the
+    UI's default range — silently dropped out of every chart (and disagreed
+    with the subscriber exports, which already treat the end date as
+    inclusive).
+    """
+    return f"{to_date} 23:59:59" if to_date else ""
+
+
 def _hard_counts_ready() -> bool:
     """True once the hard-bounce cache has completed at least one refresh."""
     return bool(get_last_updated())
@@ -148,7 +160,7 @@ async def get_campaign_analytics(analytics_type: str,
     from_date = _validate_date(from_date, "from_date")
     to_date = _validate_date(to_date, "to_date")
     return await listmonk.get_campaign_analytics(analytics_type, campaign_id,
-                                                 from_date, to_date)
+                                                 from_date, _analytics_upper_bound(to_date))
 
 
 @router.get("/analytics/{analytics_type}/export")
@@ -164,7 +176,7 @@ async def export_campaign_analytics(analytics_type: str,
     from_date = _validate_date(from_date, "from_date")
     to_date = _validate_date(to_date, "to_date")
     result = await listmonk.get_campaign_analytics(analytics_type, campaign_id,
-                                                   from_date, to_date)
+                                                   from_date, _analytics_upper_bound(to_date))
     data = result.get("data", [])
     if not data:
         raise HTTPException(status_code=404, detail="No analytics data found")

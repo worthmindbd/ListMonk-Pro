@@ -123,12 +123,19 @@ const Settings = {
             }
             return html;
         };
+        // The stored value is always offered, even off the 15-minute grid or
+        // outside the short timezone list (the API accepts any minute and any
+        // IANA zone): otherwise the select fell back to its first option and
+        // "Save Schedule" silently rewrote the window.
         const minuteOptions = (selectedMin) => {
-            let html = '';
-            for (let m = 0; m < 60; m += 15) {
-                html += `<option value="${m}" ${m === selectedMin ? 'selected' : ''}>${m.toString().padStart(2, '0')}</option>`;
+            const minutes = [0, 15, 30, 45];
+            if (Number.isInteger(selectedMin) && !minutes.includes(selectedMin)) {
+                minutes.push(selectedMin);
+                minutes.sort((a, b) => a - b);
             }
-            return html;
+            return minutes.map(m =>
+                `<option value="${m}" ${m === selectedMin ? 'selected' : ''}>${m.toString().padStart(2, '0')}</option>`
+            ).join('');
         };
 
         const timezones = [
@@ -137,8 +144,9 @@ const Settings = {
             'Asia/Tokyo', 'Asia/Shanghai', 'Asia/Kolkata', 'Asia/Dhaka',
             'Australia/Sydney', 'Pacific/Auckland',
         ];
+        if (s.timezone && !timezones.includes(s.timezone)) timezones.unshift(s.timezone);
         const tzOptions = timezones.map(tz =>
-            `<option value="${tz}" ${tz === s.timezone ? 'selected' : ''}>${tz}</option>`
+            `<option value="${App.escapeHtml(tz)}" ${tz === s.timezone ? 'selected' : ''}>${App.escapeHtml(tz)}</option>`
         ).join('');
 
         const autoPaused = s.auto_paused_campaigns || [];
@@ -180,7 +188,7 @@ const Settings = {
                     </label>
                     <p style="font-size:0.85rem;color:var(--text-muted);margin-top:8px">
                         When enabled, running campaigns will auto-pause outside the send window and auto-resume when the window opens.
-                        Manually paused campaigns are never affected.
+                        Manually paused campaigns are never affected. Turning the scheduler off resumes the campaigns it auto-paused.
                     </p>
                 </div>
 
@@ -239,6 +247,7 @@ const Settings = {
                         <li>If current time is <strong>outside</strong> the send window and a campaign is <strong>running</strong> → it gets <strong>auto-paused</strong></li>
                         <li>If current time is <strong>inside</strong> the send window and a campaign was <strong>auto-paused</strong> → it gets <strong>auto-resumed</strong></li>
                         <li>Campaigns you <strong>manually pause</strong> are never touched by the scheduler</li>
+                        <li>Turning the scheduler <strong>off</strong> resumes the campaigns it auto-paused</li>
                     </ul>
                     <p>The scheduler only affects campaigns with status "running". Draft, finished, or cancelled campaigns are ignored.</p>
                 </div>
@@ -280,7 +289,8 @@ const Settings = {
                 <div class="card-header"><h2 class="card-title">Manual Unblock</h2></div>
                 <p style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:16px">
                     Click the button below to scan for subscribers who opened or clicked campaigns but got blocklisted due to bounces.
-                    They will be re-enabled and their bounce records will be deleted.
+                    They will be re-enabled and their bounce records will be deleted. Blocklistings without a bounce record
+                    (manual, reply or import blocklists) and anyone who unsubscribed are never touched.
                 </p>
                 <button class="btn btn-primary" id="runUnblockBtn" onclick="Settings.runUnblock()">
                     Run Auto-Unblock Now
@@ -293,7 +303,7 @@ const Settings = {
                 <div style="font-size:0.85rem;color:var(--text-secondary);line-height:1.8">
                     <p><strong>Every ${interval} hours</strong>, the system automatically:</p>
                     <ul style="padding-left:20px;margin:8px 0">
-                        <li>Finds subscribers who <strong>opened or clicked</strong> any campaign but are <strong>blocklisted</strong></li>
+                        <li>Finds subscribers who <strong>opened or clicked</strong> any campaign but are <strong>blocklisted with a bounce record</strong> (unsubscribed addresses are always skipped)</li>
                         <li><strong>Re-enables</strong> them (removes blocklist status)</li>
                         <li><strong>Deletes</strong> their bounce records (since they clearly received the email)</li>
                     </ul>
@@ -321,9 +331,18 @@ const Settings = {
 
     async toggleScheduler(checked) {
         try {
-            await API.put('/api/scheduler', { enabled: checked });
-            App.toast(checked ? 'Scheduler enabled' : 'Scheduler disabled', 'success');
-            this.schedule = { ...(this.schedule || {}), enabled: checked };
+            const res = await API.put('/api/scheduler', { enabled: checked });
+            const released = (this.schedule?.auto_paused_campaigns?.length || 0)
+                - (res?.schedule?.auto_paused_campaigns?.length || 0);
+            App.toast(checked ? 'Scheduler enabled'
+                : `Scheduler disabled${released > 0 ? ` — resumed ${released} auto-paused campaign(s)` : ''}`,
+                'success');
+            this.schedule = {
+                ...(this.schedule || {}),
+                enabled: checked,
+                auto_paused_campaigns: res?.schedule?.auto_paused_campaigns
+                    ?? this.schedule?.auto_paused_campaigns ?? [],
+            };
             // Refresh only the banner: a full tab re-render from server state
             // used to silently discard unsaved timezone/hours/days edits.
             this._syncSchedulerBanner();
@@ -386,7 +405,7 @@ const Settings = {
         // Mutates real data (re-enables subscribers, deletes bounce records):
         // needs the same confirmation as every other destructive action.
         if (!await App.confirm('Run Auto-Unblock',
-                'This re-enables blocklisted subscribers who later engaged (opened or clicked) and deletes their false bounce records. Continue?')) return;
+                'This re-enables bounce-blocklisted subscribers who engaged (opened or clicked) and deletes their false bounce records. Unsubscribed addresses stay blocklisted. Continue?')) return;
         const btn = document.getElementById('runUnblockBtn');
         const resultEl = document.getElementById('unblockResult');
         btn.disabled = true;
@@ -394,7 +413,7 @@ const Settings = {
         resultEl.innerHTML = '';
 
         try {
-            const result = await API.post('/api/auto-unblock/run');
+            const result = await API.post('/api/auto-unblock/run', null, API.LONG_TIMEOUT);
             if (result.success === 0 && result.failed === 0) {
                 resultEl.innerHTML = '<div class="badge badge-success" style="padding:8px 14px">No blocklisted engaged subscribers found - all clear!</div>';
             } else {

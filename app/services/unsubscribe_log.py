@@ -23,7 +23,25 @@ PROCESSED_FILE = settings.data_path("unsubscribe_processed.json")
 # Cap for the persisted processed-email set (mirrors bounce_processed.json):
 # without it the file grows forever on a long-running installation. Entries
 # are stored oldest-first, so trimming drops the oldest ones.
-MAX_PROCESSED_EMAILS = 5000
+#
+# The cap must stay far above the number of unsubscribes an installation
+# accumulates, because the link scanner re-polls ListMonk on every run and a
+# link-unsubscribed subscriber stays "unsubscribed" there forever. At the old
+# 5000 cap, unsubscribe #5001 evicted the oldest email, the next hourly scan
+# re-discovered it as new (duplicate log record, re-blocklist), which evicted
+# the next one — an endless churn of duplicate records. 50k entries is about
+# 1.5 MB on disk, mirroring bounce_processed.json.
+MAX_PROCESSED_EMAILS = 50_000
+
+# Message-level idempotency for the IMAP unsubscribe scanner: Message-IDs (or
+# From|Date|Subject fingerprints) of every inbox message that reached a final
+# outcome. The scanner re-reads its whole lookback window instead of trusting
+# IMAP \Seen (AGENTS.md rule 13: a human reading the inbox would otherwise
+# hide "remove me" requests forever), so this set is what keeps a message
+# from being downloaded and evaluated again on every scan. Oldest-first and
+# capped like bounce_processed.json, which re-reads a 30-day window too.
+EXAMINED_FILE = settings.data_path("unsubscribe_examined.json")
+MAX_EXAMINED_IDS = 50_000
 
 _DEFAULT_SETTINGS = {
     "blocklist_enabled": False,
@@ -184,9 +202,54 @@ async def unmark_processed(emails) -> None:
         save_processed_emails(current, ordered_hint=existing_order)
 
 
+def load_examined_ids() -> list[str]:
+    """Return the persisted examined-message identifiers, oldest first."""
+    try:
+        data = json.loads(EXAMINED_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return [str(m) for m in data if m]
+    except (FileNotFoundError, json.JSONDecodeError, IsADirectoryError, PermissionError):
+        pass
+    return []
+
+
+def examined_state_exists() -> bool:
+    """False until the first scan of a version that keeps the examined set."""
+    return EXAMINED_FILE.exists()
+
+
+async def mark_examined_ids(ids, create: bool = False) -> None:
+    """Add message identifiers to the examined set (one read + one write).
+
+    ``create`` writes the file even when nothing is added, which records
+    that the one-time migration seeding (see the scanner) has run.
+    """
+    fresh = [str(i) for i in ids if i]
+    if not fresh:
+        if create and not EXAMINED_FILE.exists():
+            async with _log_lock:
+                if not EXAMINED_FILE.exists():
+                    _atomic_write_json(EXAMINED_FILE, [], indent=None, ensure_ascii=True)
+        return
+    async with _log_lock:
+        current = load_examined_ids()
+        known = set(current)
+        added = [i for i in dict.fromkeys(fresh) if i not in known]
+        if not added:
+            return
+        current.extend(added)
+        if len(current) > MAX_EXAMINED_IDS:
+            current = current[-MAX_EXAMINED_IDS:]
+        _atomic_write_json(EXAMINED_FILE, current, indent=None, ensure_ascii=True)
+
+
 def load_settings() -> dict:
     try:
         data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        # A hand-edited file holding a list/scalar must not 500 every scan
+        # ({**DEFAULTS, **[...]} raises TypeError).
+        if not isinstance(data, dict):
+            return dict(_DEFAULT_SETTINGS)
         return {**_DEFAULT_SETTINGS, **data}
     except (FileNotFoundError, json.JSONDecodeError, IsADirectoryError, PermissionError):
         return dict(_DEFAULT_SETTINGS)

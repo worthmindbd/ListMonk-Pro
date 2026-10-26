@@ -43,12 +43,12 @@ jobs:
             git reset --hard origin/main
             docker compose up -d --build
             for i in $(seq 1 15); do
-              if curl -fs http://localhost:8000/auth/login > /dev/null; then
+              if curl -fs http://localhost:8000/health > /dev/null; then
                 echo "ListMonk Pro is healthy!"
                 break
               fi
               echo "Waiting for ListMonk Pro to respond ($i/15)..."
               sleep 2
             done
-            curl -fs http://localhost:8000/auth/login > /dev/null || (echo "Deploy health check failed!" && exit 1)
+            curl -fs http://localhost:8000/health > /dev/null || (echo "Deploy health check failed!" && exit 1)
 

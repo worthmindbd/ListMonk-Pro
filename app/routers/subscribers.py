@@ -152,9 +152,49 @@ async def create_subscriber(data: dict):
 # NOTE: static routes like /lists and /blocklist MUST be registered before
 # /{subscriber_id}, otherwise Starlette matches the parameterized route first
 # and int-parses "lists"/"blocklist" (422), making the endpoints unreachable.
+VALID_LIST_ACTIONS = {"add", "remove", "unsubscribe"}
+VALID_SUBSCRIPTION_STATUSES = {"confirmed", "unconfirmed", "unsubscribed"}
+
+
 @router.put("/lists")
 async def modify_list_memberships(data: dict):
-    return await listmonk.modify_list_memberships(data)
+    """Bulk add/remove/unsubscribe the selected subscribers on lists.
+
+    Rule 14: only the submitted ids are touched, so both id arrays go
+    through parse_ids and the payload is rebuilt from validated fields
+    instead of forwarding an arbitrary client body upstream.
+    """
+    try:
+        ids = parse_ids(data.get("ids"))
+        target_list_ids = parse_ids(data.get("target_list_ids"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not ids:
+        raise HTTPException(status_code=400, detail="ids must be a non-empty list of subscriber ids")
+    if not target_list_ids:
+        raise HTTPException(status_code=400, detail="target_list_ids must be a non-empty list of list ids")
+
+    action = str(data.get("action") or "").strip().lower()
+    if action not in VALID_LIST_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"action must be one of: {', '.join(sorted(VALID_LIST_ACTIONS))}",
+        )
+    payload: dict = {"ids": ids, "action": action, "target_list_ids": target_list_ids}
+    status = data.get("status")
+    if status is not None and status != "":
+        status = str(status).strip().lower()
+        if status not in VALID_SUBSCRIPTION_STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"status must be one of: {', '.join(sorted(VALID_SUBSCRIPTION_STATUSES))}",
+            )
+        payload["status"] = status
+    elif action == "add":
+        # ListMonk requires a status for "add"; the UI always sends one, a
+        # bare API call gets the same mailable default the importer uses.
+        payload["status"] = "confirmed"
+    return await listmonk.modify_list_memberships(payload)
 
 
 @router.put("/blocklist")

@@ -435,7 +435,8 @@ const Subscribers = {
     },
 
     async blocklist(id) {
-        if (!await App.confirm('Blocklist this subscriber? They will stop receiving all mail.')) return;
+        if (!await App.confirm('Blocklist Subscriber',
+                'Blocklist this subscriber? They will stop receiving all mail.')) return;
         try {
             await API.put(`/api/subscribers/${id}/blocklist`);
             App.toast('Subscriber blocklisted', 'success');
@@ -544,7 +545,7 @@ const Subscribers = {
             if (this.statusFilter) params.set('status', this.statusFilter);
             if (this.listFilter) params.set('list_id', String(this.listFilter));
             const qs = params.toString();
-            const result = await API.get(`/api/subscribers/export-all${qs ? '?' + qs : ''}`);
+            const result = await API.download(`/api/subscribers/export-all${qs ? '?' + qs : ''}`);
             API.downloadBlob(result.blob, 'subscribers_export.csv');
             App.toast('Export downloaded', 'success');
         } catch {

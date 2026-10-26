@@ -15,7 +15,6 @@ import asyncio
 import email
 import email.policy
 import email.utils
-import hashlib
 import imaplib
 import json
 import logging
@@ -34,6 +33,11 @@ logger = logging.getLogger("bounce_ingest")
 
 from app.services.imap_helpers import (
     safe_email_for_query, imap_date, extract_email_body, render_container_text,
+    # The idempotency-key helpers live in imap_helpers (the unsubscribe and
+    # reply scanners key their state on them too); the private aliases keep
+    # this module's established names for its callers.
+    message_state_id as _message_state_id,
+    fetch_state_id as _fetch_state_id,
 )
 
 
@@ -70,27 +74,6 @@ _STATE_LOCK = threading.Lock()
 # means the message is still in flight, so recording a bounce for it would be
 # wrong — the eventual failure arrives as its own DSN with its own Message-ID.
 _NON_BOUNCE_ACTIONS = ("delayed",)
-
-
-def _message_state_id(msg: email.message.EmailMessage) -> str:
-    """Stable identifier for a DSN, preferring the Message-ID header.
-
-    Returns "" when neither a Message-ID nor any fingerprint material
-    (From/Date/Subject) exists: such a message has no idempotency key, and
-    callers must leave it unprocessed rather than ingest it blindly.
-    """
-    message_id = (msg.get("Message-ID") or "").strip()
-    if message_id:
-        return message_id
-    parts = [
-        str(msg.get("From") or ""),
-        str(msg.get("Date") or ""),
-        str(msg.get("Subject") or ""),
-    ]
-    if not any(p.strip() for p in parts):
-        return ""
-    fingerprint = "|".join(parts)
-    return "fp:" + hashlib.sha256(fingerprint.encode("utf-8", "replace")).hexdigest()[:32]
 
 
 def _dsn_action(body: str) -> str:
@@ -155,33 +138,6 @@ def mark_processed_ids(ids: list[str]) -> None:
             return
         current.extend(added)
         save_processed_ids(current)
-
-
-def _fetch_state_id(conn: imaplib.IMAP4_SSL, msg_id: bytes) -> str:
-    """Fetch only the identity headers so processed DSNs need no full download.
-
-    Besides MESSAGE-ID this must include FROM/DATE/SUBJECT: DSNs without a
-    Message-ID are identified by a fingerprint of those headers, and fetching
-    only MESSAGE-ID used to hash every such DSN to the same constant — after
-    the first one was processed, all the others were silently skipped forever.
-    Returns "" when no idempotency key can be derived.
-    """
-    spec = "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID FROM DATE SUBJECT)])"
-    try:
-        status, data = conn.fetch(msg_id, spec)
-    except Exception as e:
-        logger.warning(f"header fetch failed for {msg_id!r}: {e}")
-        return ""
-    if status != "OK" or not data:
-        return ""
-    raw = b""
-    for part in data:
-        if isinstance(part, tuple) and len(part) > 1 and isinstance(part[1], (bytes, bytearray)):
-            raw = bytes(part[1])
-            break
-    if not raw:
-        return ""
-    return _message_state_id(email.message_from_bytes(raw, policy=email.policy.default))
 
 
 # ─── Classification ──────────────────────────────────────────────────────────
@@ -287,7 +243,28 @@ def _extract_body(msg: email.message.EmailMessage) -> str:
     return extract_email_body(msg, content_types=_BOUNCE_CONTENT_TYPES)
 
 
+def _own_addresses() -> set[str]:
+    """This installation's own mailbox addresses (never a bounced recipient)."""
+    return {
+        addr for addr in (
+            (settings.imap_user or "").strip().lower(),
+            (settings.bounce_imap_user or "").strip().lower(),
+        ) if addr
+    }
+
+
 def _extract_bounced_recipient(msg: email.message.EmailMessage, body: str) -> Optional[str]:
+    # Both of this installation's own addresses are excluded everywhere: a
+    # bare-text DSN quoted the original message's headers (the primary-inbox
+    # reply tracker ingests those too, where the sender's own address is
+    # `imap_user`, not the bounce user) could otherwise match the catch-all
+    # pattern below and record the bounce against the sender's own subscriber
+    # record. The outer headers need the same guard: Postfix's local/virtual
+    # delivery stamps the *bounce mailbox itself* into X-Original-To, which
+    # used to win over the real recipient and discard the DSN as
+    # "no_subscriber".
+    own_addrs = _own_addresses()
+
     for header in ("X-Failed-Recipients", "X-Original-To",
                    "Original-Recipient", "Final-Recipient"):
         val = msg.get(header, "")
@@ -295,7 +272,7 @@ def _extract_bounced_recipient(msg: email.message.EmailMessage, body: str) -> Op
             if ";" in val:
                 val = val.split(";", 1)[1].strip()
             match = re.search(r"[\w.+-]+@[\w.-]+\.\w+", val)
-            if match:
+            if match and match.group(0).lower() not in own_addrs:
                 return match.group(0).lower()
 
     if msg.is_multipart():
@@ -308,18 +285,8 @@ def _extract_bounced_recipient(msg: email.message.EmailMessage, body: str) -> Op
                 for line in dsn_text.splitlines():
                     if line.lower().startswith(("final-recipient:", "original-recipient:")):
                         match = re.search(r"[\w.+-]+@[\w.-]+\.\w+", line)
-                        if match:
+                        if match and match.group(0).lower() not in own_addrs:
                             return match.group(0).lower()
-
-    # Both of this installation's own addresses are excluded: a bare-text DSN
-    # quoted the original message's headers (the primary-inbox reply tracker
-    # ingests those too, where the sender's own address is `imap_user`, not
-    # the bounce user) could otherwise match the catch-all pattern below and
-    # record the bounce against the sender's own subscriber record.
-    own_addrs = {
-        (settings.imap_user or "").strip().lower(),
-        (settings.bounce_imap_user or "").strip().lower(),
-    }
 
     # Some relays emit the DSN as a plain text/plain message with the RFC 3464
     # fields inline instead of a message/delivery-status part. Those bodies
@@ -360,9 +327,24 @@ def _extract_campaign_hint(msg: email.message.EmailMessage) -> Optional[str]:
     if not msg.is_multipart():
         return None
     for part in msg.walk():
-        if part.get_content_type() in ("message/rfc822", "text/rfc822-headers"):
+        content_type = part.get_content_type()
+        if content_type in ("message/rfc822", "text/rfc822-headers"):
             inner_payload = part.get_payload()
             inner = inner_payload[0] if isinstance(inner_payload, list) and inner_payload else None
+            if inner is None and content_type == "text/rfc822-headers":
+                # text/rfc822-headers (what Exchange and many relays attach
+                # instead of the whole original) is a *text* part: its payload
+                # is the header block as a string, never a parsed message, so
+                # the campaign header was invisible and attribution silently
+                # fell back to the "newest campaign on the subscriber's lists"
+                # guess.
+                try:
+                    raw_headers = part.get_payload(decode=True) or b""
+                    inner = email.message_from_bytes(
+                        raw_headers, policy=email.policy.default,
+                    ) if raw_headers else None
+                except Exception:
+                    inner = None
             if inner is None:
                 continue
             for hdr in LISTMONK_CAMPAIGN_HEADERS:

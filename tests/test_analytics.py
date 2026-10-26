@@ -24,7 +24,9 @@ def test_get_campaign_analytics_views(client):
         response = client.get("/api/campaigns/analytics/views?campaign_id=1&from_date=2026-08-01&to_date=2026-08-02")
         assert response.status_code == 200
         assert response.json() == mock_data
-        mock_get.assert_called_once_with("views", 1, "2026-08-01", "2026-08-02")
+        # ListMonk filters created_at <= to: the end date is sent as the end
+        # of that day, otherwise the whole last day drops out of the chart.
+        mock_get.assert_called_once_with("views", 1, "2026-08-01", "2026-08-02 23:59:59")
 
 
 def test_export_campaign_analytics_csv(client):

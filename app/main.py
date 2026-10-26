@@ -17,7 +17,6 @@ from app.services.listmonk_client import listmonk
 from app.services.auto_unblock import (
     find_blocklisted_engaged,
     unblock_subscribers,
-    QUERY_BLOCKLISTED_ENGAGED,
 )
 from app.services.campaign_scheduler import (
     load_schedule, is_within_send_window,
@@ -30,7 +29,8 @@ from app.services.hard_bounce_cache import start_cache_updater, schedule_hard_bo
 from app.auth import (
     verify_session, create_session, clear_session, check_credentials,
     is_login_rate_limited, record_login_failure, clear_login_failures,
-    client_ip_from_request, warn_if_default_credentials,
+    client_ip_from_request, warn_if_default_credentials, revoke_session,
+    COOKIE_NAME,
 )
 from app.services.task_utils import shutdown as shutdown_tasks
 from app.services.imap_reply_tracker import scan_and_track_replies
@@ -96,11 +96,14 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
         # CSP provides defense-in-depth against XSS. 'unsafe-inline' is
         # required for the inline theme-init script and onclick handlers;
-        # a future migration to nonce-based CSP can tighten this.
+        # a future migration to nonce-based CSP can tighten this. The Google
+        # Fonts stylesheet is listed explicitly: font-src already allowed the
+        # font files, but style-src blocked the CSS that declares them, so the
+        # dashboard always fell back to system fonts.
         response.headers.setdefault(
             "Content-Security-Policy",
             "default-src 'self'; script-src 'self' 'unsafe-inline'; "
-            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; "
             "font-src 'self' https://fonts.gstatic.com; "
             "connect-src 'self'; frame-src 'none'; object-src 'none'",
         )
@@ -122,8 +125,14 @@ class CSRFMiddleware(BaseHTTPMiddleware):
     Browsers will not send ``X-Requested-With`` or ``Content-Type:
     application/json`` cross-origin without a preflight, so requiring one of
     these headers on POST/PUT/DELETE blocks cross-site form submissions even
-    when SameSite cookies are bypassed (e.g. same-origin XSS). GET requests
-    and non-API paths are unaffected.
+    when SameSite cookies are bypassed (e.g. a sibling subdomain, which is
+    same-site). GET requests and non-API paths are unaffected.
+
+    ``multipart/form-data`` is deliberately NOT accepted on its own: it is one
+    of the three enctypes a plain HTML ``<form>`` can submit without a
+    preflight, so exempting it let any same-site page POST to every endpoint
+    (``/api/unsubscribes/reset``, ``/api/auto-unblock/run`` …). The SPA's
+    uploads go through ``API.request``, which always sends X-Requested-With.
     """
 
     SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -131,9 +140,11 @@ class CSRFMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if request.method not in self.SAFE_METHODS and request.url.path.startswith("/api/"):
             has_xrw = request.headers.get("x-requested-with", "").lower() == "xmlhttprequest"
-            has_json_ct = "application/json" in (request.headers.get("content-type") or "")
-            is_form_upload = "multipart/form-data" in (request.headers.get("content-type") or "")
-            if not (has_xrw or has_json_ct or is_form_upload):
+            # Compare the MIME essence, not a substring: a no-cors fetch may
+            # send "text/plain; x=application/json" without a preflight.
+            content_type = (request.headers.get("content-type") or "").split(";", 1)[0]
+            has_json_ct = content_type.strip().lower() == "application/json"
+            if not (has_xrw or has_json_ct):
                 return JSONResponse(
                     status_code=403,
                     content={"detail": "Missing X-Requested-With or Content-Type header"},
@@ -406,6 +417,10 @@ async def login(request: Request):
 # top-level navigations, so a GET logout is a trivial forced-logout vector.
 @app.post("/auth/logout")
 async def logout(request: Request):
+    # Revoke server-side, not just in this browser: a copied cookie must stop
+    # working once its owner logs out. The revocation write fsyncs, so it
+    # runs off the event loop.
+    await asyncio.to_thread(revoke_session, request.cookies.get(COOKIE_NAME))
     response = RedirectResponse("/auth/login", status_code=303)
     clear_session(response, request)
     return response
@@ -443,8 +458,10 @@ async def auto_unblock_status():
     # scheduler with Promise.all, so raising here would blank the whole page
     # when only this readout is unavailable. The client renders `error`.
     try:
-        result = await listmonk.get_subscribers(1, 1, QUERY_BLOCKLISTED_ENGAGED)
-        total = (result.get("data") or {}).get("total") or 0
+        # The same candidate set the run acts on (bounce-blocklisted engaged
+        # subscribers minus opt-outs), so the count never promises unblocks
+        # the run will deliberately skip.
+        total = len(await find_blocklisted_engaged(listmonk))
         return {
             "blocklisted_engaged": total,
             "blocklisted_clickers": total,
@@ -549,8 +566,10 @@ async def update_schedule(data: dict):
             status_code=500,
             detail="Could not write schedule file (check data directory permissions).",
         )
-    if schedule.get("enabled"):
-        await run_scheduler_tick(listmonk)
+    # Tick right away in both directions: an enabled schedule applies the
+    # window now, and a disabled one releases the campaigns it auto-paused.
+    await run_scheduler_tick(listmonk)
+    schedule = {**schedule, "auto_paused_campaigns": load_schedule().get("auto_paused_campaigns", [])}
     return {"status": "ok", "schedule": schedule}
 
 

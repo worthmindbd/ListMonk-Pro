@@ -30,7 +30,12 @@ except (OverflowError, ValueError):  # pragma: no cover - 32-bit platforms
     csv.field_size_limit(2**31 - 1)
 
 
-ENCODINGS = ["utf-8-sig", "utf-8", "latin-1", "cp1252"]
+# Order matters: the first encoding that decodes the whole file wins.
+# latin-1 maps every byte, so anything after it is unreachable — cp1252 (what
+# Excel on Windows writes) must come first, or its smart quotes, dashes and €
+# (0x80-0x9F) were decoded as invisible C1 control characters. cp1252 leaves
+# five bytes undefined, so a genuinely latin-1 file still falls through.
+ENCODINGS = ["utf-8-sig", "utf-8", "cp1252", "latin-1"]
 
 # Header-name hints for guessing which column is which. Compared after
 # stripping every non-alphanumeric character and lowercasing, so

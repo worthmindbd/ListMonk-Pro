@@ -439,12 +439,20 @@ const Unsubscribes = {
     },
 
     /* ── CRUD Actions ─────────────────────────────────────── */
+    /** Query suffix limiting a record delete to the campaign on screen: the
+        dialog promises "this campaign's unsubscribe list", and an address
+        that unsubscribed from several campaigns must keep the others. */
+    _campaignScope() {
+        const cid = this.activeCampaign?.campaign_id;
+        return Number.isInteger(cid) ? `&campaign_id=${cid}` : '';
+    },
+
     async deleteRecord(email) {
         if (!email) return;
         if (!await App.confirm('Remove Record',
                 `Remove "${email}" from this campaign's unsubscribe list?`)) return;
         try {
-            await API.del(`/api/unsubscribes/records?emails=${encodeURIComponent(email)}`);
+            await API.del(`/api/unsubscribes/records?emails=${encodeURIComponent(email)}${this._campaignScope()}`);
             App.toast(`Removed ${email}`, 'success');
             this.selectedEmails.delete(email);
             await this.render();
@@ -460,7 +468,7 @@ const Unsubscribes = {
                 `Remove ${count} selected record(s)? This cannot be undone.`)) return;
         try {
             const emailParams = [...this.selectedEmails].map(e => `emails=${encodeURIComponent(e)}`).join('&');
-            await API.del(`/api/unsubscribes/records?${emailParams}`);
+            await API.del(`/api/unsubscribes/records?${emailParams}${this._campaignScope()}`);
             App.toast(`Removed ${count} record(s)`, 'success');
             this.selectedEmails.clear();
             await this.render();
@@ -503,7 +511,7 @@ const Unsubscribes = {
     /* ── Export ────────────────────────────────────────────── */
     async exportCampaignCSV(campaignId) {
         try {
-            const result = await API.get(`/api/unsubscribes/campaign/${campaignId}/export`);
+            const result = await API.download(`/api/unsubscribes/campaign/${campaignId}/export`);
             if (result.blob) {
                 API.downloadBlob(result.blob, `unsubscribes_campaign_${campaignId}.csv`);
                 App.toast('Campaign exported', 'success');
@@ -515,7 +523,7 @@ const Unsubscribes = {
 
     async exportAllCSV() {
         try {
-            const result = await API.get('/api/unsubscribes/export');
+            const result = await API.download('/api/unsubscribes/export');
             if (result.blob) {
                 API.downloadBlob(result.blob, 'unsubscribes_all.csv');
                 App.toast('All unsubscribes exported', 'success');
@@ -539,7 +547,7 @@ const Unsubscribes = {
         }
         App.toast('Scanning inbox...', 'info');
         try {
-            const result = await API.post('/api/unsubscribes/scan', {});
+            const result = await API.post('/api/unsubscribes/scan', {}, API.LONG_TIMEOUT);
             const imapData = result.imap || result;  // supports both old and new format
             const linkData = result.link || {};
             const totalProcessed = (imapData.processed || 0) + (linkData.processed || 0);
@@ -582,7 +590,7 @@ const Unsubscribes = {
             'This will UNDO all unsubscribes — re-enable and re-subscribe all processed leads in ListMonk, then remove restored records from the log. Continue?')) return;
         App.toast('Resetting all unsubscribes...', 'info');
         try {
-            const result = await API.post('/api/unsubscribes/reset');
+            const result = await API.post('/api/unsubscribes/reset', null, API.LONG_TIMEOUT);
             App.toast(result.message || 'Reset complete', 'success');
             await this.render();
         } catch {

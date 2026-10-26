@@ -140,6 +140,29 @@ def _parse_import_options(
     return params
 
 
+# Response headers share one small budget with everything a reverse proxy
+# adds (nginx's default proxy_buffer_size is 4 KB).
+_STATS_HEADER_MAX = 3000
+
+
+def _stats_header(stats: dict) -> str:
+    """Serialise conversion stats for the X-Conversion-Stats header.
+
+    The stats carry per-column lists (one entry per attribute column), and a
+    wide lead export (100+ columns) pushed the header past common proxy
+    limits — nginx then answers 502 "upstream sent too big header" and the
+    converted file never arrives. Past the budget only the scalar counters
+    are kept, which is all the UI's summary toast reads.
+    """
+    full = json.dumps(stats)
+    if len(full) <= _STATS_HEADER_MAX:
+        return full
+    return json.dumps({
+        **{k: v for k, v in stats.items() if not isinstance(v, (list, dict))},
+        "truncated": True,
+    })
+
+
 @router.post("/detect-columns")
 async def detect_csv_columns(file: UploadFile = File(...)):
     """Upload a CSV and detect its columns + preview rows."""
@@ -204,7 +227,7 @@ async def convert_csv_file(
         media_type="text/csv",
         headers={
             "Content-Disposition": "attachment; filename=listmonk_import.csv",
-            "X-Conversion-Stats": json.dumps(result["stats"]),
+            "X-Conversion-Stats": _stats_header(result["stats"]),
         },
     )
 

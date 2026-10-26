@@ -54,6 +54,22 @@ def _duration_seconds(value) -> float:
     return total
 
 
+def _as_number(value, default: float) -> float:
+    """Coerce a ListMonk setting to a number for threshold comparisons.
+
+    ``raw_settings.get(key, default)`` only covers a *missing* key: an
+    explicit ``null`` (or a numeric string from an older version) reached
+    ``batch_size <= 100`` and raised TypeError, failing the whole audit
+    with a 502.
+    """
+    if isinstance(value, bool):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
     """Fetch current Listmonk settings and run deliverability checks."""
     try:
@@ -98,17 +114,25 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
         "impact": "High",
     })
 
-    # 3. List-Unsubscribe Header
+    # 3. List-Unsubscribe Header. Required, not optional: since February 2024
+    # Gmail and Yahoo demand RFC 8058 one-click unsubscribe (List-Unsubscribe
+    # + List-Unsubscribe-Post) from senders of ~5,000+ messages a day, and
+    # ListMonk only emits those headers with this setting on. Without them a
+    # recipient's only exit is the spam button, and complaint rate is what
+    # actually sinks a sending domain. (This check used to *require* the
+    # header off, on the theory that it routes mail to Promotions.)
     unsub_header = raw_settings.get("privacy.unsubscribe_header")
     checks.append({
         "id": "unsubscribe_header",
         "group": "privacy",
-        "name": "RFC List-Unsubscribe Header Disabled",
-        "description": "Email clients (Gmail/Outlook) automatically route messages with this header to Promotions or Spam.",
-        "status": "pass" if unsub_header is False else "fail",
+        "name": "RFC List-Unsubscribe Header Enabled",
+        "description": "Gmail and Yahoo require one-click List-Unsubscribe (RFC 8058) from bulk senders; "
+                       "without it, recipients who want out can only press \"Report spam\", which damages "
+                       "the sending domain's reputation far more than an unsubscribe.",
+        "status": "pass" if unsub_header is True else "fail",
         "current_value": unsub_header,
-        "recommended": False,
-        "impact": "Critical for primary inboxing",
+        "recommended": True,
+        "impact": "Critical for sender reputation",
     })
 
     # 4. Safe Batch Size
@@ -118,7 +142,8 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
         "group": "sending",
         "name": "Sending Batch Size",
         "description": "Batches of <= 100 allow fine-grained pacing and prevent sudden provider rate limiting.",
-        "status": "pass" if batch_size <= 100 else ("warn" if batch_size <= 250 else "fail"),
+        "status": "pass" if _as_number(batch_size, 1000) <= 100 else (
+            "warn" if _as_number(batch_size, 1000) <= 250 else "fail"),
         "current_value": batch_size,
         "recommended": "<= 100",
         "impact": "High",
@@ -131,7 +156,7 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
         "group": "sending",
         "name": "Worker Concurrency",
         "description": "Concurrency of 1 worker maintains steady, human-like drip sending.",
-        "status": "pass" if concurrency == 1 else "warn",
+        "status": "pass" if _as_number(concurrency, 0) == 1 else "warn",
         "current_value": concurrency,
         "recommended": 1,
         "impact": "Medium",
@@ -283,7 +308,9 @@ async def apply_deliverability_preset(listmonk: ListMonkClient, mode: str) -> di
         payload = {
             "privacy.disable_tracking": True,
             "privacy.individual_tracking": False,
-            "privacy.unsubscribe_header": False,
+            # One-click unsubscribe stays on in cold mode too (see the audit
+            # check above): it is a bulk-sender requirement, not a label.
+            "privacy.unsubscribe_header": True,
             "app.batch_size": 100,
             "app.concurrency": 1,
             "app.max_send_errors": 10,

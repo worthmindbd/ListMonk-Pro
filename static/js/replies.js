@@ -370,7 +370,7 @@ const Replies = {
         if (!await App.confirm('Blocklist Senders',
                 `Blocklist the senders of ${ids.length} selected repl(y/ies)? They will never receive further outreach.`)) return;
         try {
-            const result = await API.post('/api/replies/blocklist', { ids });
+            const result = await API.post('/api/replies/blocklist', { ids }, API.LONG_TIMEOUT);
             const errors = result?.errors || 0;
             App.toast(`Blocklisted ${result?.blocklisted ?? ids.length} sender(s)${errors ? `, ${errors} failed` : ''}`,
                 errors ? 'info' : 'success');
@@ -422,7 +422,7 @@ const Replies = {
         }
 
         try {
-            const res = await API.post('/api/replies/scan', {});
+            const res = await API.post('/api/replies/scan', {}, API.LONG_TIMEOUT);
             const stats = res.stats || {};
             // Safety net: the endpoint now answers 502 on IMAP failure, but a
             // 200 carrying an error must never read as a successful scan.
@@ -453,7 +453,7 @@ const Replies = {
 
     async updateStatus(id, newStatus) {
         try {
-            await API.put(`/api/replies/${id}/status`, { status: newStatus });
+            await API.put(`/api/replies/${encodeURIComponent(id)}/status`, { status: newStatus });
             App.toast(`Status updated to ${newStatus}`, 'success');
             const card = document.getElementById(`card_${id}`);
             if (card) {
@@ -545,7 +545,7 @@ ${App.escapeHtml(reply.full_body || reply.body_preview || '')}
         try {
             // Resolved server-side so the sender address never reaches a
             // client-built ListMonk query.
-            const result = await API.post(`/api/replies/${id}/blocklist`, {});
+            const result = await API.post(`/api/replies/${encodeURIComponent(id)}/blocklist`, {});
             App.toast(`${result?.email || email} successfully blocklisted.`, 'success');
         } catch {
             // API.request already surfaced the server message.

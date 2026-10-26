@@ -66,7 +66,10 @@ const Dashboard = {
                 // chart without a full page reload.
                 this.lastRepStats = repStats;
                 const recentReplies = recentRepliesRes?.status === 'fulfilled' ? (recentRepliesRes.value?.results || []) : [];
-                const totalReplies = repStats.total_replies || 0;
+                // Human replies, matching the reply rate beside it: the rate
+                // excludes OOO/ticket auto-responses, so counting them here
+                // made the two numbers disagree.
+                const totalReplies = repStats.human_replies ?? repStats.total_replies ?? 0;
                 const replyRate = repStats.reply_rate || 0;
                 const positiveLeads = repStats.positive || 0;
 
@@ -130,6 +133,7 @@ const Dashboard = {
                     recentReplies.slice(0, 4).forEach(r => {
                         const sentMap = {
                             positive: { label: 'Interested', cls: 'badge-success', dotCls: 'badge-dot-positive' },
+                            neutral: { label: 'Neutral', cls: 'badge-secondary', dotCls: 'badge-dot-neutral' },
                             auto_reply: { label: 'Auto-Reply', cls: 'badge-secondary', dotCls: 'badge-dot-auto-reply' },
                             negative: { label: 'Not Interested', cls: 'badge-danger', dotCls: 'badge-dot-negative' },
                         };
@@ -431,20 +435,20 @@ const Dashboard = {
 
         const theme = this.getThemeColors();
         const positive = repStats?.positive || 0;
+        const neutral = repStats?.neutral || 0;
         const autoReply = repStats?.auto_reply || 0;
         const negative = repStats?.negative || 0;
 
-        const labels = ['Positive / Interested', 'Out of Office', 'Not Interested'];
-        let data = [positive, autoReply, negative];
+        // Neutral is the classifier's default for a human reply without a
+        // clear signal — usually the largest slice. Leaving it out drew one
+        // positive reply among ten neutral ones as a 100% "Interested" ring.
+        const labels = ['Positive / Interested', 'Neutral / No Signal', 'Automated / Auto-Reply', 'Not Interested'];
+        const data = [positive, neutral, autoReply, negative];
 
         // If no data, show placeholder empty chart
         const total = data.reduce((a, b) => a + b, 0);
-        if (total === 0) {
-            labels.push('Awaiting Replies');
-            data = [0, 0, 0, 1];
-        }
 
-        const bgColors = ['#10b981', '#64748b', '#f43f5e', '#334155'];
+        const bgColors = ['#10b981', '#3b82f6', '#64748b', '#f43f5e'];
 
         if (this.charts.status) this.charts.status.destroy();
         this.charts.status = new Chart(ctx, {

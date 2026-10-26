@@ -631,7 +631,11 @@ const Converter = {
                 </div>
                 <div class="form-group">
                     <label class="checkbox-label" style="display:inline-flex;margin-right:8px"><input type="checkbox" id="owUserInfo" checked><span>Overwrite name &amp; attributes of existing subscribers</span></label>
-                    <label class="checkbox-label" style="display:inline-flex"><input type="checkbox" id="owSubStatus" checked><span>Overwrite subscription status</span></label>
+                    <label class="checkbox-label" style="display:inline-flex"><input type="checkbox" id="owSubStatus"><span>Overwrite subscription status</span></label>
+                    <p style="font-size:0.78rem;color:var(--text-muted);margin-top:6px">
+                        Leave status overwrite <strong>off</strong> to keep existing opt-outs: with it on, a contact who
+                        already unsubscribed from a selected list is set back to the status chosen above.
+                    </p>
                 </div>
                 <button class="btn btn-success" id="startImportBtn" onclick="Converter.executeImport()" disabled>Select a list to continue</button>
             </div>
@@ -677,7 +681,7 @@ const Converter = {
         const statusEl = document.getElementById('importStatus');
         const subStatus = statusEl ? statusEl.value : 'confirmed';
         const owUser = document.getElementById('owUserInfo')?.checked ?? true;
-        const owStatus = document.getElementById('owSubStatus')?.checked ?? true;
+        const owStatus = document.getElementById('owSubStatus')?.checked ?? false;
 
         const formData = this.buildMappingFormData();
         formData.append('list_ids', JSON.stringify(selectedLists));

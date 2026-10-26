@@ -152,7 +152,12 @@ async def fetch_filtered_bounces_page(
     lm_page = 1
 
     lm_total = 0
-    raw_results: list[dict] = []
+    # Set only when the scan genuinely ran out of ListMonk rows. Deriving it
+    # afterwards from lm_page was wrong: the loop also exits once the page is
+    # filled, *after* lm_page was advanced, so with >100 raw bounces the next
+    # (unfetched) page index made the scan look finished and the total was
+    # clamped to the rows collected so far — deeper pages became unreachable.
+    reached_end = False
     while len(collected) < needed and lm_page <= MAX_LM_PAGES:
         res = await client.get_bounces(
             lm_page, LM_FETCH_SIZE, campaign_id, source, bounce_type,
@@ -161,6 +166,7 @@ async def fetch_filtered_bounces_page(
         lm_total = data.get("total", 0)
         raw_results = data.get("results", [])
         if not raw_results:
+            reached_end = True
             break
 
         # If bounce_type is specified (e.g. "hard" or "soft"), filter by it; otherwise keep all
@@ -169,6 +175,7 @@ async def fetch_filtered_bounces_page(
             collected.extend(batch)
 
         if lm_page * LM_FETCH_SIZE >= lm_total:
+            reached_end = True
             break
         lm_page += 1
 
@@ -178,7 +185,6 @@ async def fetch_filtered_bounces_page(
     # Total should match what the user sees: hard-bounce cache is authoritative
     # for hard bounces (already excludes openers); otherwise use cached total or
     # ListMonk's total (or actual collected count if we finished all pages).
-    reached_end = (lm_page * LM_FETCH_SIZE >= lm_total) or (len(collected) < needed and not raw_results)
     stopped_at_cap = not reached_end and lm_page > MAX_LM_PAGES
     if reached_end or stopped_at_cap:
         # Hitting the scan-cost cap means deeper pages cannot be served, so

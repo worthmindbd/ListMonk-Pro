@@ -1,13 +1,23 @@
 """
 Simple session-based authentication for the dashboard.
 Uses a username/password from .env and signed cookies.
+
+A session token is ``<issued-at>.<nonce>:<signature>``. The signature key is
+derived from SESSION_SECRET *and* the dashboard credentials, so changing
+DASHBOARD_USER/DASHBOARD_PASS (and restarting) invalidates every session ever
+issued. Logging out revokes the token's nonce in ``session_revocations.json``
+(DATA_DIR), so a copied cookie stops working the moment its owner logs out
+instead of staying valid for the rest of its 7 days.
 """
 
 import hashlib
 import hmac
+import json
 import logging
 import os
 import secrets
+import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -168,9 +178,113 @@ def _load_or_create_secret_key() -> str:
 _secret_key = _load_or_create_secret_key()
 
 
+def _signing_key() -> bytes:
+    """Session signing key bound to the secret AND the dashboard credentials.
+
+    Signing with SESSION_SECRET alone meant a password change left every
+    previously issued cookie valid for up to 7 more days — rotating a leaked
+    password did not lock out whoever held a session. Folding the credentials
+    into the key makes a credential change (and restart) a global logout.
+    """
+    creds = "\0".join((os.getenv("DASHBOARD_USER", ""), os.getenv("DASHBOARD_PASS", "")))
+    return hmac.new(
+        _secret_key.encode(), b"lmpro-session-v2\0" + creds.encode("utf-8"), hashlib.sha256,
+    ).digest()
+
+
 def _sign(value: str) -> str:
     """Create HMAC signature for a value."""
-    return hmac.new(_secret_key.encode(), value.encode(), hashlib.sha256).hexdigest()
+    return hmac.new(_signing_key(), value.encode(), hashlib.sha256).hexdigest()
+
+
+# ── Logout revocation ─────────────────────────────────────────────────────
+#
+# Tokens are stateless, so logout used to only delete the browser's copy of
+# the cookie. The nonces of logged-out sessions are persisted (with the
+# token's own expiry, after which the signature check rejects it anyway), and
+# the file is re-read whenever it changes on disk so several workers agree.
+REVOCATIONS_FILE = settings.data_path("session_revocations.json")
+_revoked: dict[str, float] = {}
+_revoked_mtime: Optional[float] = None
+_revoked_lock = threading.RLock()  # re-entrant: revoke_session reads under it
+
+
+def _current_revocations() -> dict[str, float]:
+    """Revoked nonce -> expiry, refreshed from disk when the file changed."""
+    global _revoked, _revoked_mtime
+    try:
+        mtime = REVOCATIONS_FILE.stat().st_mtime
+    except OSError:
+        return _revoked  # nothing persisted (or unreadable): memory is authoritative
+    if mtime != _revoked_mtime:
+        with _revoked_lock:
+            try:
+                data = json.loads(REVOCATIONS_FILE.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    _revoked = {
+                        str(k): float(v) for k, v in data.items()
+                        if isinstance(v, (int, float)) and not isinstance(v, bool)
+                    }
+            except (OSError, ValueError):
+                pass
+            _revoked_mtime = mtime
+    return _revoked
+
+
+def _parse_token(token: Optional[str]) -> Optional[tuple[int, str]]:
+    """Return ``(issued_at, nonce)`` for a well-formed, correctly signed token."""
+    if not token or ":" not in token:
+        return None
+    payload, signature = token.rsplit(":", 1)
+    if not hmac.compare_digest(signature, _sign(payload)):
+        return None
+    issued, sep, nonce = payload.partition(".")
+    if not sep or not nonce:
+        return None  # pre-revocation token format: cannot be revoked, so not accepted
+    try:
+        return int(issued), nonce
+    except ValueError:
+        return None
+
+
+def revoke_session(token: Optional[str]) -> bool:
+    """Revoke one session token server-side (blocking file write; run off-loop).
+
+    Returns True when a valid token was revoked. Expired revocations are
+    pruned on every write, so the file only ever holds live sessions.
+    """
+    parsed = _parse_token(token)
+    if parsed is None:
+        return False
+    issued, nonce = parsed
+    global _revoked, _revoked_mtime
+    now = time.time()
+    with _revoked_lock:
+        current = {k: v for k, v in _current_revocations().items() if v > now}
+        current[nonce] = float(issued + SESSION_MAX_AGE)
+        _revoked = current
+        tmp_path = None
+        try:
+            REVOCATIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                "w", dir=REVOCATIONS_FILE.parent, prefix=REVOCATIONS_FILE.name,
+                suffix=".tmp", delete=False, encoding="utf-8",
+            ) as f:
+                tmp_path = f.name
+                json.dump(current, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, REVOCATIONS_FILE)
+            _revoked_mtime = REVOCATIONS_FILE.stat().st_mtime
+        except OSError as e:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            # The in-memory revocation still applies to this process.
+            logger.warning(f"Could not persist session revocation: {e}")
+    return True
 
 
 def _is_secure_cookie(request: Optional[Request] = None) -> bool:
@@ -190,9 +304,8 @@ def _is_secure_cookie(request: Optional[Request] = None) -> bool:
 
 def create_session(response: Response, request: Optional[Request] = None):
     """Set a signed session cookie on the response."""
-    timestamp = str(int(time.time()))
-    signature = _sign(timestamp)
-    token = f"{timestamp}:{signature}"
+    payload = f"{int(time.time())}.{secrets.token_hex(16)}"
+    token = f"{payload}:{_sign(payload)}"
     is_secure = _is_secure_cookie(request)
     response.set_cookie(
         COOKIE_NAME, token,
@@ -206,25 +319,17 @@ def create_session(response: Response, request: Optional[Request] = None):
 
 def verify_session(request: Request) -> bool:
     """Check if the request has a valid session cookie."""
-    token = request.cookies.get(COOKIE_NAME)
-    if not token or ":" not in token:
+    parsed = _parse_token(request.cookies.get(COOKIE_NAME))
+    if parsed is None:
         return False
-
-    timestamp, signature = token.split(":", 1)
-
-    # Verify signature
-    if not hmac.compare_digest(signature, _sign(timestamp)):
-        return False
+    created, nonce = parsed
 
     # Check expiry
-    try:
-        created = int(timestamp)
-        if time.time() - created > SESSION_MAX_AGE:
-            return False
-    except ValueError:
+    if time.time() - created > SESSION_MAX_AGE:
         return False
 
-    return True
+    # Logged out on this or another worker
+    return nonce not in _current_revocations()
 
 
 def clear_session(response: Response, request: Optional[Request] = None):

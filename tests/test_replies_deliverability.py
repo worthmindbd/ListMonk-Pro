@@ -413,7 +413,7 @@ async def test_deliverability_checklist_evaluation():
         "data": {
             "privacy.disable_tracking": True,
             "privacy.individual_tracking": False,
-            "privacy.unsubscribe_header": False,
+            "privacy.unsubscribe_header": True,
             "app.batch_size": 100,
             "app.concurrency": 1,
             "app.enable_public_archive": False,
@@ -445,7 +445,7 @@ async def test_deliverability_flags_missing_bounce_loop_and_upload_wildcard():
         "data": {
             "privacy.disable_tracking": True,
             "privacy.individual_tracking": False,
-            "privacy.unsubscribe_header": False,
+            "privacy.unsubscribe_header": True,
             "app.batch_size": 100,
             "app.concurrency": 1,
             "app.enable_public_archive": False,
@@ -474,7 +474,7 @@ async def test_deliverability_reports_send_cadence_per_day():
         "data": {
             "privacy.disable_tracking": True,
             "privacy.individual_tracking": False,
-            "privacy.unsubscribe_header": False,
+            "privacy.unsubscribe_header": True,
             "app.batch_size": 100,
             "app.concurrency": 1,
             "app.enable_public_archive": False,
@@ -503,7 +503,9 @@ async def test_apply_deliverability_preset():
     res = await apply_deliverability_preset(mock_listmonk, "cold_email")
     assert res["status"] == "ok"
     assert res["applied"]["privacy.disable_tracking"] is True
-    assert res["applied"]["privacy.unsubscribe_header"] is False
+    # One-click List-Unsubscribe is a Gmail/Yahoo bulk-sender requirement,
+    # so the cold preset keeps it on as well.
+    assert res["applied"]["privacy.unsubscribe_header"] is True
     assert res["applied"]["app.batch_size"] == 100
     # The preset must merge, not send a partial payload: ListMonk rejects a
     # settings PUT without an SMTP block.
@@ -614,7 +616,7 @@ def test_deliverability_api_endpoints(client):
             "data": {
                 "privacy.disable_tracking": True,
                 "privacy.individual_tracking": False,
-                "privacy.unsubscribe_header": False,
+                "privacy.unsubscribe_header": True,
                 "app.batch_size": 100,
                 "app.concurrency": 1,
                 "app.enable_public_archive": False,

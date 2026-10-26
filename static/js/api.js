@@ -15,6 +15,12 @@ const API = {
     /** Default timeout for API requests (ms). Exports and scans override this. */
     DEFAULT_TIMEOUT: 30000,
 
+    /** Budget for requests that legitimately run for minutes: streamed CSV
+        exports, mailbox scans, bounce ingestion, bulk sweeps and uploads.
+        Aborting those at 30s showed "Request timed out" while the server
+        kept working (and invited a second, duplicate click). */
+    LONG_TIMEOUT: 10 * 60 * 1000,
+
     /** Set after the first 401 redirect so concurrent requests don't each
         navigate and toast independently. */
     _redirecting: false,
@@ -85,10 +91,16 @@ const API = {
     },
 
     get(path, silent = false, timeoutMs = null) { return this.request('GET', path, null, false, silent, timeoutMs); },
-    post(path, body) { return this.request('POST', path, body); },
-    put(path, body) { return this.request('PUT', path, body); },
-    del(path) { return this.request('DELETE', path); },
-    upload(path, formData) { return this.request('POST', path, formData, true); },
+    post(path, body, timeoutMs = null) { return this.request('POST', path, body, false, false, timeoutMs); },
+    put(path, body, timeoutMs = null) { return this.request('PUT', path, body, false, false, timeoutMs); },
+    del(path, timeoutMs = null) { return this.request('DELETE', path, null, false, false, timeoutMs); },
+    /** Uploads default to the long budget: a 50 MB CSV is converted (and for
+        convert-and-import, handed to ListMonk) before the response returns. */
+    upload(path, formData, timeoutMs = null) {
+        return this.request('POST', path, formData, true, false, timeoutMs || this.LONG_TIMEOUT);
+    },
+    /** GET of a streamed CSV export (long budget, see LONG_TIMEOUT). */
+    download(path) { return this.get(path, false, this.LONG_TIMEOUT); },
 
     /**
      * Returns a human-readable message for an error that still needs one.
@@ -110,9 +122,12 @@ const API = {
         } finally {
             // Always revoke, even if the DOM insertion or click throws (e.g.
             // a sandboxed iframe): an unreleased object URL pins the blob in
-            // memory for the lifetime of the document.
+            // memory for the lifetime of the document. Deferred, not
+            // synchronous: the click only *starts* the download, and Firefox
+            // and Safari can abort it when the URL is revoked in the same
+            // task.
             if (a.parentNode) a.parentNode.removeChild(a);
-            URL.revokeObjectURL(url);
+            setTimeout(() => URL.revokeObjectURL(url), 30000);
         }
     }
 };

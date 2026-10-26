@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from app.config import settings
@@ -182,8 +183,14 @@ _MAX_DELETE_EMAILS = 100
 
 
 @router.delete("/records")
-async def delete_records(emails: list[str] = Query(default=[])):
-    """Delete specific unsubscribe records by email (capped at 100)."""
+async def delete_records(emails: list[str] = Query(default=[]),
+                         campaign_id: Optional[int] = None):
+    """Delete specific unsubscribe records by email (capped at 100).
+
+    ``campaign_id`` scopes the deletion to that campaign's records — the
+    detail view's "Remove" acts on the campaign on screen, and an email that
+    unsubscribed from several campaigns must keep its other records.
+    """
     if not emails:
         raise HTTPException(status_code=400, detail="No emails provided")
     if len(emails) > _MAX_DELETE_EMAILS:
@@ -191,11 +198,19 @@ async def delete_records(emails: list[str] = Query(default=[])):
             status_code=400,
             detail=f"Too many emails ({len(emails)}). Maximum is {_MAX_DELETE_EMAILS}.",
         )
-    email_set = set(emails)
+    # Records store lowercased addresses; match case-insensitively so a
+    # pasted/mixed-case address still finds its record.
+    email_set = {e.strip().lower() for e in emails if e and e.strip()}
+
+    def _matches(record: dict) -> bool:
+        if (record.get("email") or "").strip().lower() not in email_set:
+            return False
+        return campaign_id is None or record.get("campaign_id") == campaign_id
+
     async with _log_lock:
         records = load_log()
         before_count = len(records)
-        remaining = [r for r in records if r.get("email") not in email_set]
+        remaining = [r for r in records if not _matches(r)]
         removed = before_count - len(remaining)
         save_log(remaining)
     return {"removed": removed, "message": f"Removed {removed} record(s)"}
@@ -331,14 +346,11 @@ async def reset_all_unsubscribes():
             ),
         )
 
-    # Snapshot the identity of every record we intend to restore BEFORE
-    # processing begins. We use (subscriber_id, email, timestamp) so a NEW
-    # unsubscribe for the same subscriber that arrives during processing
-    # is never accidentally removed from the log.
-    restoring_identities: set[tuple] = {
-        (r.get("subscriber_id"), r.get("email", "unknown"), r.get("timestamp", ""))
-        for r in records
-    }
+    # `records` is the snapshot of what we intend to restore, taken BEFORE
+    # processing begins. Records are later matched back by
+    # (subscriber_id, email, timestamp) so a NEW unsubscribe for the same
+    # subscriber that arrives during processing is never accidentally removed
+    # from the log.
 
     sem = asyncio.Semaphore(RESET_CONCURRENCY)
     results: list[dict] = [None] * len(records)  # type: ignore[list-item]
@@ -419,18 +431,9 @@ async def reset_all_unsubscribes():
     # are preserved because their timestamp won't match the snapshot.
     async with _log_lock:
         fresh_records = load_log()
-        remaining_records = [
-            r for r in fresh_records
-            if (r.get("subscriber_id"), r.get("email", "unknown"), r.get("timestamp", ""))
-            not in restoring_identities
-            or not any(
-                res and res["ok"]
-                for res in results
-            )
-        ]
-        # More precise: only remove records whose identity is in the snapshot
-        # AND whose corresponding restore succeeded. Build a set of identities
-        # that were successfully restored.
+        # Only remove records whose identity is in the snapshot AND whose
+        # corresponding restore succeeded. Build a set of identities that
+        # were successfully restored.
         ok_indices = {i for i, res in enumerate(results) if res and res["ok"]}
         ok_identities = {
             (records[i].get("subscriber_id"), records[i].get("email", "unknown"), records[i].get("timestamp", ""))

@@ -8,7 +8,7 @@ This guide details the architecture, deliverability mechanics, and operational w
 
 ListMonk is historically built as a high-throughput marketing newsletter engine. However, cold email outreach requires the exact opposite strategy:
 - **Newsletter**: High batch sizes (1,000+), tracking pixels enabled, link tracking redirects enabled, RFC `List-Unsubscribe` headers present.
-- **Cold Email**: Low batch sizes (100), single worker concurrency, zero tracking pixels, no link redirects, RFC `List-Unsubscribe` headers removed.
+- **Cold Email**: Low batch sizes (100), single worker concurrency, zero tracking pixels, no link redirects, RFC `List-Unsubscribe` one-click headers kept (a Gmail/Yahoo bulk-sender requirement).
 
 ListMonk Pro bridges this gap by introducing **Dual Operating Modes**:
 1. **📰 Newsletter Mode**: Standard broadcast marketing with open/click tracking and rich HTML templates.
@@ -28,9 +28,9 @@ When Cold Email Mode is active or the **Cold Email Deliverability Preset** is ap
 - **Why**: Tracking links replace your original links with `lm.yourdomain.com/r/...` wrappers. Security scanners flag these redirect hops as phishing risks.
 - **Result**: Links in cold emails remain clean and direct.
 
-### Rule 3: Omit RFC List-Unsubscribe Header (`privacy.unsubscribe_header: false`)
-- **Why**: Modern email providers use RFC headers (`List-Unsubscribe: <...>`) as a signal that the message is a bulk marketing email, automatically pushing it to the **Promotions** tab in Gmail.
-- **Result**: Cold emails omit this header and include an honest, human opt-out line (e.g., *"Reply 'stop' to opt out"*).
+### Rule 3: Keep the RFC List-Unsubscribe Header (`privacy.unsubscribe_header: true`)
+- **Why**: Since February 2024 Gmail and Yahoo require one-click unsubscribe (RFC 8058 `List-Unsubscribe` + `List-Unsubscribe-Post`) from anyone sending ~5,000+ messages a day, and enforce it with rejections and spam-foldering. ListMonk only emits the headers with this setting on. Without them, a prospect who wants out has one button left — *Report spam* — and the complaint rate is what actually sinks a cold-outreach domain.
+- **Result**: Cold emails carry the one-click header (shown by Gmail as an "Unsubscribe" link next to the sender) *and* an honest, human opt-out line in the body (e.g., *"Reply 'remove me' to opt out"*), which the IMAP unsubscribe monitor honours automatically.
 
 ### Rule 4: Conservative Batching & Concurrency (`batch_size: 100`, `concurrency: 1`)
 - **Why**: Blasting 1,000 emails per second triggers provider rate limits and spam filters.

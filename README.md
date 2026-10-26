@@ -23,7 +23,7 @@ ListMonk Pro adapts instantly between two distinct marketing disciplines with a 
 - **Key Features:**
   - **Live IMAP Reply Tracker & Inbox Feed** — Scans your mailbox for incoming replies, strips quoted threads, and categorizes sentiment (🟢 Positive / Hot Lead, 🟡 Questions, ⚪ Out-of-Office, 🔴 Not Interested).
   - **Zero-Pixel Deliverability Safeguard** — Automatically disables tracking pixels and link rewrite redirects to make cold emails indistinguishable from personal 1-to-1 messages.
-  - **RFC List-Unsubscribe Header Omission** — Removes bulk broadcast headers so Gmail and Microsoft 365 route cold emails directly to the **Primary Inbox** rather than Spam or Promotions.
+  - **One-Click List-Unsubscribe** — Keeps the RFC 8058 `List-Unsubscribe` header Gmail and Yahoo require from bulk senders, so prospects who want out unsubscribe instead of reporting spam.
   - **Pre-Flight Deliverability Audit & Presets** — 1-click preset switching (`Cold Email` vs `Newsletter`) with real-time configuration scores.
   - **Lead Management** — Automatically labels subscribers as Leads and lists as Lead Lists, with 1-click status flagging (Hot Lead, Replied, Archived).
 
@@ -52,7 +52,7 @@ ListMonk Pro adapts instantly between two distinct marketing disciplines with a 
 - **RFC 3463 DSN Classifier** — Accurately parses bounce DSNs into **hard** (invalid address, no such user, mailbox disabled) vs **soft** (mailbox full, greylist, reputation, rate limits).
 - **Opener False-Positive Filtering** — Recipients who actually opened a campaign (`campaign_views`) are automatically excluded from hard bounce lists, metrics, and exports.
 - **Hard Bounce Caching** — True hard bounce counts are calculated and cached in memory (refreshed every 5 minutes in the background), keeping campaign listing fast and accurate.
-- **Automated IMAP Ingestion** — Scans your bounce mailbox every hour for unseen bounce notifications, attributes them to the correct campaign via headers or lists, and creates matching records in ListMonk.
+- **Automated IMAP Ingestion** — Scans your bounce mailbox every hour for bounce notifications not ingested yet (read or unread), attributes them to the correct campaign via headers or lists, and creates matching records in ListMonk.
 
 ### Dual-Source Unsubscribe Engine
 - **IMAP Reply Monitor** — Scans your inbox hourly for unsubscribe keywords (`"Remove me"`, `"Unsubscribe me"`, `"Exclude me"`).
@@ -71,7 +71,7 @@ ListMonk requires a specific CSV format (`email`, `name`, `attributes` as JSON).
 
 ### Settings & Automation
 - **Campaign Scheduler** — Enforces daily sending windows (e.g., 8:00 AM – 8:00 PM EST) and allowed days (Mon–Fri, weekends). Running campaigns outside the window auto-pause, and auto-paused campaigns automatically resume when the window opens.
-- **Auto-Unblock Protection** — Identifies engaged subscribers (who clicked links or opened campaigns) who were accidentally blocklisted by false bounces, re-enables them, and purges their bounce records. Runs every 6 hours or manually.
+- **Auto-Unblock Protection** — Identifies engaged subscribers (who clicked links or opened campaigns) who were accidentally blocklisted by false bounces, re-enables them, and purges their bounce records. Only bounce-driven blocklistings are reversed: anyone who unsubscribed, and blocklists you set yourself, stay blocked. Runs every 6 hours or manually.
 - **Persistent Data Store** — Runtime configuration and logs persist to `DATA_DIR` (backed by a named volume in Docker).
 
 ### Security
@@ -216,8 +216,8 @@ The dashboard runs six background loops started during application lifecycle:
 | **Hard Bounce Cache** | On startup + every 5 min | Computes true hard bounce counts per campaign, excluding openers |
 | **Prospect Reply Tracker** | Every 15 min | Scans IMAP inbox for cold email prospect replies and sentiment classification |
 | **IMAP & Link Unsubscribe Scan** | Every 1 hour | Scans inbox for reply keywords and polls ListMonk for link unsubscribes |
-| **Bounce Ingestion** | Every 1 hour | Ingests and classifies unseen DSNs from the bounce IMAP mailbox |
-| **Auto-Unblock Protection** | Every 6 hours | Scans for engaged blocklisted contacts, re-enables them, and purges bounce records |
+| **Bounce Ingestion** | Every 1 hour | Ingests and classifies new DSNs (last 30 days, read or unread) from the bounce IMAP mailbox |
+| **Auto-Unblock Protection** | Every 6 hours | Scans for engaged contacts blocklisted by bounces, re-enables them, and purges bounce records (opt-outs are never re-enabled) |
 
 ---
 
@@ -243,7 +243,7 @@ ListMonk-Pro/
       listmonk_client.py       # Async HTTP client for ListMonk REST API (with paginate_all helper)
       csv_converter.py         # CSV converter transforming arbitrary columns to ListMonk schema
       export_service.py        # Memory-efficient streaming CSV generator
-      auto_unblock.py          # Auto-unblock engaged contacts (clickers/openers) from blocklist
+      auto_unblock.py          # Auto-unblock bounce-blocklisted engaged contacts (never opt-outs)
       campaign_scheduler.py    # Timezone-aware send window scheduler
       deliverability_service.py# Deliverability audit engine and 1-click preset sync
       bounce_ingest.py         # RFC 3463 DSN classifier & IMAP bounce mailbox scanner

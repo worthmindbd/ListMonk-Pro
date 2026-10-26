@@ -179,6 +179,11 @@ const App = {
     },
 
     setMode(mode, save = true) {
+        // reconcileMode() re-applies the server's (usually identical) choice
+        // right after the first paint; re-routing then rendered the whole
+        // page twice on every load.
+        const changed = mode !== this.currentMode || !this._modeApplied;
+        this._modeApplied = true;
         this.currentMode = mode;
         if (save) {
             localStorage.setItem('listmonk_pro_mode', mode);
@@ -234,7 +239,7 @@ const App = {
         });
 
         // Re-render current page
-        if (this.currentPage) {
+        if (this.currentPage && changed) {
             this.route();
         }
     },
@@ -321,6 +326,15 @@ const App = {
             Unsubscribes.selectedEmails.clear();
         }
 
+        // A dialog belongs to the page that opened it: Back/Forward or a deep
+        // link used to leave a result or confirm dialog covering the new page
+        // (and a pending confirm still resolvable against stale state).
+        // Running-operation progress dialogs stay until they finish.
+        const overlay = document.getElementById('modalOverlay');
+        if (overlay && overlay.style.display !== 'none' && !this._progressOpen()) {
+            this.closeModal();
+        }
+
         // Release charts bound to the outgoing page's canvases
         this.destroyCharts();
 
@@ -404,7 +418,9 @@ const App = {
         Excel/LibreOffice. */
     csvCell(v) {
         let s = String(v ?? '');
-        if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+        // Leading whitespace is ignored when checking, like the server-side
+        // sanitizer: Excel still evaluates " =SUM(A1)".
+        if (/^\s*[=+\-@]/.test(s) || /^[\t\r]/.test(s)) s = "'" + s;
         return `"${s.replace(/"/g, '""')}"`;
     },
 
@@ -1021,7 +1037,7 @@ const Templates = {
                 `Permanently delete ${ids.length} selected template(s)?`)) return;
         try {
             const params = ids.map(id => `ids=${id}`).join('&');
-            const result = await API.del(`/api/templates?${params}`);
+            const result = await API.del(`/api/templates?${params}`, API.LONG_TIMEOUT);
             const errors = result?.errors || 0;
             App.toast(`Deleted ${result?.deleted ?? ids.length} template(s)${errors ? `, ${errors} failed (default templates cannot be deleted)` : ''}`,
                 errors ? 'info' : 'success');
@@ -1039,6 +1055,10 @@ const Bounces = {
     campaigns: [],
     total: 0,
     perPage: 25,
+    // Mirror of MAX_PAGE in app/routers/bounces.py: the hard-bounce total
+    // comes from a cache that is not page-bounded, so a pager tap (or deep
+    // link) past the backend bound must be clamped or FastAPI answers 422.
+    MAX_PAGE: 1500,
 
     _queryParams() {
         const params = new URLSearchParams({
@@ -1063,6 +1083,7 @@ const Bounces = {
         if (rq.get('page')) this.page = Math.max(1, parseInt(rq.get('page'), 10) || 1);
         if (rq.get('type') !== null) this.typeFilter = rq.get('type') || '';
         if (rq.get('campaign') !== null) this.campaignFilter = parseInt(rq.get('campaign'), 10) || 0;
+        this.page = Math.min(Math.max(1, this.page), this.MAX_PAGE);
         try {
             const fetchCampaigns = !this.campaigns.length
                 ? API.get('/api/campaigns?per_page=500&order_by=created_at&order=DESC')
@@ -1208,7 +1229,7 @@ const Bounces = {
         App.showProgress('Delete Bounces', `Deleting ${ids.length} selected bounce(s). Please wait…`);
         try {
             const params = ids.map(id => `ids=${id}`).join('&');
-            const result = await API.del(`/api/bounces?${params}`);
+            const result = await API.del(`/api/bounces?${params}`, API.LONG_TIMEOUT);
             App.showResult('Delete Bounces — Done', `
                 <ul style="line-height:1.8">
                     <li>Deleted: <strong>${result?.deleted ?? 0}</strong></li>
@@ -1281,8 +1302,14 @@ const Bounces = {
             const params = new URLSearchParams();
             if (this.typeFilter) params.set('bounce_type', this.typeFilter);
             if (this.campaignFilter) params.set('campaign_id', String(this.campaignFilter));
-            const result = await API.del(`/api/bounces?${params}`);
-            const deleted = result?.deleted ?? 0;
+            // The unfiltered wipe needs an explicit confirm flag server-side
+            // (the dialog above is that confirmation); without it "Delete All
+            // Bounces" on "All Bounce Types" always failed with a 400.
+            if (!this.typeFilter && !this.campaignFilter) params.set('confirm', 'true');
+            const result = await API.del(`/api/bounces?${params}`, API.LONG_TIMEOUT);
+            // The unfiltered wipe reports `deleted: null` when the pre-count
+            // failed; it still removed everything.
+            const deleted = result?.deleted ?? (result?.all ? 'all' : 0);
             const errors = result?.errors ?? 0;
             App.showResult('Delete Bounces — Done', `
                 <ul style="line-height:1.8">
@@ -1304,7 +1331,7 @@ const Bounces = {
             const params = new URLSearchParams();
             if (this.typeFilter) params.set('bounce_type', this.typeFilter);
             if (this.campaignFilter) params.set('campaign_id', String(this.campaignFilter));
-            const result = await API.get(`/api/bounces/export?${params}`);
+            const result = await API.download(`/api/bounces/export?${params}`);
             if (!result.blob) {
                 App.showResult('Export Bounces', `<p>No ${this._typeLabel()} to export.</p>`);
                 return;
@@ -1324,9 +1351,9 @@ const Bounces = {
 
     async ingestBounces() {
         App.showProgress('Ingest New Bounces',
-            'Scanning unseen bounce emails, classifying each, and creating matching records in ListMonk. Only truly invalid addresses become hard bounces. Please wait…');
+            'Scanning the bounce mailbox (last 30 days, read or unread) for delivery failures not ingested yet, classifying each, and creating matching records in ListMonk. Only truly invalid addresses become hard bounces. Please wait…');
         try {
-            const result = await API.post('/api/bounces/ingest');
+            const result = await API.post('/api/bounces/ingest', null, API.LONG_TIMEOUT);
             if (result && result.error) {
                 App.showResult('Ingest Bounces — Error',
                     `<p style="color:#e74c3c">${App.escapeHtml(result.error)}</p>`);
