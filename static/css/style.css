@@ -3398,7 +3398,8 @@ td .tag {
    Deliverability Audit
    A report surface, not a banner: the score reads as an instrument (numeral +
    one tick per scored check), the audit groups checks under a label rail, and
-   only a failing check is allowed to raise its voice.
+   only a failing check is allowed to raise its voice. Every row carries the
+   control for its setting; edits collect in a sticky save bar.
    ========================================================================== */
 
 .sr-only {
@@ -3581,6 +3582,14 @@ td .tag {
     margin-top: 20px;
 }
 
+.deliv-preset-hint {
+    margin-top: 10px;
+    max-width: 62ch;
+    font-size: 0.74rem;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+
 /* ── Audit listing ─────────────────────────────────────────── */
 .deliv-audit {
     margin-top: 24px;
@@ -3670,14 +3679,30 @@ td .tag {
 
 .deliv-check {
     display: grid;
-    grid-template-columns: 18px minmax(0, 1fr) auto;
-    gap: 14px;
-    padding: 13px 0;
+    grid-template-columns: 18px minmax(0, 1fr) minmax(250px, 300px);
+    gap: 14px 18px;
+    padding: 16px 12px;
+    margin: 0 -12px;
+    border-radius: var(--radius-md);
     align-items: start;
+    transition: background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+        box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* A staged (unsaved) row gets a quiet indigo wash + edge so the operator can
+   see what the save bar is about to write. */
+.deliv-check.is-dirty {
+    background: var(--primary-subdued);
+    box-shadow: inset 2px 0 0 var(--primary);
 }
 
 .deliv-check + .deliv-check {
     border-top: 1px solid var(--glass-border);
+}
+
+.deliv-check.is-dirty + .deliv-check,
+.deliv-check + .deliv-check.is-dirty {
+    border-top-color: transparent;
 }
 
 /* Passing checks stay grey: nine green ticks in a column is decoration, not
@@ -3712,6 +3737,29 @@ td .tag {
     min-width: 0;
 }
 
+.deliv-check-title {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 9px;
+}
+
+.deliv-dirty-pill {
+    display: none;
+    padding: 1px 8px;
+    border-radius: var(--radius-pill);
+    background: var(--primary);
+    color: #ffffff;
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.deliv-check.is-dirty .deliv-dirty-pill {
+    display: inline-block;
+}
+
 .deliv-check-name {
     font-size: 0.87rem;
     font-weight: 600;
@@ -3727,24 +3775,21 @@ td .tag {
     color: var(--text-muted);
 }
 
-.deliv-check-value {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 6px;
-    /* No `min-width: 0` here on purpose: the value column is an `auto` track,
-       and zeroing its minimum let the chips overflow their column (and print
-       over the description) on a narrowed content area. Leaving the intrinsic
-       minimum means the name/description column wraps first instead. */
-    max-width: 300px;
-}
-
 .deliv-chips {
     display: flex;
     align-items: center;
-    justify-content: flex-end;
     flex-wrap: wrap;
     gap: 6px;
+    margin-top: 10px;
+}
+
+.deliv-chip-label {
+    font-size: 0.66rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-left: 4px;
 }
 
 .deliv-chip {
@@ -3783,17 +3828,308 @@ td .tag {
     color: #34d399;
 }
 
-.deliv-arrow {
-    font-size: 0.8rem;
-    color: var(--text-muted);
-}
-
 .deliv-check-sev {
-    font-size: 0.64rem;
+    padding: 1px 7px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--glass-border);
+    font-size: 0.6rem;
     font-weight: 700;
     letter-spacing: 0.1em;
     text-transform: uppercase;
     color: var(--text-muted);
+}
+
+.deliv-check-sev.is-fail {
+    border-color: rgba(234, 34, 97, 0.32);
+    color: #ff5c8a;
+}
+
+.deliv-check-sev.is-warn {
+    border-color: rgba(245, 158, 11, 0.32);
+    color: #fbbf24;
+}
+
+.deliv-check-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    margin-top: 10px;
+    max-width: 68ch;
+    font-size: 0.76rem;
+    line-height: 1.55;
+    color: var(--text-secondary);
+}
+
+.deliv-check-note svg {
+    flex-shrink: 0;
+    margin-top: 2px;
+    color: var(--primary-soft);
+}
+
+.deliv-check-note.is-warn svg {
+    color: #fbbf24;
+}
+
+/* ── Row controls ──────────────────────────────────────────── */
+.deliv-check-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+
+.deliv-field {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 36px;
+    padding: 6px 8px 6px 12px;
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    background: var(--bg-input);
+    transition: border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.deliv-field:hover {
+    border-color: var(--glass-border-hover);
+}
+
+.deliv-field-toggle {
+    cursor: pointer;
+}
+
+.deliv-field.is-stacked {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    padding: 8px 10px 10px 12px;
+}
+
+.deliv-field-label {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.78rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.deliv-toggle-state {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.deliv-field:has(input:checked) .deliv-toggle-state {
+    color: var(--primary-soft);
+}
+
+.deliv-field:has(:disabled) {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.deliv-field .toggle-switch {
+    flex-shrink: 0;
+}
+
+/* `.deliv-field .deliv-input` (0,2,0) outranks the global input[type=…]
+   rule, which otherwise stretches every field to 100% and squeezes the label. */
+.deliv-field .deliv-input {
+    flex-shrink: 0;
+    width: 96px;
+    padding: 5px 9px;
+    border: 1px solid var(--glass-border-hover);
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+.deliv-field select.deliv-input {
+    width: auto;
+    min-width: 136px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.deliv-field .deliv-input.is-short {
+    width: 76px;
+}
+
+.deliv-field .deliv-input.is-wide {
+    width: 100%;
+    text-align: left;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.75rem;
+}
+
+.deliv-field .deliv-input:focus {
+    box-shadow: none;
+}
+
+.deliv-field .deliv-input:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 1px;
+    border-color: var(--primary);
+}
+
+.deliv-field .deliv-input.is-invalid {
+    border-color: #ff5c8a;
+    box-shadow: 0 0 0 3px var(--ruby-bg);
+}
+
+.deliv-readonly {
+    align-self: flex-end;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+/* ── Template coverage (footer unsubscribe link) ───────────── */
+.deliv-tpl-details {
+    margin-top: 10px;
+    max-width: 68ch;
+    font-size: 0.76rem;
+    color: var(--text-secondary);
+}
+
+.deliv-tpl-details summary {
+    cursor: pointer;
+    width: fit-content;
+    font-weight: 600;
+    color: var(--primary-soft);
+}
+
+.deliv-tpl-details summary:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+    border-radius: 4px;
+}
+
+.deliv-tpl-list {
+    list-style: none;
+    margin-top: 8px;
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+}
+
+.deliv-tpl-list li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 7px 12px;
+}
+
+.deliv-tpl-list li + li {
+    border-top: 1px solid var(--glass-border);
+}
+
+.deliv-tpl-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary);
+}
+
+.deliv-tpl-name em {
+    margin-left: 6px;
+    font-style: normal;
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.deliv-tpl-state {
+    flex-shrink: 0;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+.deliv-tpl-state.is-on { color: #34d399; }
+.deliv-tpl-state.is-off,
+.deliv-tpl-state.is-mixed { color: #fbbf24; }
+
+.deliv-tpl-foot {
+    margin-top: 8px;
+    font-size: 0.72rem;
+    line-height: 1.55;
+    color: var(--text-muted);
+}
+
+/* ── Sticky save bar ───────────────────────────────────────── */
+.deliv-savebar {
+    position: sticky;
+    bottom: 16px;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-top: 20px;
+    padding: 12px 14px 12px 18px;
+    border: 1px solid rgba(139, 133, 255, 0.35);
+    border-radius: var(--radius-lg);
+    background: var(--bg-surface-elevated);
+    backdrop-filter: blur(16px) saturate(140%);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+    box-shadow: var(--glass-shadow-lg), 0 0 0 1px var(--primary-subdued);
+}
+
+.deliv-savebar[hidden] {
+    display: none;
+}
+
+.deliv-savebar-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.deliv-savebar-text strong {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.deliv-savebar-text span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.deliv-savebar-actions {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .deliv-savebar:not([hidden]) {
+        animation: delivSavebarIn 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    @keyframes delivSavebarIn {
+        from { opacity: 0; transform: translateY(8px); }
+        to { opacity: 1; transform: none; }
+    }
 }
 
 .deliv-legend {
@@ -3924,6 +4260,15 @@ td .tag {
 [data-theme="light"] .deliv-chip.is-bad { color: #b3123a; }
 [data-theme="light"] .deliv-chip.is-warn { color: #a35a00; }
 [data-theme="light"] .deliv-chip.is-target { color: #047857; }
+[data-theme="light"] .deliv-check-sev.is-fail { color: #b3123a; }
+[data-theme="light"] .deliv-check-sev.is-warn { color: #a35a00; }
+[data-theme="light"] .deliv-tpl-state.is-on { color: #047857; }
+[data-theme="light"] .deliv-tpl-state.is-off,
+[data-theme="light"] .deliv-tpl-state.is-mixed { color: #a35a00; }
+[data-theme="light"] .deliv-toggle-state,
+[data-theme="light"] .deliv-tpl-details summary { color: var(--primary); }
+[data-theme="light"] .deliv-field:has(input:not(:checked)) .deliv-toggle-state { color: var(--text-muted); }
+[data-theme="light"] .deliv-field .deliv-input.is-invalid { border-color: #b3123a; }
 
 /* ── Responsive ────────────────────────────────────────────── */
 /* 1150px, not 900px: the sidebar takes 260px, so a 1150px viewport only leaves
@@ -3959,15 +4304,11 @@ td .tag {
     }
     .deliv-check {
         grid-template-columns: 18px minmax(0, 1fr);
-        row-gap: 10px;
+        row-gap: 12px;
     }
-    .deliv-check-value {
+    .deliv-check-controls {
         grid-column: 2;
-        align-items: flex-start;
-        max-width: none;
-    }
-    .deliv-chips {
-        justify-content: flex-start;
+        max-width: 420px;
     }
     .deliv-notes-grid {
         grid-template-columns: minmax(0, 1fr);
@@ -4001,6 +4342,20 @@ td .tag {
         margin-left: 0;
         width: 100%;
         justify-content: space-between;
+    }
+    .deliv-check-controls {
+        grid-column: 1 / -1;
+        max-width: none;
+    }
+    .deliv-savebar {
+        bottom: 10px;
+        flex-wrap: wrap;
+    }
+    .deliv-savebar-actions {
+        width: 100%;
+    }
+    .deliv-savebar-actions .btn {
+        flex: 1;
     }
     .mode-choice-grid {
         grid-template-columns: minmax(0, 1fr);

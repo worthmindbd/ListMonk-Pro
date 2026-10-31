@@ -49,6 +49,7 @@ ListMonk-Pro/
 │       ├── search_query.py        # Safe free-text → ListMonk ILIKE query builder (never raw `query`)
 │       ├── reply_log.py           # Persistent JSON storage for prospect replies and sentiments
 │       ├── task_utils.py          # Strong references for fire-and-forget tasks & shutdown drain
+│       ├── template_unsubscribe.py # Footer unsubscribe link toggle: reversibly hides/restores {{ UnsubscribeURL }} in campaign templates
 │       └── unsubscribe_log.py     # Persistent JSON state management for unsubscribe log/settings/processed
 ├── static/
 │   ├── css/
@@ -61,7 +62,7 @@ ListMonk-Pro/
 │   │   ├── campaigns.js           # Campaign management (incl. plain-text alt body), status transitions, test sends
 │   │   ├── charts.js              # Mode-aware dashboard overview charts & stat summary cards
 │   │   ├── converter.js           # CSV converter UI, column mapping, live preview & import modal
-│   │   ├── deliverability.js      # Deliverability pre-flight audit checklist & 1-click presets
+│   │   ├── deliverability.js      # Deliverability audit with a control per setting (staged edits + save bar) & 1-click presets
 │   │   ├── lists.js               # List management, modal forms, tag pills, subscriber drill-down & exports
 │   │   ├── replies.js             # Prospect reply feed, sentiment badges, hot lead flagging, bulk triage
 │   │   ├── settings.js            # Settings UI: send window scheduler, auto-unblock, unsubscribe settings
@@ -90,6 +91,7 @@ ListMonk-Pro/
 │   ├── test_full_review_fixes.py  # Regressions for the second full-codebase review (CSV blank headers, archive body, scan aborts, state races)
 │   ├── test_fourth_review_fixes.py # Regressions for the fourth review (bounce totals, auto-unblock scope, CSRF, unsubscribe scan vs \Seen, bulk payloads)
 │   ├── test_reply_filtering.py    # Inbox filtering: sentiment corpus, quote/echo stripping, auto-reply headers, not-a-reply gate
+│   ├── test_deliverability_controls.py # Per-setting edits (whitelist/validation) & footer unsubscribe link template toggle
 │   ├── conftest.py                # Resets module-level caches between tests
 │   └── test_regressions.py        # Route order, IMAP seen-marking, prune, timestamp regressions
 ├── .github/
@@ -371,6 +373,12 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/replies/{id}` | DELETE | Delete / dismiss single reply record |
 | **Deliverability** | `/api/deliverability/checklist` | GET | Audit Listmonk settings against deliverability rules (10 checks: tracking, individual tracking, unsubscribe header, batch size, concurrency, public archive, bounce feedback loop, hard-bounce action, send cadence, upload allow-list). The one-click `List-Unsubscribe` header is **required** (Gmail/Yahoo bulk-sender rules) and both presets keep it on |
 | | `/api/deliverability/apply-preset` | POST | 1-click apply 'cold_email' or 'newsletter' preset (merged onto current settings via `apply_settings`) |
+| | `/api/deliverability/settings` | PUT | Change individual settings from the page's row controls. Only keys in `deliverability_service.EDITABLE_SETTINGS` are accepted (strictly typed, no coercion → 400); the virtual `bounce.actions.hard` key is merged into `bounce.actions`. Returns the refreshed checklist (retried briefly while ListMonk reloads) |
+| | `/api/deliverability/unsubscribe-link` | PUT | `{"enabled": bool, "template_ids"?: [...]}` — show/hide the **visible footer** unsubscribe link in campaign templates. `privacy.unsubscribe_header` only sets the List-Unsubscribe header and never changes the body. Hiding wraps the link in a never-rendered `{{/* lmp:unsub-off */}}{{ if false }}…{{ end }}` block (a paragraph holding only unsubscribe links is hidden whole); enabling strips the wrapper byte-for-byte. Transactional templates and templates with no link are never edited; partial failures are reported, total failure is a 502 |
+
+The audit has 12 checks: the ten above plus `unsubscribe_link` (footer link state read from
+the campaign templates; `info` when templates are unreadable or none has a link) and
+`public_subscription_page`.
 
 **Scoring rule:** only `pass`/`warn`/`fail` checks count toward the score; `info` checks
 (e.g. sending cadence, public archive) are reported for context and never drag the score

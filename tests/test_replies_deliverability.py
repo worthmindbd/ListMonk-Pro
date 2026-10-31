@@ -433,9 +433,12 @@ async def test_deliverability_checklist_evaluation():
     result = await get_deliverability_checklist(mock_listmonk)
     assert result["score"] == 100
     assert result["overall_status"] == "optimal"
-    assert len(result["checks"]) == 10
-    # Informational context (send cadence) is reported but never scored.
-    assert [c["id"] for c in result["checks"] if c["status"] == "info"] == ["send_cadence"]
+    assert len(result["checks"]) == 12
+    # Informational context is reported but never scored: send cadence, plus
+    # the footer-link and sign-up-page checks this mock gives no data for.
+    assert sorted(c["id"] for c in result["checks"] if c["status"] == "info") == [
+        "public_subscription_page", "send_cadence", "unsubscribe_link",
+    ]
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,7 @@ between Newsletter Mode and Cold Email Mode.
 import logging
 import re
 from app.services.listmonk_client import ListMonkClient
+from app.services.template_unsubscribe import get_unsubscribe_link_status
 
 logger = logging.getLogger("deliverability_service")
 
@@ -135,6 +136,29 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
         "impact": "Critical for sender reputation",
     })
 
+    # 3b. Footer unsubscribe link. The header above is invisible in the body;
+    # the link people actually see comes from the campaign templates, so it is
+    # read (and toggled) there. Unreadable templates degrade to "info" rather
+    # than failing the whole audit.
+    try:
+        unsub_link = await get_unsubscribe_link_status(listmonk)
+    except Exception as e:
+        logger.warning(f"Could not read templates for the unsubscribe link check: {e}")
+        unsub_link = {"state": "unknown", "counts": {}, "templates": [], "error": str(e)}
+    link_state = unsub_link["state"]
+    checks.append({
+        "id": "unsubscribe_link",
+        "group": "privacy",
+        "name": "Unsubscribe Link in Email Footer",
+        "description": "The visible opt-out link inside the message, rendered by your campaign templates. "
+                       "CAN-SPAM, GDPR and CASL require a working opt-out in every commercial email; "
+                       "hiding it pushes recipients to the spam button instead.",
+        "status": {"on": "pass", "off": "warn", "mixed": "warn"}.get(link_state, "info"),
+        "current_value": link_state,
+        "recommended": True,
+        "impact": "High",
+    })
+
     # 4. Safe Batch Size
     batch_size = raw_settings.get("app.batch_size", 1000)
     checks.append({
@@ -171,6 +195,21 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
         "description": "Public campaign pages expose outreach copy to scrapers and domain blacklists.",
         "status": "pass" if public_archive is False else "info",
         "current_value": public_archive,
+        "recommended": False,
+        "impact": "Low",
+    })
+
+    # 6b. Public subscription form — same exposure as the archive: a public
+    # page under the sending domain that scrapers can enumerate.
+    public_subscription = raw_settings.get("app.enable_public_subscription_page")
+    checks.append({
+        "id": "public_subscription_page",
+        "group": "surface",
+        "name": "Public Subscription Page Disabled",
+        "description": "A public sign-up form lets bots subscribe arbitrary addresses (list bombing), "
+                       "which then complain about mail they never asked for.",
+        "status": "pass" if public_subscription is False else "info",
+        "current_value": public_subscription,
         "recommended": False,
         "impact": "Low",
     })
@@ -286,6 +325,10 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
             "disable_tracking": disable_tracking,
             "individual_tracking": ind_tracking,
             "unsubscribe_header": unsub_header,
+            # Per-template footer link state (see template_unsubscribe).
+            "unsubscribe_link": unsub_link,
+            "public_archive": public_archive,
+            "public_subscription_page": public_subscription,
             "batch_size": batch_size,
             "concurrency": concurrency,
             "bounce_enabled": bounce_enabled,
@@ -297,6 +340,10 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
             "bounce_provider_enabled": bool(provider_enabled),
             "hard_bounce_action": hard_action,
             "send_cadence_per_day": per_day,
+            "message_rate": message_rate,
+            "sliding_window": sliding,
+            "sliding_window_rate": window_rate,
+            "sliding_window_duration": window_duration,
             "upload_extensions": extensions,
         }
     }
@@ -341,3 +388,100 @@ async def apply_deliverability_preset(listmonk: ListMonkClient, mode: str) -> di
     except Exception as e:
         logger.error(f"Failed to apply {mode} preset: {e}")
         raise
+
+
+# ── Individual setting edits ────────────────────────────────────────────────
+# Every control on the Deliverability page maps onto one of these keys. The
+# whitelist is the security boundary: the page can only change what the audit
+# reports on, never SMTP credentials or any other block of ListMonk settings.
+_BOOL = ("bool",)
+EDITABLE_SETTINGS = {
+    "privacy.disable_tracking": _BOOL,
+    "privacy.individual_tracking": _BOOL,
+    "privacy.unsubscribe_header": _BOOL,
+    "app.enable_public_archive": _BOOL,
+    "app.enable_public_subscription_page": _BOOL,
+    "app.batch_size": ("int", 1, 10000),
+    "app.concurrency": ("int", 1, 100),
+    "app.message_rate": ("int", 1, 10000),
+    "app.message_sliding_window": _BOOL,
+    "app.message_sliding_window_rate": ("int", 1, 1000000),
+    "app.message_sliding_window_duration": ("duration",),
+    "bounce.enabled": _BOOL,
+    # Virtual key: merged into the nested ``bounce.actions`` object so the
+    # soft/complaint rules are preserved.
+    "bounce.actions.hard": ("choice", {"none", "unsubscribe", "blocklist", "delete"}),
+    "upload.extensions": ("extensions",),
+}
+
+# Go's time.ParseDuration subset ListMonk accepts in its settings UI.
+_DURATION_RE = re.compile(r"^(?:\d+(?:h|m|s))+$")
+_EXTENSION_RE = re.compile(r"^(?:\*|[a-z0-9]{1,10})$")
+
+
+def validate_settings_patch(data) -> dict:
+    """Validate a client patch against :data:`EDITABLE_SETTINGS`.
+
+    Raises ValueError with a message naming the offending key (routers turn
+    it into a 400). Never coerces: ``"true"`` is not a boolean and ``1.5`` is
+    not a batch size, so a malformed body cannot write a surprising value.
+    """
+    if not isinstance(data, dict) or not data:
+        raise ValueError("Body must be a non-empty object of setting → value")
+    clean = {}
+    for key, value in data.items():
+        spec = EDITABLE_SETTINGS.get(key)
+        if spec is None:
+            raise ValueError(f"Setting '{key}' cannot be changed from this page")
+        kind = spec[0]
+        if kind == "bool":
+            if not isinstance(value, bool):
+                raise ValueError(f"{key} must be true or false")
+        elif kind == "int":
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{key} must be a whole number")
+            low, high = spec[1], spec[2]
+            if not low <= value <= high:
+                raise ValueError(f"{key} must be between {low} and {high}")
+        elif kind == "duration":
+            if not isinstance(value, str) or not _DURATION_RE.match(value.strip().lower()):
+                raise ValueError(f"{key} must be a duration like 1h, 30m or 1h30m")
+            value = value.strip().lower()
+            if _duration_seconds(value) <= 0:
+                raise ValueError(f"{key} must be longer than zero")
+        elif kind == "choice":
+            if value not in spec[1]:
+                raise ValueError(f"{key} must be one of: {', '.join(sorted(spec[1]))}")
+        elif kind == "extensions":
+            if not isinstance(value, list) or not value or len(value) > 50:
+                raise ValueError(f"{key} must be a list of 1–50 file extensions")
+            exts = []
+            for ext in value:
+                if not isinstance(ext, str):
+                    raise ValueError(f"{key} entries must be text")
+                ext = ext.strip().lower().lstrip(".")
+                if not _EXTENSION_RE.match(ext):
+                    raise ValueError(f"Invalid file extension: {ext!r}")
+                if ext not in exts:
+                    exts.append(ext)
+            value = exts
+        clean[key] = value
+    return clean
+
+
+async def update_deliverability_settings(listmonk: ListMonkClient, patch: dict) -> dict:
+    """Apply a validated patch (see :func:`validate_settings_patch`)."""
+    payload = dict(patch)
+    hard_action = payload.pop("bounce.actions.hard", None)
+    if hard_action is not None:
+        current = (await listmonk.get_settings()).get("data") or {}
+        actions = dict(current.get("bounce.actions") or {})
+        hard = dict(actions.get("hard") or {})
+        hard.setdefault("count", 1)
+        hard["action"] = hard_action
+        actions["hard"] = hard
+        payload["bounce.actions"] = actions
+    # apply_settings merges onto the full current payload (rule 12).
+    await listmonk.apply_settings(payload)
+    logger.info(f"Updated deliverability settings: {sorted(patch)}")
+    return {"status": "ok", "applied": patch}
