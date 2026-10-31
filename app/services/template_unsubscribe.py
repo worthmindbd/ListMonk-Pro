@@ -23,6 +23,8 @@ import asyncio
 import logging
 import re
 
+import httpx
+
 logger = logging.getLogger("template_unsubscribe")
 
 # Template types that render campaign mail. Transactional templates are sent
@@ -46,6 +48,43 @@ _UNSUB_ANCHOR_RE = re.compile(
 )
 # A bare tag, e.g. a plain-text footer "Unsubscribe: {{ UnsubscribeURL }}".
 _UNSUB_TAG_RE = re.compile(r"\{\{-?\s*UnsubscribeURL\s*-?\}\}")
+
+# ListMonk restarts itself after every settings PUT, and its reverse proxy
+# answers 502/503/504 for the few seconds that takes. A template call landing
+# in that window is retried instead of failing the whole toggle.
+TRANSIENT_STATUSES = {502, 503, 504}
+RETRY_DELAYS = (1.0, 2.0, 3.0, 4.0, 5.0)
+
+
+def _is_transient(exc: Exception) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in TRANSIENT_STATUSES
+    return isinstance(exc, httpx.TransportError)
+
+
+async def _retrying(call, *args):
+    for delay in RETRY_DELAYS:
+        try:
+            return await call(*args)
+        except Exception as exc:
+            if not _is_transient(exc):
+                raise
+            logger.warning(f"ListMonk unavailable ({exc}); retrying in {delay:.0f}s")
+            await asyncio.sleep(delay)
+    return await call(*args)
+
+
+def describe_error(exc: Exception) -> str:
+    """A readable reason instead of httpx's multi-line MDN-link message."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        if code in TRANSIENT_STATUSES:
+            return f"ListMonk is unreachable or restarting (HTTP {code}). Try again in a few seconds."
+        return f"ListMonk rejected the request (HTTP {code})"
+    if isinstance(exc, httpx.TransportError):
+        return "ListMonk could not be reached. Try again in a few seconds."
+    return str(exc)
+
 
 # One toggle at a time: two overlapping runs would read the same template
 # bodies and the later write would silently undo the earlier one.
@@ -115,8 +154,8 @@ def unsubscribe_link_state(body: str) -> str:
     return "none"
 
 
-async def _campaign_templates(listmonk) -> list[dict]:
-    res = await listmonk.get_templates()
+async def _campaign_templates(listmonk, retry: bool = False) -> list[dict]:
+    res = await (_retrying(listmonk.get_templates) if retry else listmonk.get_templates())
     data = res.get("data") if isinstance(res, dict) else None
     if not isinstance(data, list):
         raise ValueError("Unexpected templates response from ListMonk")
@@ -156,7 +195,7 @@ async def set_unsubscribe_links(listmonk, enabled: bool, template_ids: list[int]
     Partial failures are returned (``errors``/``failed``), never swallowed.
     """
     async with _TOGGLE_LOCK:
-        templates = await _campaign_templates(listmonk)
+        templates = await _campaign_templates(listmonk, retry=True)
         if template_ids:
             wanted = set(template_ids)
             templates = [t for t in templates if t.get("id") in wanted]
@@ -183,11 +222,11 @@ async def set_unsubscribe_links(listmonk, enabled: bool, template_ids: list[int]
             if tpl.get("body_source") is not None:
                 payload["body_source"] = tpl.get("body_source")
             try:
-                await listmonk.update_template(tpl["id"], payload)
+                await _retrying(listmonk.update_template, tpl["id"], payload)
                 updated.append(tpl.get("id"))
             except Exception as exc:
                 logger.error(f"Failed to update template {tpl.get('id')}: {exc}")
-                failed.append({"id": tpl.get("id"), "name": tpl.get("name"), "error": str(exc)})
+                failed.append({"id": tpl.get("id"), "name": tpl.get("name"), "error": describe_error(exc)})
 
         logger.info(
             f"Footer unsubscribe link {'enabled' if enabled else 'disabled'}: "

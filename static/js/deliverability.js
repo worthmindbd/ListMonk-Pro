@@ -720,11 +720,8 @@ const Deliverability = {
         let failed = false;
         const notes = [];
         try {
-            if (settingsKeys.length) {
-                const res = await API.put('/api/deliverability/settings', pending, API.LONG_TIMEOUT);
-                checklist = res.checklist || checklist;
-                settingsKeys.forEach(k => delete this.pending[k]);
-            }
+            // Templates first: a settings PUT makes ListMonk restart itself,
+            // and a template write landing in that window got a 502.
             if (linkChange !== null) {
                 const res = await API.put('/api/deliverability/unsubscribe-link', { enabled: linkChange }, API.LONG_TIMEOUT);
                 checklist = res.checklist || checklist;
@@ -735,6 +732,11 @@ const Deliverability = {
                     const names = (res.failed || []).map(f => f.name || f.id).join(', ');
                     App.toast(`${res.errors} template${res.errors === 1 ? '' : 's'} could not be updated: ${names}`, 'error');
                 }
+            }
+            if (settingsKeys.length) {
+                const res = await API.put('/api/deliverability/settings', pending, API.LONG_TIMEOUT);
+                checklist = res.checklist || checklist;
+                settingsKeys.forEach(k => delete this.pending[k]);
             }
         } catch (err) {
             // API.request already surfaced the server message. Changes that

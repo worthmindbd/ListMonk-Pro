@@ -15,7 +15,7 @@ from app.services.deliverability_service import (
     validate_settings_patch,
 )
 from app.services.listmonk_client import listmonk
-from app.services.template_unsubscribe import set_unsubscribe_links
+from app.services.template_unsubscribe import describe_error, set_unsubscribe_links
 
 logger = logging.getLogger("deliverability_router")
 router = APIRouter()
@@ -50,7 +50,10 @@ POST_WRITE_DELAY = 1.5
 async def _checklist_after_write() -> dict:
     checklist = await get_deliverability_checklist(listmonk)
     for _ in range(POST_WRITE_RETRIES - 1):
-        if checklist.get("overall_status") != "error":
+        # Templates are read in the same pass; a reload window shows up as
+        # an "unknown" footer-link state rather than an error status.
+        link_state = ((checklist.get("raw_settings") or {}).get("unsubscribe_link") or {}).get("state")
+        if checklist.get("overall_status") != "error" and link_state != "unknown":
             break
         await asyncio.sleep(POST_WRITE_DELAY)
         checklist = await get_deliverability_checklist(listmonk)
@@ -105,7 +108,7 @@ async def toggle_unsubscribe_link(request: Request):
         result = await set_unsubscribe_links(listmonk, enabled, template_ids or None)
     except Exception as e:
         logger.error(f"Unsubscribe link toggle error: {e}", exc_info=True)
-        raise HTTPException(status_code=502, detail=f"Failed to update templates: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to update templates: {describe_error(e)}")
 
     if result["errors"] and not result["updated"]:
         names = ", ".join(str(f.get("name") or f.get("id")) for f in result["failed"])

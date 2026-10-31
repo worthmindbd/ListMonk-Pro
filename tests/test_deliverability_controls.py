@@ -240,3 +240,51 @@ def test_unsubscribe_link_endpoint_validates_and_reports_total_failure(client):
         upd.side_effect = RuntimeError("ListMonk said no")
         res = client.put("/api/deliverability/unsubscribe-link", json={"enabled": False})
     assert res.status_code == 502
+
+
+# ── ListMonk restart window (settings PUT → reload → proxy 502) ─────────────
+
+def _http_error(status):
+    import httpx
+    req = httpx.Request("GET", "https://lm.example.com/api/templates")
+    return httpx.HTTPStatusError("bad gateway", request=req, response=httpx.Response(status, request=req))
+
+
+@pytest.mark.asyncio
+async def test_toggle_retries_through_listmonk_restart(monkeypatch):
+    monkeypatch.setattr(tu, "RETRY_DELAYS", (0, 0, 0))
+    hidden = tu.hide_unsubscribe_links(DEFAULT_FOOTER)
+    lm = _templates_client([{"id": 1, "name": "A", "type": "campaign", "body": hidden}])
+    lm.get_templates = AsyncMock(side_effect=[
+        _http_error(502), _http_error(503),
+        {"data": [{"id": 1, "name": "A", "type": "campaign", "body": hidden}]},
+    ])
+    lm.update_template = AsyncMock(side_effect=[_http_error(504), {"data": True}])
+
+    res = await tu.set_unsubscribe_links(lm, enabled=True)
+
+    assert res["updated"] == [1]
+    assert res["errors"] == 0
+    assert lm.update_template.await_args.args[1]["body"] == DEFAULT_FOOTER
+
+
+@pytest.mark.asyncio
+async def test_toggle_does_not_retry_real_rejections(monkeypatch):
+    monkeypatch.setattr(tu, "RETRY_DELAYS", (0, 0, 0))
+    lm = _templates_client([{"id": 1, "name": "A", "type": "campaign", "body": DEFAULT_FOOTER}])
+    lm.update_template = AsyncMock(side_effect=_http_error(400))
+
+    res = await tu.set_unsubscribe_links(lm, enabled=False)
+
+    assert lm.update_template.await_count == 1
+    assert res["failed"][0]["error"] == "ListMonk rejected the request (HTTP 400)"
+
+
+def test_unreachable_listmonk_gets_a_readable_502(client, monkeypatch):
+    monkeypatch.setattr(tu, "RETRY_DELAYS", (0,))
+    with patch("app.routers.deliverability.listmonk.get_templates", new_callable=AsyncMock) as tpls:
+        tpls.side_effect = _http_error(502)
+        res = client.put("/api/deliverability/unsubscribe-link", json={"enabled": True})
+    assert res.status_code == 502
+    detail = res.json()["detail"]
+    assert "restarting" in detail and "mozilla" not in detail
