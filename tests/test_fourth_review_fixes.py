@@ -447,7 +447,9 @@ async def test_reply_scan_does_not_redownload_processed_messages(monkeypatch):
 
     inbox.select = lambda *a, **k: ("OK", [b"1"])
     inbox.close = lambda: ("OK", [b""])
-    stats = await rt.scan_and_track_replies(AsyncMock())
+    lm = AsyncMock()
+    lm.get_subscribers = AsyncMock(return_value={"data": {"results": [{"id": 1, "lists": []}]}})
+    stats = await rt.scan_and_track_replies(lm)
 
     assert stats["new_replies"] == 1
     full_fetches = [num for num, spec in inbox.specs if "HEADER.FIELDS" not in spec]

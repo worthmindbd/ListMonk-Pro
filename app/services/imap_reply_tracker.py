@@ -1,7 +1,7 @@
 """IMAP Reply Tracker for ListMonk Pro Cold Outreach.
 
 Scans the IMAP inbox for replies from cold email prospects, strips quoted
-threads, categorizes sentiment (positive, auto_reply, negative, bounce),
+threads, categorizes sentiment (positive, neutral, auto_reply, negative, bounce),
 and links responses to specific campaigns and subscribers.
 """
 
@@ -20,6 +20,8 @@ from app.config import settings
 from app.services.listmonk_client import ListMonkClient
 from app.services.imap_helpers import (
     safe_email_for_query, extract_email_body, imap_date, fetch_state_id,
+    automated_header_kind, is_bulk_mail, strip_campaign_echo,
+    campaign_echo_index, campaign_echo_index_for,
 )
 from app.services.imap_unsubscribe import _extract_reply_only, _match_campaign
 # Shared idempotency-key helper: Message-ID when present, otherwise a
@@ -56,6 +58,14 @@ _reply_scan_running = False
 # _MACHINE_AUTO_PATTERNS — ticket-system auto-responses (Zendesk, Freshdesk,
 # etc.), generic "we received your message" acknowledgements and explicit
 # "this is an automated message" notices. Nobody reads these mailboxes.
+#
+# Body wording is only *evidence*: a real person writes "I'm on vacation till
+# Friday, but interested — let's talk". Patterns in the overridable groups
+# (_OOO_PATTERNS, _ACK_PATTERNS, _DEPARTURE_PATTERNS) yield to an explicit
+# human signal (see _HUMAN_OVERRIDE_PATTERNS); headers, subject prefixes,
+# automated senders and _MACHINE_AUTO_PATTERNS never do. Before that split, a
+# hot lead who mentioned being away was tagged auto_reply, lost its campaign
+# attribution, and — with the OOO auto-blocklist toggle on — was blocklisted.
 _OOO_PATTERNS = [
     # ── English OOO / away ──────────────────────────────────────────────
     re.compile(r"out\s+of\s+(the\s+)?office", re.IGNORECASE),
@@ -63,22 +73,68 @@ _OOO_PATTERNS = [
     # responders add — a human is away, not a machine mailbox.
     re.compile(r"auto(matic)?\s*(-|\s)?\s*reply", re.IGNORECASE),
     re.compile(r"away\s+from\s+(my\s+)?desk", re.IGNORECASE),
-    re.compile(r"on\s+(annual\s+)?leave", re.IGNORECASE),
-    re.compile(r"on\s+vacation", re.IGNORECASE),
+    re.compile(r"on\s+(annual\s+|parental\s+|maternity\s+|paternity\s+|sick\s+|medical\s+|"
+               r"study\s+|holiday\s+)?leave", re.IGNORECASE),
+    re.compile(r"on\s+(vacation|holiday|holidays|sabbatical)", re.IGNORECASE),
     re.compile(r"mailbox\s+is\s+full", re.IGNORECASE),
+    re.compile(r"(travel+ing|on\s+the\s+road)\s+with\s+limited\s+(access|connectivity)", re.IGNORECASE),
+    re.compile(r"limited\s+(access\s+to|connectivity\s+to)\s+(my\s+)?(e-?mail|inbox)", re.IGNORECASE),
+    re.compile(r"return(ing)?\s+to\s+(the\s+)?office", re.IGNORECASE),
     # ── Non-English OOO (common cold-outreach locales) ──────────────────
-    re.compile(r"fuera\s+de\s+oficina", re.IGNORECASE),          # Spanish
-    re.compile(r"aus\s+dem\s+büro|außer\s+haus", re.IGNORECASE),  # German
-    re.compile(r"absent\s+du\s+bureau", re.IGNORECASE),           # French
-    re.compile(r"fora\s+do\s+escritório", re.IGNORECASE),         # Portuguese
+    re.compile(r"fuera\s+de\s+(la\s+)?oficina|de\s+vacaciones", re.IGNORECASE),  # Spanish
+    re.compile(r"aus\s+dem\s+büro|außer\s+haus|nicht\s+im\s+(büro|buero)|"
+               r"im\s+urlaub|abwesenheitsnotiz", re.IGNORECASE),              # German
+    re.compile(r"absent(e)?\s+(du\s+bureau|jusqu|à\s+partir)|en\s+cong[ée]", re.IGNORECASE),  # French
+    re.compile(r"fora\s+do\s+escritório|de\s+f[ée]rias", re.IGNORECASE),     # Portuguese
+    re.compile(r"fuori\s+(sede|ufficio)|in\s+ferie", re.IGNORECASE),          # Italian
+    re.compile(r"buiten\s+kantoor|met\s+vakantie|ben\s+afwezig", re.IGNORECASE),  # Dutch
+    re.compile(r"\bautosvar\b|fr[åa]nvarande|p[åa]\s+(ferie|semester)|"
+               r"ikke\s+p[åa]\s+kontoret", re.IGNORECASE),                    # Nordic
     re.compile(r"不在办公室|休假中", re.IGNORECASE),                # Chinese
 ]
 
+# Subject prefixes vacation responders add. A subject is written by the
+# responder, never by a prospect typing an answer, so these do not yield to
+# the human-signal override.
+_OOO_SUBJECT_RE = re.compile(
+    r"^\s*(automatic\s+reply|auto(matic)?[-\s]?reply|auto:|out\s+of\s+(the\s+)?office|"
+    r"automatische\s+antwort|automatisch\s+antwoord|abwesenheit|autosvar|"
+    r"r[ée]ponse\s+automatique|respuesta\s+autom[áa]tica|resposta\s+autom[áa]tica|"
+    r"risposta\s+automatica|automaattinen\s+vastaus|odpowied[źz]\s+automatyczna|"
+    r"fuera\s+de\s+(la\s+)?oficina|ooo\b)",
+    re.IGNORECASE,
+)
+
 _MACHINE_AUTO_PATTERNS = [
     # ── Ticket-system auto-responses ────────────────────────────────────
-    re.compile(r"request\s+(has\s+been\s+)?received", re.IGNORECASE),
-    re.compile(r"ticket\s+(created|number|#[A-Z0-9])", re.IGNORECASE),
-    re.compile(r"your\s+(message|request|inquiry)\s+has\s+been\s+received", re.IGNORECASE),
+    # "request received" used to match anywhere, so a human writing "Request
+    # received, I'll review it this week" was a machine (and blocklisted by the
+    # *safe* toggle). Only the ticket-desk phrasings remain here; the bare
+    # subject form lives in _MACHINE_SUBJECT_RE.
+    re.compile(r"your\s+(message|request|inquiry|enquiry|e-?mail|ticket)(\s+\(?#?\s*\w+\)?)?\s+"
+               r"has\s+been\s+(received|logged|created|registered)", re.IGNORECASE),
+    re.compile(r"ticket\s+(created|number\s*:?\s*#?\s*[A-Z0-9-]*\d|#\s*[A-Z0-9])", re.IGNORECASE),
+    # Helpdesk signatures, not every mention of a product name: "we use
+    # Zendesk today — could yours replace it?" is a prospect talking.
+    re.compile(r"(delivered|powered|sent)\s+(by|via|through)\s+(zendesk|freshdesk|freshservice|"
+               r"help\s*scout|zoho\s*desk|gorgias|kayako)|help\s*desk\s+ticket\s+(#|number|id|has\s+been)",
+               re.IGNORECASE),
+    # ── Generic auto-reply / acknowledgement ────────────────────────────
+    re.compile(r"this\s+is\s+an\s+automated\s+(response|message|reply|notification)", re.IGNORECASE),
+    re.compile(r"do\s+not\s+reply\s+to\s+this\s+(email|message)", re.IGNORECASE),
+    re.compile(r"this\s+email\s+was\s+sent\s+from\s+a\s+notification", re.IGNORECASE),
+    re.compile(r"this\s+(mail)?box\s+is\s+(not|un)\s*(monitored|attended)|"
+               r"unmonitored\s+(mail)?box", re.IGNORECASE),
+]
+
+_MACHINE_SUBJECT_RE = re.compile(
+    r"^\s*(\[[^\]]*\]\s*)?(re:\s*)?(request\s+received|ticket\s+(created|received|#))\b",
+    re.IGNORECASE,
+)
+
+# Shared-mailbox acknowledgements. Machine kind, but body wording — so a human
+# who also says "send pricing" in the same message is still a human.
+_ACK_PATTERNS = [
     re.compile(r"being\s+reviewed\s+by\s+(the\s+)?.+\s*(team|support|care)", re.IGNORECASE),
     # "we'll get back to you as soon as possible" — the acknowledgement every
     # shared mailbox sends. The phrase is spelled both ways in the wild
@@ -86,15 +142,13 @@ _MACHINE_AUTO_PATTERNS = [
     # institutional auto-responder that spells it out ("We will get back to
     # you as soon as possible.") was never caught and fell through to the
     # positive pass, where its promotional footer read as interest.
-    re.compile(r"we\s*(?:will|'ll|ll)\s+(get\s+back\s+to\s+you|be\s+in\s+touch)\s+(within|as\s+soon)", re.IGNORECASE),
+    re.compile(r"we\s*(?:will|'ll|ll)\s+(get\s+back\s+to\s+you|be\s+in\s+touch|respond|reply)"
+               r"(\s+to\s+(you|your\s+\w+))?\s+(within|as\s+soon|shortly|in\s+\d)", re.IGNORECASE),
     re.compile(r"a\s+team\s+member\s+will\s+be\s+in\s+touch", re.IGNORECASE),
-    re.compile(r"zendesk|freshdesk|help\s+desk\s+ticket", re.IGNORECASE),
-    # ── Generic auto-reply / acknowledgement ────────────────────────────
-    re.compile(r"we\s+have\s+received\s+your\s+message", re.IGNORECASE),
+    re.compile(r"we('ve|\s+have)\s+received\s+your\s+(message|e-?mail|request|inquiry|enquiry)", re.IGNORECASE),
+    re.compile(r"\b(will|shall)\s+(respond|reply|get\s+back\s+to\s+you)\s+(to\s+you\s+)?within\s+\d", re.IGNORECASE),
     re.compile(r"working\s+quickly\s+to\s+respond", re.IGNORECASE),
-    re.compile(r"this\s+is\s+an\s+automated\s+(response|message|reply)", re.IGNORECASE),
-    re.compile(r"do\s+not\s+reply\s+to\s+this\s+(email|message)", re.IGNORECASE),
-    re.compile(r"this\s+email\s+was\s+sent\s+from\s+a\s+notification", re.IGNORECASE),
+    re.compile(r"your\s+(e-?mail|message)\s+(has\s+been|will\s+be|is\s+being)\s+forwarded", re.IGNORECASE),
     # ── Nordic auto-acknowledgements (Danish / Swedish / Norwegian) ───────
     # Institutional mailboxes (venues, municipalities, shared desks) answer in
     # the local language: "Vi vender tilbage hurtigst muligt" is the exact
@@ -104,6 +158,29 @@ _MACHINE_AUTO_PATTERNS = [
     re.compile(r"vi\s+vender\s+tilbage\s+hurtigst\s+muligt", re.IGNORECASE),
     re.compile(r"vi\s+[åa]terkommer\s+(s[åa]\s+snart\s+som\s+m[öo]jligt|snabbt)", re.IGNORECASE),
     re.compile(r"vi\s+kommer\s+tilbake\s+(s[åa]\s+snart\s+som\s+mulig|fort)", re.IGNORECASE),
+]
+
+# Departure notices ("Jane is no longer with Acme, please contact …"). The
+# address is a dead end for outreach, so these are machine kind.
+_DEPARTURE_PATTERNS = [
+    re.compile(r"\bno\s+longer\s+(with|at|employed|working|part\s+of)\b", re.IGNORECASE),
+    re.compile(r"\bhas\s+left\s+(the\s+company|the\s+organi[sz]ation|[A-Z]\w+)", re.IGNORECASE),
+    re.compile(r"\bnicht\s+mehr\s+(bei|im\s+unternehmen)|\bne\s+fait\s+plus\s+partie", re.IGNORECASE),
+]
+
+# Explicit human signals an auto-responder never writes. Deliberately narrow:
+# vacation notices say "call me on my mobile" and "to schedule a meeting,
+# contact my assistant", so calls/meetings/pricing are not here.
+_HUMAN_OVERRIDE_PATTERNS = [
+    re.compile(r"\binterested\b", re.IGNORECASE),
+    re.compile(r"\bsounds\s+(good|great|interesting|promising)\b", re.IGNORECASE),
+    re.compile(r"\blet'?s\s+(talk|chat|connect|meet|hop\s+on|do\s+it|schedule|set\s+up|book|find\s+a\s+time)\b", re.IGNORECASE),
+    re.compile(r"\byes\s*,?\s+(please|let'?s|i'?d|we'?d|definitely|absolutely)\b", re.IGNORECASE),
+    re.compile(r"\btell\s+me\s+more\b", re.IGNORECASE),
+    re.compile(r"\bhappy\s+to\s+(connect|chat|talk|hop\s+on)\b", re.IGNORECASE),
+    re.compile(r"\b(i|we)('d|\s+would)\s+love\s+to\b", re.IGNORECASE),
+    re.compile(r"\bremove\s+me\b|\btake\s+me\s+off\b|\bstop\s+(e-?mailing|sending|contacting)\b", re.IGNORECASE),
+    re.compile(r"\bno\s+thanks?\b|\bno\s+thank\s+you\b", re.IGNORECASE),
 ]
 
 # Bounce / DSN detection, checked before every sentiment keyword. Mailer-daemon
@@ -133,55 +210,112 @@ _BOUNCE_SENDER_RE = re.compile(
 # Automated but not-a-bounce senders (no-reply@, notifications@, ...): their
 # mail is never a human reply, and bodies like "click here to unsubscribe"
 # must not reach the negative keyword pass either.
+#
+# "no-reply" is matched as a token anywhere in the local part
+# (messages-noreply@linkedin.com, drive-shares-dm-noreply@google.com): only a
+# leading one was recognised, so those notifications reached the positive pass
+# and were auto-flagged as Hot Leads. The role words must be the whole local
+# part (or a separated token), so a human "news.editor@" / "alerts-team@" is
+# no longer a machine.
 _AUTOMATED_SENDER_RE = re.compile(
-    r"^(no[-_]?reply|do[-_\s]?not[-_\s]?reply|donotreply|"
-    r"auto[-_]?(generated|reply)|notifications?|alerts?|news(letter)?)\b",
+    r"(^|[-_.+])(no[-_]?reply|do[-_]?not[-_]?reply|donotreply)([-_.+]|$)"
+    r"|^(auto[-_]?(generated|reply|responder)|newsletters?|news)([+]|$)"
+    r"|(^|[-_.])(notifications?|alerts?)([+]|$)",
+    re.IGNORECASE,
+)
+# Helpdesk platforms sending on a customer's behalf.
+_HELPDESK_DOMAIN_RE = re.compile(
+    r"(^|\.)(zendesk|freshdesk|helpscout|zohodesk|gorgias|kayako)\.(com|net|io)$",
     re.IGNORECASE,
 )
 
+# Negative patterns come in two strengths. A *strong* refusal is decisive
+# whatever else the reply says ("No thanks, how much would it cost anyway?").
+# A *soft* decline ("we don't need a demo", "we'll keep you in mind") yields to
+# an explicit request in the same reply: "I don't need a demo, just send
+# pricing" is a lead, and reading it as a refusal buried it.
 _NEGATIVE_PATTERNS = [
     re.compile(r"not\s+interested", re.IGNORECASE),
     re.compile(r"\b(un|dis)interested\b", re.IGNORECASE),
     re.compile(r"unsubscribe", re.IGNORECASE),
     re.compile(r"remove\s+me", re.IGNORECASE),
     re.compile(r"take\s+me\s+off", re.IGNORECASE),
-    re.compile(r"stop\s+emailing", re.IGNORECASE),
+    re.compile(r"\bstop\s+(e-?mailing|sending|contacting|messaging|spamming)\b", re.IGNORECASE),
     re.compile(r"do\s+not\s+(email|contact)", re.IGNORECASE),
-    re.compile(r"\bno\s+thanks\b", re.IGNORECASE),
+    re.compile(r"\b(don'?t|never)\s+(e-?mail|contact|message|write\s+to|reach\s+out\s+to)\s+(me|us)\b", re.IGNORECASE),
+    re.compile(r"\bno\s+thanks\b|\bno\s*,?\s+thank\s+you\b", re.IGNORECASE),
+    # A reply that is nothing but "No." / "Nope" (signature lines may follow).
+    re.compile(r"\A\s*(no|nope|nah|no\s+way)\s*[.!]*\s*(\n|\Z)", re.IGNORECASE),
+    re.compile(r"\bnot\s+for\s+(us|me)\b", re.IGNORECASE),
+    re.compile(r"\b(we'?re|we\s+are|i'?m|i\s+am)\s+all\s+set\b(?!\s+(for|to|on|with)\b)", re.IGNORECASE),
+    re.compile(r"\b(we'?ll|i'?ll|we\s+will|i\s+will)\s+pass\b", re.IGNORECASE),
     re.compile(r"wrong\s+person", re.IGNORECASE),
     re.compile(r"cease\s+and\s+desist", re.IGNORECASE),
-    re.compile(r"report\s+(as\s+)?spam", re.IGNORECASE),
-    # Polite declines: no blunt "not interested", but zero interest either.
-    # Without these a courteous "no" ("we are not exploring this type of
-    # collaboration…") matches nothing and would be misread as a positive reply.
+    re.compile(r"report\s+(as\s+)?spam|\bthis\s+is\s+spam\b|\bspamming\s+me\b", re.IGNORECASE),
+    re.compile(r"\bhow\s+did\s+you\s+get\s+my\s+(e-?mail|address|contact|details|number)\b", re.IGNORECASE),
+    re.compile(r"\bnot\s+the\s+right\s+(time|person|moment)\b", re.IGNORECASE),
+    re.compile(r"\bpass\s+(on\s+this|for\s+now)\b", re.IGNORECASE),
+]
+
+# Polite declines: no blunt "not interested", but zero interest either.
+# Without these a courteous "no" ("we are not exploring this type of
+# collaboration…") matches nothing and would be misread as a positive reply.
+_SOFT_NEGATIVE_PATTERNS = [
     re.compile(r"\bnot\s+(currently\s+|at\s+this\s+time\s+)?(exploring|seeking|pursuing|looking\s+(for|to)|in\s+the\s+market)", re.IGNORECASE),
     re.compile(r"\bnot\s+(a|the)\s+(good\s+|great\s+|right\s+)?fit\b", re.IGNORECASE),
-    re.compile(r"\bnot\s+the\s+right\s+(time|person|moment)\b", re.IGNORECASE),
+    re.compile(r"\bdon'?t\s+think\s+(this|it|we|that)(\s+is|'s|\s+are|'re|\s+would\s+be)?\s+"
+               r"(a\s+|the\s+)?(good\s+|great\s+|right\s+)?(fit|match)\b", re.IGNORECASE),
     re.compile(r"\b(no|don'?t|do\s+not)\s+(current\s+|immediate\s+)?need\b", re.IGNORECASE),
+    re.compile(r"\b(no|(don'?t|do\s+not)\s+have\s+(a\s+|the\s+|any\s+)?)budget\b", re.IGNORECASE),
+    re.compile(r"\balready\s+(have|work\s+with|use|using|got|partner\s+with)\s+(a\s+|an\s+|our\s+|the\s+|some\s+)?"
+               r"(\w+\s+)?(vendor|provider|partner|agency|solution|supplier|tool|team|platform|company|someone)\b",
+               re.IGNORECASE),
     re.compile(r"\b(have\s+)?sav(?:ed|e)\s+your\s+(contact|details|information)", re.IGNORECASE),
     re.compile(r"\b(keep|keeping)\s+(you|your\s+\w+)\s+(in\s+mind|on\s+file)\b", re.IGNORECASE),
     re.compile(r"\b(will|would|'ll)\s+(certainly\s+|definitely\s+|be\s+sure\s+to\s+)?(get|be)\s+in\s+touch\s+if\s+(the\s+)?(situation|needs?|circumstances?)", re.IGNORECASE),
     re.compile(r"\b(wish\s+you\s+(great\s+|much\s+|every\s+|continued\s+)?success|best\s+of\s+luck)\b", re.IGNORECASE),
-    re.compile(r"\bpass\s+(on\s+this|for\s+now)\b", re.IGNORECASE),
 ]
 
 # Every keyword is word-bounded: as bare substrings "yes" matched
 # "yesterday"/"eyes", "cost" matched "costume"/"Costa", "interested" matched
 # "uninterested", and "let's" matched "outlets" — each one auto-promoting an
 # ordinary reply to a Hot Lead.
-_POSITIVE_PATTERNS = [
-    re.compile(r"\bsounds\s+good\b", re.IGNORECASE),
+#
+# _STRONG_POSITIVE_PATTERNS are explicit requests; they also beat a soft
+# decline in the same reply. _POSITIVE_PATTERNS are weaker interest cues.
+_STRONG_POSITIVE_PATTERNS = [
+    re.compile(r"\bsounds\s+(good|great|interesting|promising)\b", re.IGNORECASE),
     re.compile(r"\binterested\b", re.IGNORECASE),
-    re.compile(r"\blet'?s\s+(talk|chat|connect|meet|hop\s+on)\b", re.IGNORECASE),
-    re.compile(r"\bsend\s+(me\s+)?(over\s+)?(more\s+)?(info|information|details|pricing)\b", re.IGNORECASE),
+    re.compile(r"\blet'?s\s+(talk|chat|connect|meet|hop\s+on|do\s+it|go\s+ahead|schedule|set\s+up|book|"
+               r"find\s+a\s+time)\b", re.IGNORECASE),
+    re.compile(r"\bsend\s+(me\s+|us\s+)?(over\s+)?(a\s+|an\s+|the\s+|some\s+|your\s+)?(more\s+)?"
+               r"(info|information|details|pricing|prices|deck|proposal|quote|brochure|"
+               r"case\s+stud(?:y|ies)|examples?|samples?|portfolio|rates?)\b", re.IGNORECASE),
+    re.compile(r"\bsend\s+(it|that|them|this)\s+over\b", re.IGNORECASE),
+    re.compile(r"\byes\s*,?\s+please\b", re.IGNORECASE),
+    re.compile(r"happy\s+to\s+(connect|chat|talk|hop\s+on)", re.IGNORECASE),
+    re.compile(r"tell\s+me\s+more", re.IGNORECASE),
+    re.compile(r"\b(i|we)('d|\s+would)\s+love\s+to\b", re.IGNORECASE),
+]
+
+_POSITIVE_PATTERNS = [
     re.compile(r"\bschedule\s+(a\s+)?(call|time|demo)\b", re.IGNORECASE),
+    re.compile(r"\b(set\s+up|book|arrange)\s+(a\s+|an\s+|some\s+)?(quick\s+|short\s+|brief\s+)?"
+               r"(call|meeting|chat|demo|time|intro)\b", re.IGNORECASE),
     re.compile(r"\bcalend(ar|ly)\b", re.IGNORECASE),
     re.compile(r"\b(pricing|how\s+much|costs?)\b", re.IGNORECASE),
     re.compile(r"\byes\b(\s+please)?", re.IGNORECASE),
-    re.compile(r"happy\s+to\s+connect", re.IGNORECASE),
-    re.compile(r"tell\s+me\s+more", re.IGNORECASE),
-    re.compile(r"give\s+me\s+a\s+call", re.IGNORECASE),
-    re.compile(r"forwarded\s+to\s+our", re.IGNORECASE),
+    # An answer that opens with assent: "Sure, send over a deck."
+    re.compile(r"\A\s*(sure|absolutely|definitely|of\s+course|yeah|yep|why\s+not)\b", re.IGNORECASE),
+    re.compile(r"\b(your|what'?s\s+your|what\s+is\s+your)\s+availability\b|"
+               r"\bwhen\s+(are|would)\s+you\s+(be\s+)?(free|available)\b|"
+               r"\bare\s+you\s+(free|available)\b", re.IGNORECASE),
+    re.compile(r"\b(works|work)\s+for\s+(me|us)\b|\bthat\s+works\b", re.IGNORECASE),
+    re.compile(r"give\s+me\s+a\s+call|\b(call|ring|phone)\s+me\b", re.IGNORECASE),
+    re.compile(r"\bopen\s+to\s+(a\s+)?(call|chat|conversation|discussing|learning|exploring)", re.IGNORECASE),
+    re.compile(r"\bmore\s+(info|information|details)\b", re.IGNORECASE),
+    re.compile(r"forwarded\s+to\s+our|\b(forwarded|passed|sent)\s+(this|it|your\s+(e-?mail|message|note))\s+"
+               r"(on\s+|along\s+)?to\s+(our|my|the)\b", re.IGNORECASE),
 ]
 
 # A positive keyword that sits inside a third-person offer is the sender's
@@ -221,10 +355,23 @@ def _inside_conditional_offer(text: str, start: int, end: int) -> bool:
     )
 
 
+def _first_match(patterns, text: str) -> bool:
+    """True when any pattern matches outside a third-person marketing offer."""
+    for pat in patterns:
+        for m in pat.finditer(text):
+            if _inside_conditional_offer(text, m.start(), m.end()):
+                # The keyword belongs to a marketing offer the sender wrote about
+                # their own product ("if you are interested in renting a
+                # venue…"), so it says nothing about interest in our offer.
+                continue
+            return True
+    return False
+
+
 # Typographic apostrophes (iOS/macOS smart punctuation is on by default) are
 # folded to ASCII before matching: every pattern above spells "let's",
 # "don't", "we'll" with a plain apostrophe, so "Let’s talk" was invisible.
-_SMART_APOSTROPHES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u02bc": "'"})
+_SMART_APOSTROPHES = str.maketrans({"’": "'", "‘": "'", "ʼ": "'"})
 
 
 def _ascii_apostrophes(text: str) -> str:
@@ -236,15 +383,24 @@ _IMAGE_PLACEHOLDER_RE = re.compile(r"\[image:\s*[^\]]*\]", re.IGNORECASE)
 _BLANK_RUN_RE = re.compile(r"\n{3,}")
 
 
-def _auto_reply_kind(subject: str, reply_text: str, from_email: str = "") -> Optional[str]:
+def _auto_reply_kind(
+    subject: str, reply_text: str, from_email: str = "",
+    header_kind: Optional[str] = None,
+) -> Optional[str]:
     """Distinguish the two kinds of automated reply, or return ``None``.
 
     Returns:
-        ``'machine'`` — no-reply/notification senders, ticket systems and
-        explicit "automated message" notices: a mailbox no human reads.
+        ``'machine'`` — no-reply/notification senders, ticket systems,
+        explicit "automated message" notices and departure notices: a
+        mailbox no human reads (for this prospect).
         ``'ooo'``     — out-of-office / away notices written by a real
         (temporarily away) human who will read the mail on return.
         ``None``      — not an automated reply.
+
+    ``header_kind`` is :func:`imap_helpers.automated_header_kind` of the
+    message (RFC 3834 ``Auto-Submitted`` and friends) — the most reliable
+    signal, so it is decisive. Body wording alone yields to an explicit
+    human signal (see ``_HUMAN_OVERRIDE_PATTERNS``).
 
     The union of both pattern groups plus the automated-sender check is
     exactly what :func:`classify_sentiment` tags ``auto_reply``, so this
@@ -259,26 +415,51 @@ def _auto_reply_kind(subject: str, reply_text: str, from_email: str = "") -> Opt
     for pat in _MACHINE_AUTO_PATTERNS:
         if pat.search(combined):
             return "machine"
-
-    sender = (from_email or "").strip().lower()
-    if _AUTOMATED_SENDER_RE.match(sender.split("@", 1)[0]):
+    if _MACHINE_SUBJECT_RE.search(subject):
         return "machine"
 
-    for pat in _OOO_PATTERNS:
-        if pat.search(combined):
-            return "ooo"
+    sender = (from_email or "").strip().lower()
+    local_part, _, domain = sender.partition("@")
+    if _AUTOMATED_SENDER_RE.search(local_part) or _HELPDESK_DOMAIN_RE.search(domain):
+        return "machine"
 
-    return None
+    if header_kind == "auto_generated":
+        return "machine"
+    if header_kind == "auto_replied":
+        # A responder answered: a ticket desk / departure notice is a dead
+        # end, anything else is a vacation notice from a real person.
+        if any(p.search(combined) for p in _ACK_PATTERNS + _DEPARTURE_PATTERNS):
+            return "machine"
+        return "ooo"
+
+    if _OOO_SUBJECT_RE.search(subject):
+        return "ooo"
+
+    # Body-only evidence from here on: a person who writes "I'm on leave this
+    # week, but yes please — let's talk Monday" is answering, not away.
+    ack = any(p.search(combined) for p in _ACK_PATTERNS + _DEPARTURE_PATTERNS)
+    ooo = not ack and any(p.search(combined) for p in _OOO_PATTERNS)
+    if not (ack or ooo):
+        return None
+    if _first_match(_HUMAN_OVERRIDE_PATTERNS, reply_text):
+        return None
+    return "machine" if ack else "ooo"
 
 
-def classify_sentiment(subject: str, reply_text: str, from_email: str = "") -> str:
+def classify_sentiment(
+    subject: str, reply_text: str, from_email: str = "",
+    header_kind: Optional[str] = None,
+) -> str:
     """Classify the sentiment of a prospect reply.
 
-    Returns: 'positive' | 'auto_reply' | 'negative' | 'bounce'
+    Returns: 'positive' | 'auto_reply' | 'negative' | 'neutral' | 'bounce'
 
     ``from_email`` (optional) lets the delivery-failure and automated-sender
     checks run before any keyword: a bounce is never a human sentiment, and a
     no-reply sender's notification text must not inherit keyword matches.
+    ``header_kind`` (optional) is the message's automation-header verdict
+    (:func:`imap_helpers.automated_header_kind`); stored records keep it as
+    ``auto_header`` so re-classification reaches the same answer.
     """
     subject, reply_text = _ascii_apostrophes(subject), _ascii_apostrophes(reply_text)
     combined = f"{subject}\n{reply_text}"
@@ -295,23 +476,26 @@ def classify_sentiment(subject: str, reply_text: str, from_email: str = "") -> s
 
     # 2. Out of Office / Auto-reply check — both machine acknowledgements and
     #    human away notices (see _auto_reply_kind for the distinction).
-    if _auto_reply_kind(subject, reply_text, from_email) is not None:
+    if _auto_reply_kind(subject, reply_text, from_email, header_kind) is not None:
         return "auto_reply"
 
-    # 3. Negative / Unsubscribe check
+    # 3. Negative / Unsubscribe check — strong refusals are decisive.
     for pat in _NEGATIVE_PATTERNS:
         if pat.search(reply_text) or pat.search(subject):
             return "negative"
 
-    # 4. Positive / Warm Lead check
-    for pat in _POSITIVE_PATTERNS:
-        for m in pat.finditer(reply_text):
-            if _inside_conditional_offer(reply_text, m.start(), m.end()):
-                # The keyword belongs to a marketing offer the sender wrote about
-                # their own product ("if you are interested in renting a
-                # venue…"), so it says nothing about interest in our offer.
-                continue
-            return "positive"
+    # 4. Positive / Warm Lead check — an explicit request beats a soft decline.
+    if _first_match(_STRONG_POSITIVE_PATTERNS, reply_text):
+        return "positive"
+
+    # 5. Polite declines.
+    for pat in _SOFT_NEGATIVE_PATTERNS:
+        if pat.search(reply_text) or pat.search(subject):
+            return "negative"
+
+    # 6. Weaker interest cues.
+    if _first_match(_POSITIVE_PATTERNS, reply_text):
+        return "positive"
 
     # No keyword matched: the reply is a real human response but lacks clear
     # positive or negative signals. Classify as neutral rather than assuming
@@ -393,6 +577,7 @@ async def match_campaign_for_reply(
     from_email: str,
     reply_date: Optional[datetime] = None,
     campaigns: Optional[list[dict]] = None,
+    subscriber: Optional[dict] = None,
 ) -> tuple[Optional[int], Optional[str]]:
     """Find the campaign a prospect reply belongs to.
 
@@ -404,7 +589,8 @@ async def match_campaign_for_reply(
 
     Recency alone is never used — attributing a reply to an unrelated campaign
     is worse than leaving it unattributed. Pass a pre-fetched ``campaigns``
-    list to avoid re-walking the history per message.
+    list to avoid re-walking the history per message, and an already looked
+    up ``subscriber`` to skip the per-reply ListMonk lookup.
     """
     clean_subj = _clean_subject_for_matching(subject)
     if reply_date is None:
@@ -430,27 +616,56 @@ async def match_campaign_for_reply(
             return c.get("id"), c.get("name")
 
     # Fall back to list-aware matching against the sender's lists.
+    if subscriber is None:
+        safe_email = safe_email_for_query(from_email)
+        if not safe_email:
+            return None, None
+        try:
+            res = await listmonk.get_subscribers(
+                1, 1, f"subscribers.email = '{safe_email}'",
+            )
+            subs = (res.get("data") or {}).get("results") or []
+        except Exception as e:
+            logger.debug(f"Subscriber lookup error: {e}")
+            return None, None
+        if not subs:
+            return None, None
+        subscriber = subs[0]
+
+    sub_list_ids = {
+        l.get("id") for l in (subscriber.get("lists") or []) if l.get("id")
+    }
+    match = _match_campaign(campaigns, reply_date, sub_list_ids)
+    if match:
+        return match.get("campaign_id"), match.get("campaign_name")
+    return None, None
+
+
+async def _lookup_subscriber(
+    listmonk: ListMonkClient, from_email: str, cache: dict,
+) -> tuple[Optional[dict], bool]:
+    """Resolve a sender to its ListMonk subscriber, once per scan.
+
+    Returns ``(subscriber, ok)``: ``ok`` is False when ListMonk could not be
+    asked (the caller must defer the message, not discard it), and
+    ``subscriber`` is None when the sender is genuinely unknown.
+    """
+    if from_email in cache:
+        return cache[from_email], True
     safe_email = safe_email_for_query(from_email)
     if not safe_email:
-        return None, None
+        cache[from_email] = None
+        return None, True
     try:
         res = await listmonk.get_subscribers(
             1, 1, f"subscribers.email = '{safe_email}'",
         )
         subs = (res.get("data") or {}).get("results") or []
     except Exception as e:
-        logger.debug(f"Subscriber lookup error: {e}")
-        return None, None
-    if not subs:
-        return None, None
-
-    sub_list_ids = {
-        l.get("id") for l in (subs[0].get("lists") or []) if l.get("id")
-    }
-    match = _match_campaign(campaigns, reply_date, sub_list_ids)
-    if match:
-        return match.get("campaign_id"), match.get("campaign_name")
-    return None, None
+        logger.warning(f"[ReplyTracker] Subscriber lookup failed for {from_email}: {e}")
+        return None, False
+    cache[from_email] = subs[0] if subs else None
+    return cache[from_email], True
 
 
 def extract_clean_reply(full_body: str) -> str:
@@ -490,6 +705,13 @@ def _tidy_reply_text(text: str) -> str:
 # overwriting a status a human deliberately set.
 STATUS_SOURCE_AUTO = "auto"
 STATUS_SOURCE_MANUAL = "manual"
+
+
+def _auto_leads_enabled() -> bool:
+    """``auto_tag_leads`` (reply_settings.json): promote positive replies to
+    ``lead`` automatically. It used to be stored and validated but never
+    read, so switching it off changed nothing."""
+    return bool(load_settings().get("auto_tag_leads", True))
 
 
 def _demote_auto_lead(record: dict) -> bool:
@@ -568,11 +790,15 @@ def collect_body_repairs(
         if not reply_only.strip():
             continue
         _, repair_from = email.utils.parseaddr(msg.get("From", ""))
-        sentiment = classify_sentiment(msg.get("Subject", ""), reply_only, repair_from)
+        header_kind = automated_header_kind(msg)
+        sentiment = classify_sentiment(
+            msg.get("Subject", ""), reply_only, repair_from, header_kind,
+        )
         repairs[msg_id] = {
             "full_body": reply_only,
             "body_preview": reply_only[:200] + ("..." if len(reply_only) > 200 else ""),
             "sentiment": sentiment,
+            "auto_header": header_kind,
         }
     return repairs
 
@@ -590,6 +816,7 @@ async def apply_body_repairs(repairs: dict[str, dict]) -> int:
     """
     if not repairs:
         return 0
+    auto_leads = _auto_leads_enabled()
     async with _log_lock:
         records = load_log()
         changed = 0
@@ -605,8 +832,10 @@ async def apply_body_repairs(repairs: dict[str, dict]) -> int:
             r["full_body"] = fix["full_body"]
             r["body_preview"] = fix["body_preview"]
             r["sentiment"] = fix["sentiment"]
+            if fix.get("auto_header"):
+                r["auto_header"] = fix["auto_header"]
             if fix["sentiment"] == "positive":
-                if r.get("status") == "unread":
+                if auto_leads and r.get("status") == "unread":
                     r["status"] = "lead"
                     r["status_source"] = STATUS_SOURCE_AUTO
             else:
@@ -621,7 +850,10 @@ async def apply_body_repairs(repairs: dict[str, dict]) -> int:
     return changed
 
 
-async def reclassify_stored_sentiments() -> int:
+async def reclassify_stored_sentiments(
+    echo_indexes: Optional[dict] = None,
+    reattribute: Optional[list] = None,
+) -> int:
     """Re-run the classifier over stored reply bodies (single write).
 
     Records whose Message-ID is already in the processed set are skipped by
@@ -635,7 +867,19 @@ async def reclassify_stored_sentiments() -> int:
     the current classifier reads as a bounce is removed outright: DSNs are not
     replies (older versions stored them here, misflagged as hot leads), and
     they belong to the bounce pipeline instead.
+
+    The stored body is first passed through the current quote stripper (and,
+    when ``echo_indexes`` holds the record's campaign, the campaign-echo
+    filter): older versions kept Outlook / non-English quoted threads, so our
+    own campaign copy was classified as the prospect's words. A body only
+    ever shrinks this way — it is never replaced by an empty one.
+
+    ``reattribute`` (optional list) receives the ids of records that moved
+    from ``auto_reply`` to a human sentiment: their campaign attribution was
+    dropped when they were tagged automated and the caller re-matches them.
     """
+    echo_indexes = echo_indexes or {}
+    auto_leads = _auto_leads_enabled()
     async with _log_lock:
         records = load_log()
         changed = 0
@@ -644,10 +888,26 @@ async def reclassify_stored_sentiments() -> int:
             body = (r.get("full_body") or "").strip()
             if not body:
                 continue  # empty bodies are the repair pass's job
+            cleaned = _tidy_reply_text(_extract_reply_only(body)) or body
+            index = echo_indexes.get(r.get("campaign_id"))
+            classify_text = strip_campaign_echo(cleaned, index) if index else cleaned
+            if r.get("echo_only"):
+                # The scan found nothing but our quoted campaign copy; the
+                # stored body is kept for display only.
+                classify_text = ""
+            elif classify_text:
+                cleaned = classify_text
+            body_changed = cleaned != body
+            if body_changed:
+                r["full_body"] = cleaned
+                r["body_preview"] = cleaned[:200] + ("..." if len(cleaned) > 200 else "")
+                body = cleaned
             sentiment = classify_sentiment(
-                r.get("subject", ""), body, r.get("from_email", "")
+                r.get("subject", ""), classify_text, r.get("from_email", ""),
+                r.get("auto_header"),
             )
             if sentiment == r.get("sentiment"):
+                changed += int(body_changed)
                 continue
             if sentiment == "bounce":
                 # A delivery-failure notice is not a reply. Older versions
@@ -661,9 +921,10 @@ async def reclassify_stored_sentiments() -> int:
                     r["sentiment"] = sentiment
                 changed += 1
                 continue
+            previous = r.get("sentiment")
             r["sentiment"] = sentiment
             if sentiment == "positive":
-                if r.get("status") == "unread":
+                if auto_leads and r.get("status") == "unread":
                     r["status"] = "lead"
                     r["status_source"] = STATUS_SOURCE_AUTO
             else:
@@ -674,12 +935,58 @@ async def reclassify_stored_sentiments() -> int:
                 _demote_auto_lead(r)
                 if sentiment == "auto_reply":
                     _clear_campaign_attribution(r)
+            if (previous == "auto_reply" and sentiment != "auto_reply"
+                    and reattribute is not None and r.get("campaign_id") is None):
+                reattribute.append(r.get("id"))
             changed += 1
         if changed:
             if drop_ids:
                 records = [r for r in records if r.get("message_id") not in drop_ids]
             save_log(records)
     return changed
+
+
+async def reattribute_replies(
+    listmonk: ListMonkClient, reply_ids: list, campaigns: list[dict],
+) -> int:
+    """Restore campaign attribution for replies that stopped being auto-replies.
+
+    Matching runs outside the log lock (it may call ListMonk); the write-back
+    re-reads the log and only fills records that are still unattributed and
+    still human, so a concurrent edit is never overwritten.
+    """
+    wanted = {str(i) for i in reply_ids if i}
+    if not wanted or not campaigns:
+        return 0
+    found: dict[str, tuple] = {}
+    for r in load_log():
+        if str(r.get("id")) not in wanted:
+            continue
+        reply_date = None
+        try:
+            dt = email.utils.parsedate_to_datetime(r.get("date") or "")
+            reply_date = dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            pass
+        camp_id, camp_name = await match_campaign_for_reply(
+            listmonk, r.get("subject", ""), r.get("from_email", ""),
+            reply_date, campaigns=campaigns,
+        )
+        if camp_id:
+            found[str(r.get("id"))] = (camp_id, camp_name)
+    if not found:
+        return 0
+    async with _log_lock:
+        records = load_log()
+        updated = 0
+        for r in records:
+            hit = found.get(str(r.get("id")))
+            if hit and r.get("campaign_id") is None and r.get("sentiment") != "auto_reply":
+                r["campaign_id"], r["campaign_name"] = hit
+                updated += 1
+        if updated:
+            save_log(records)
+    return updated
 
 
 async def _ingest_inbox_dsn(
@@ -802,10 +1109,13 @@ async def scan_and_track_replies(
             "new_replies": 0,
             "positive": 0,
             "negative": 0,
+            "neutral": 0,
             "auto_reply": 0,
             "bounce": 0,
             "reclassified": 0,
             "auto_blocklisted": 0,
+            "not_reply": 0,
+            "deferred": 0,
             "message": "Reply scan already in progress",
         }
 
@@ -834,6 +1144,8 @@ async def _scan_and_track_replies_impl(
             "bounce": 0,
             "reclassified": 0,
             "auto_blocklisted": 0,
+            "not_reply": 0,
+            "deferred": 0,
         }
 
     processed_ids = load_processed_message_ids()
@@ -850,6 +1162,13 @@ async def _scan_and_track_replies_impl(
         "repaired": 0,
         "reclassified": 0,
         "auto_blocklisted": 0,
+        # Inbox mail that is not an answer to our outreach (newsletters,
+        # receipts, platform notifications from strangers): skipped, never
+        # stored — it used to land in the feed and inflate the reply rate.
+        "not_reply": 0,
+        # Messages left for the next scan because ListMonk could not be asked
+        # whether the sender is a subscriber.
+        "deferred": 0,
     }
 
     # Opt-in auto-blocklist toggles (reply_settings.json), read once per
@@ -858,7 +1177,12 @@ async def _scan_and_track_replies_impl(
     block_toggles = load_settings()
     auto_block_machine = bool(block_toggles.get("auto_blocklist_machine"))
     auto_block_ooo = bool(block_toggles.get("auto_blocklist_ooo"))
+    auto_leads = bool(block_toggles.get("auto_tag_leads", True))
     blocked_emails: set[str] = set()
+    # Per-scan caches: one subscriber lookup per sender, one campaign /
+    # template fetch per campaign for echo stripping.
+    sub_cache: dict = {}
+    echo_cache: dict = {}
 
     # Fetch the campaign history once per scan, walked back far enough to
     # cover every reply in the scan window. A per-message fetch (or a single
@@ -952,13 +1276,29 @@ async def _scan_and_track_replies_impl(
     # Re-tag stored records the (evolved) classifier now reads differently:
     # their Message-IDs are in the processed set, so the ingest loop below
     # would skip them forever and their badge would stay stale.
+    # Only campaign bodies already in the listing feed the stored-record echo
+    # filter: fetching every historical campaign each scan would be costly.
+    listing_echo = {
+        c.get("id"): campaign_echo_index(c.get("body"), c.get("altbody"))
+        for c in campaigns if c.get("id") and isinstance(c.get("body"), str)
+    }
+    reattribute_ids: list = []
     try:
-        stats["reclassified"] = await reclassify_stored_sentiments()
+        stats["reclassified"] = await reclassify_stored_sentiments(
+            echo_indexes=listing_echo, reattribute=reattribute_ids,
+        )
         if stats["reclassified"]:
             logger.info(
                 f"[ReplyTracker] Re-classified {stats['reclassified']} stored "
                 "reply record(s) with the current sentiment rules"
             )
+        if reattribute_ids:
+            restored = await reattribute_replies(listmonk, reattribute_ids, campaigns)
+            if restored:
+                logger.info(
+                    f"[ReplyTracker] Restored campaign attribution on {restored} "
+                    "reply record(s) no longer read as automated"
+                )
     except Exception as e:
         logger.warning(f"[ReplyTracker] Sentiment re-classification failed (non-fatal): {e}")
 
@@ -1006,8 +1346,10 @@ async def _scan_and_track_replies_impl(
         # Extract stripped reply content
         full_body = extract_email_body(msg)
         reply_only = extract_clean_reply(full_body)
+        # RFC 3834 automation headers outrank any body wording.
+        header_kind = automated_header_kind(msg)
 
-        sentiment = classify_sentiment(subject, reply_only, from_email)
+        sentiment = classify_sentiment(subject, reply_only, from_email, header_kind)
 
         # A delivery-failure DSN is never a reply: route it to the bounce
         # pipeline (Bounces page, Analytics bounce counts) and keep it out
@@ -1021,17 +1363,64 @@ async def _scan_and_track_replies_impl(
                 new_msg_ids.append(state_id)
             continue
 
+        # Only answers to our outreach belong in the feed. Every other message
+        # in the inbox (newsletters, receipts, LinkedIn/Google notifications)
+        # used to be stored as a "reply": notifications were hot-flagged as
+        # leads and every newsletter inflated the reply rate. Kept: mail whose
+        # subject matches one of our campaigns, or whose sender is a ListMonk
+        # subscriber. Newsletter / list traffic is dropped up front.
+        if is_bulk_mail(msg):
+            stats["not_reply"] += 1
+            if state_id:
+                new_msg_ids.append(state_id)
+            continue
+        clean_subj = _clean_subject_for_matching(subject)
+        subscriber = None
+        if not any(_subject_matches(clean_subj, c) for c in campaigns):
+            subscriber, lookup_ok = await _lookup_subscriber(listmonk, from_email, sub_cache)
+            if not lookup_ok:
+                # ListMonk unreachable: not knowing is not "unknown sender".
+                # Leave the message unprocessed so the next scan decides.
+                stats["deferred"] += 1
+                continue
+            if subscriber is None:
+                stats["not_reply"] += 1
+                if state_id:
+                    new_msg_ids.append(state_id)
+                continue
+
         # Match campaign (history was fetched once for the whole scan).
+        camp_id, camp_name = await match_campaign_for_reply(
+            listmonk, subject, from_email, reply_date, campaigns=campaigns,
+            subscriber=subscriber,
+        )
+
+        # Drop any of our own campaign copy the quote stripper missed (an
+        # unrecognised client's quote header), then classify what is left.
+        echo_only = False
+        if camp_id:
+            campaign = next((c for c in campaigns if c.get("id") == camp_id), None)
+            echo_index = await campaign_echo_index_for(listmonk, campaign, echo_cache)
+            cleaned = strip_campaign_echo(reply_only, echo_index)
+            if cleaned != reply_only:
+                # Nothing but our own copy: classify the empty answer, but keep
+                # the text for display (an empty body would look repairable
+                # and be re-downloaded every scan). ``echo_only`` tells
+                # re-classification to reach the same verdict.
+                echo_only = not cleaned
+                if cleaned:
+                    reply_only = cleaned
+                sentiment = classify_sentiment(
+                    subject, cleaned, from_email, header_kind,
+                )
+
         # Automated responses (OOO, ticket confirmations, generic auto-replies)
         # are never genuine prospect engagement — skip attribution entirely so
         # they don't receive a campaign tag or inflate per-campaign charts.
+        auto_kind = None
         if sentiment == "auto_reply":
             camp_id, camp_name = None, None
-            auto_kind = _auto_reply_kind(subject, reply_only, from_email)
-        else:
-            camp_id, camp_name = await match_campaign_for_reply(
-                listmonk, subject, from_email, reply_date, campaigns=campaigns,
-            )
+            auto_kind = _auto_reply_kind(subject, reply_only, from_email, header_kind)
 
         # Note: Replies without campaign attribution are still stored with
         # campaign_id=null. While ideally we'd skip non-campaign emails, doing
@@ -1040,6 +1429,9 @@ async def _scan_and_track_replies_impl(
         # default ensures these aren't falsely flagged as hot leads, and
         # campaign_name stays null so the feed labels them "Unattributed"
         # instead of inventing a campaign they never belonged to.
+        # The gate above only drops mail from senders who are not subscribers
+        # *and* whose subject matches no campaign, so a subscriber's reply to a
+        # deleted or renamed campaign is still kept (unattributed).
         record = {
             "id": f"rep_{uuid.uuid4().hex[:10]}",
             "message_id": msg_id,
@@ -1055,7 +1447,7 @@ async def _scan_and_track_replies_impl(
             # display as if it belonged to one.
             "campaign_name": camp_name,
             "sentiment": sentiment,
-            "status": "lead" if sentiment == "positive" else "unread",
+            "status": "lead" if sentiment == "positive" and auto_leads else "unread",
             # Provenance for the auto-promotion above, so a later sentiment
             # correction can undo it without touching a human's status choice.
             "status_source": STATUS_SOURCE_AUTO,
@@ -1068,6 +1460,13 @@ async def _scan_and_track_replies_impl(
         # to real humans and only get blocked when the harsher toggle is on.
         # A failed blocklist never loses the reply — the record still feeds
         # the page for manual triage.
+        if header_kind:
+            # Kept so re-classification of the stored body reaches the same
+            # verdict without the original headers.
+            record["auto_header"] = header_kind
+        if echo_only:
+            record["echo_only"] = True
+
         if sentiment == "auto_reply" and (
             (auto_kind == "machine" and auto_block_machine)
             or (auto_kind == "ooo" and auto_block_ooo)

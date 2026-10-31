@@ -38,13 +38,15 @@ ListMonk-Pro/
 │       ├── deliverability_service.py # Audit rules, score computation, and preset application
 │       ├── export_service.py      # CSV generators (sync list + async streamed, formula-injection sanitized)
 │       ├── hard_bounce_cache.py   # In-memory hard bounce counts per campaign with background refresh
-│       ├── imap_helpers.py        # Shared IMAP utilities (body extraction, date formatting, query escaping)
+│       ├── imap_helpers.py        # Shared IMAP utilities (body extraction, date formatting, query escaping,
+│       │                          #   RFC 3834 auto-reply headers, bulk-mail detection, campaign-echo stripping)
 │       ├── imap_reply_tracker.py  # IMAP reply monitor, sentiment analysis, quote-thread stripping, Message-ID fingerprint dedup,
 │       │                          #   HTML-only body fallback + repair pass; routes inbox DSNs into the bounce pipeline (never stored as replies)
 │       ├── imap_unsubscribe.py    # IMAP reply monitor for unsubscribe keywords with quote stripping
 │       ├── link_unsubscribe.py    # ListMonk direct link unsubscribe scanner & campaign attributor
 │       ├── listmonk_client.py     # Async HTTP client for ListMonk REST API (with paginate_all helper)
 │       ├── opener_cache.py        # In-memory campaign opener email cache with TTL & inflight deduplication
+│       ├── search_query.py        # Safe free-text → ListMonk ILIKE query builder (never raw `query`)
 │       ├── reply_log.py           # Persistent JSON storage for prospect replies and sentiments
 │       ├── task_utils.py          # Strong references for fire-and-forget tasks & shutdown drain
 │       └── unsubscribe_log.py     # Persistent JSON state management for unsubscribe log/settings/processed
@@ -87,6 +89,7 @@ ListMonk-Pro/
 │   ├── test_reply_body_extraction.py # HTML-only reply body fallback & stored empty-reply repair regressions
 │   ├── test_full_review_fixes.py  # Regressions for the second full-codebase review (CSV blank headers, archive body, scan aborts, state races)
 │   ├── test_fourth_review_fixes.py # Regressions for the fourth review (bounce totals, auto-unblock scope, CSRF, unsubscribe scan vs \Seen, bulk payloads)
+│   ├── test_reply_filtering.py    # Inbox filtering: sentiment corpus, quote/echo stripping, auto-reply headers, not-a-reply gate
 │   ├── conftest.py                # Resets module-level caches between tests
 │   └── test_regressions.py        # Route order, IMAP seen-marking, prune, timestamp regressions
 ├── .github/
@@ -214,8 +217,35 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | `scheduler_loop` | 60 seconds | Enforces daily send windows, auto-pauses/resumes campaigns. While **disabled** it resumes the campaigns it auto-paused itself (still-paused ones only; a failed resume stays tracked and is retried), and `PUT /api/scheduler` ticks immediately in both directions. The whole load → mutate → save cycle of a tick runs under `_SCHED_LOCK`, shared with `update_schedule_settings()` (the API's PUT path), so overlapping ticks or a settings write during a tick can never clobber `schedule.json` |
 | `imap_scan_loop` | 1 hour | Scans IMAP inbox for replies + polls ListMonk for link unsubscribes |
 | `bounce_ingest_loop` | 1 hour | Scans the bounce mailbox for new DSNs in the 30-day window, classifies & records bounces; skips delay notices and anything already in `bounce_processed.json` |
-| `reply_scan_loop` | 15 minutes | Scans IMAP for cold-outreach prospect replies, strips quotes, classifies sentiment. Delivery-failure DSNs (mailer-daemon subject/sender/body markers) are never stored as replies: they are routed through `bounce_ingest.ingest_parsed_dsn` so the failed prospect gets a real bounce record (Bounces page, Analytics bounce counts), deduped against `bounce_processed.json` so a mailbox both scanners watch yields one record. HTML-only replies (no usable `text/plain` part) are rendered to text via `imap_helpers.html_to_text` so genuine replies are never stored with an empty body; records already stored empty are repaired in place from the fetched messages, and a re-classification pass re-tags stored replies when the sentiment rules evolve (a DSN stored by an older version is removed from the feed outright). Dedup uses the Message-ID or, when absent, the same `From|Date|Subject` fingerprint as bounce ingestion, persisted to `reply_processed.json` (capped at 5000) |
+| `reply_scan_loop` | `scan_interval_minutes` (15) | Scans IMAP for cold-outreach prospect replies, strips quotes, classifies sentiment (see *Reply classification* below). Delivery-failure DSNs (mailer-daemon subject/sender/body markers) are never stored as replies: they are routed through `bounce_ingest.ingest_parsed_dsn` so the failed prospect gets a real bounce record (Bounces page, Analytics bounce counts), deduped against `bounce_processed.json` so a mailbox both scanners watch yields one record. HTML-only replies (no usable `text/plain` part) are rendered to text via `imap_helpers.html_to_text` so genuine replies are never stored with an empty body; records already stored empty are repaired in place from the fetched messages, and a re-classification pass re-tags stored replies when the sentiment rules evolve (a DSN stored by an older version is removed from the feed outright). Dedup uses the Message-ID or, when absent, the same `From|Date|Subject` fingerprint as bounce ingestion, persisted to `reply_processed.json` (capped at 5000) |
 | `start_cache_updater` | 5 minutes | Refreshes in-memory hard bounce counts per campaign |
+
+### 5a. Reply Classification (`app/services/imap_reply_tracker.py`)
+- **Only answers to our outreach are stored.** Newsletter/list mail (`List-Unsubscribe`,
+  `List-Id`, `Precedence: bulk|list|junk` without `In-Reply-To`/`References`) is skipped,
+  and so is mail whose sender is not a ListMonk subscriber *and* whose subject matches no
+  campaign. Skips are terminal (`not_reply` in scan stats, recorded in `reply_processed.json`);
+  a failed subscriber lookup is **deferred** (`deferred`), never treated as "unknown sender".
+- **Quote stripping** (`imap_unsubscribe._extract_reply_only`, shared with the unsubscribe
+  scanner) recognises Outlook `From:`/`Sent:` blocks without an address or leading digit, in
+  common locales (`Von:/Gesendet:`, `De :/Envoyé :` …), localised attribution lines
+  (`a écrit :`, `schrieb`, `escribió` …), localised "Original Message" separators, mobile
+  signatures and the `-- ` delimiter.
+- **Campaign-echo backstop**: once a reply is matched to a campaign, any line repeating that
+  campaign's body / alt body / template (`imap_helpers.strip_campaign_echo`) is dropped before
+  classifying. The unsubscribe scanner applies the same check before acting, so a quoted
+  "reply 'remove me'" footer can never unsubscribe the sender. Short footer lines
+  ("Unsubscribe") are only dropped inside a block of quoted copy — a one-word answer stands.
+- **Order**: bounce → automated → strong refusal → explicit request → soft decline → weaker
+  interest cue → `neutral`. Automated evidence from **headers** (`Auto-Submitted`,
+  `X-Autoreply`, `Precedence: auto_reply`; stored as `auto_header`), subject prefixes,
+  automated senders (`no-reply` anywhere in the local part, helpdesk domains) and explicit
+  machine notices is decisive. **Body-only** away / acknowledgement / departure wording yields
+  to an explicit human signal (`_HUMAN_OVERRIDE_PATTERNS`: "interested", "let's talk",
+  "yes please" …) — never to calls, meetings or pricing, which vacation notices mention.
+- Re-classification re-strips stored bodies with the current rules and restores campaign
+  attribution (`reattribute_replies`) for records that stop being `auto_reply`.
+- `auto_tag_leads=false` keeps positive replies `unread` instead of promoting them to `lead`.
 
 ### 6. CSV Converter (`app/services/csv_converter.py`)
 - Detects column headers and sample data from uploaded CSVs. Delimiter detection
@@ -332,7 +362,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/replies/stats` | GET | Aggregate reply counts, reply rate %, and sentiment breakdown (optional `campaign_id` scopes counts and rate to one campaign; a `by_campaign` breakdown is always returned for the analytics chart) |
 | | `/api/replies/scan` | POST | Manually trigger IMAP prospect reply scan (502 when the mailbox scan fails — never a 200 "ok" with a buried error) |
 | | `/api/replies/status` | GET | Check IMAP connection status |
-| | `/api/replies/settings` | GET / PUT | Get / update reply tracker settings (auto-tagging) |
+| | `/api/replies/settings` | GET / PUT | Get / update reply tracker settings: `auto_tag_leads` (positive → Hot Lead), `scan_interval_minutes` (1–1440), `auto_blocklist_machine`, `auto_blocklist_ooo` |
 | | `/api/replies/status` | PUT | Bulk update reply status from the feed's selection bar |
 | | `/api/replies/blocklist` | POST | Bulk blocklist every selected reply's sender |
 | | `/api/replies` | DELETE | Bulk delete replies by ID array |

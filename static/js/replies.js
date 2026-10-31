@@ -13,7 +13,7 @@ const Replies = {
     repliesData: null,
     isScanning: false,
     // Auto-blocklist toggles (reply settings); loaded with the page data.
-    settings: { auto_blocklist_machine: false, auto_blocklist_ooo: false },
+    settings: { auto_blocklist_machine: false, auto_blocklist_ooo: false, auto_tag_leads: true, scan_interval_minutes: 15 },
 
     async render() {
         // An action callback (status update, bulk op) can fire after the user
@@ -49,6 +49,8 @@ const Replies = {
             this.settings = {
                 auto_blocklist_machine: !!s.auto_blocklist_machine,
                 auto_blocklist_ooo: !!s.auto_blocklist_ooo,
+                auto_tag_leads: s.auto_tag_leads !== false,
+                scan_interval_minutes: Number(s.scan_interval_minutes) || 15,
             };
         } catch {
             // Defaults keep the toggles renderable without a settings file.
@@ -64,6 +66,30 @@ const Replies = {
             // API.request already surfaced the server message — toasting
             // again here showed the failure twice. Revert the checkbox.
             this.settings[key] = !enabled;
+        }
+        if (App.currentPage === 'replies') this.renderPage();
+    },
+
+    async toggleAutoTagLeads(enabled) {
+        try {
+            await API.put('/api/replies/settings', { auto_tag_leads: enabled });
+            this.settings.auto_tag_leads = enabled;
+            App.toast(`Auto Hot Lead flagging ${enabled ? 'enabled' : 'disabled'}`, 'success');
+        } catch {
+            // API.request already toasted the server error; revert the box.
+            this.settings.auto_tag_leads = !enabled;
+        }
+        if (App.currentPage === 'replies') this.renderPage();
+    },
+
+    async setScanInterval(minutes) {
+        const previous = this.settings.scan_interval_minutes;
+        try {
+            await API.put('/api/replies/settings', { scan_interval_minutes: minutes });
+            this.settings.scan_interval_minutes = minutes;
+            App.toast(`Mailbox scanned every ${minutes} min`, 'success');
+        } catch {
+            this.settings.scan_interval_minutes = previous;
         }
         if (App.currentPage === 'replies') this.renderPage();
     },
@@ -188,6 +214,14 @@ const Replies = {
                             <input type="checkbox" ${this.settings.auto_blocklist_ooo ? 'checked' : ''} aria-label="Auto-blocklist out-of-office replies" onchange="Replies.toggleAutoBlocklist('auto_blocklist_ooo', this.checked)">
                             Auto-blocklist OOO
                         </label>
+                        <label class="auto-blocklist-toggle" title="Automatically mark replies the classifier reads as interested as Hot Leads. Off: they stay Unread for manual triage.">
+                            <input type="checkbox" ${this.settings.auto_tag_leads ? 'checked' : ''} aria-label="Automatically flag interested replies as Hot Leads" onchange="Replies.toggleAutoTagLeads(this.checked)">
+                            Auto-flag Hot Leads
+                        </label>
+                        <select class="form-control filter-select" aria-label="Background mailbox scan interval" title="How often the mailbox is scanned for new replies in the background" onchange="Replies.setScanInterval(Number(this.value))">
+                            ${[5, 15, 30, 60, 240].concat([5, 15, 30, 60, 240].includes(this.settings.scan_interval_minutes) ? [] : [this.settings.scan_interval_minutes])
+                                .map(m => `<option value="${m}" ${this.settings.scan_interval_minutes === m ? 'selected' : ''}>Scan every ${m < 60 ? m + ' min' : (m / 60) + ' h'}</option>`).join('')}
+                        </select>
                     </div>
                 </div>
             </div>

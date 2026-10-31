@@ -242,8 +242,27 @@ async def bounce_ingest_loop():
         await asyncio.sleep(_backoff_delay(failures, BOUNCE_INGEST_INTERVAL))
 
 
+def _reply_scan_interval() -> int:
+    """Reply scan interval in seconds from ``scan_interval_minutes``.
+
+    The setting used to be stored (and validated by the API) while the loop
+    slept a hard-coded 15 minutes. A missing or invalid value falls back to
+    REPLY_SCAN_INTERVAL.
+    """
+    from app.services.reply_log import load_settings as load_reply_settings
+
+    try:
+        minutes = load_reply_settings().get("scan_interval_minutes")
+    except Exception:
+        return REPLY_SCAN_INTERVAL
+    if isinstance(minutes, bool) or not isinstance(minutes, int) or not 1 <= minutes <= 1440:
+        return REPLY_SCAN_INTERVAL
+    return minutes * 60
+
+
 async def reply_scan_loop():
-    """Scan IMAP for cold outreach replies every 15 minutes."""
+    """Scan IMAP for cold outreach replies every ``scan_interval_minutes``
+    (15 by default)."""
     failures = 0
     while True:
         try:
@@ -254,7 +273,12 @@ async def reply_scan_loop():
         except Exception as e:
             failures += 1
             logger.error(f"Reply scan error (#{failures}): {e}")
-        await asyncio.sleep(_backoff_delay(failures, REPLY_SCAN_INTERVAL))
+        # Sleep in short slices, re-reading the setting, so a changed interval
+        # applies within a minute instead of after the old (possibly 24h) wait.
+        slept = 0
+        while slept < _backoff_delay(failures, _reply_scan_interval()):
+            await asyncio.sleep(60)
+            slept += 60
 
 
 @asynccontextmanager
@@ -267,7 +291,7 @@ async def lifespan(app: FastAPI):
     _bounce_ingest_task = asyncio.create_task(bounce_ingest_loop())
     _hard_bounce_cache_task = asyncio.create_task(start_cache_updater())
     _reply_scan_task = asyncio.create_task(reply_scan_loop())
-    logger.info("Background tasks started: auto-unblock (6h), campaign scheduler (60s), IMAP+link scan (1h), bounce ingest (1h), hard bounce cache (5min), reply tracker (15min)")
+    logger.info("Background tasks started: auto-unblock (6h), campaign scheduler (60s), IMAP+link scan (1h), bounce ingest (1h), hard bounce cache (5min), reply tracker (%dmin)", _reply_scan_interval() // 60)
     warn_if_default_credentials()
     logger.warning(
         "Login rate-limit state is in-memory only and was reset on this restart. "

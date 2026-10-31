@@ -282,3 +282,193 @@ def extract_email_body(msg: email.message.EmailMessage,
             if msg.get_content_type() == "text/html":
                 body = html_to_text(body)
     return body
+
+
+# ─── Automated-mail headers (RFC 3834 & vendor extensions) ───────────────────
+#
+# Body keywords are a weak signal: a human writes "I'm on vacation, but let's
+# talk", a vacation responder never sets these headers by accident. Every
+# scanner that has to tell a human reply apart from a machine one should ask
+# the headers first.
+
+_AUTO_REPLY_HEADERS = ("X-Autoreply", "X-Autorespond", "X-Autoresponder", "X-Mail-Autoreply")
+_BULK_PRECEDENCE_RE = re.compile(r"^\s*(bulk|list|junk)\s*$", re.IGNORECASE)
+
+
+def automated_header_kind(msg: email.message.Message) -> str | None:
+    """Classify a message from its automation headers alone.
+
+    Returns:
+        ``'auto_replied'``   — ``Auto-Submitted: auto-replied``, an
+        ``X-Autoreply``-style vendor header or ``Precedence: auto_reply``:
+        a responder (vacation notice or ticket desk) answered our mail.
+        ``'auto_generated'`` — ``Auto-Submitted`` with any other non-``no``
+        value: a notification nobody typed.
+        ``None``             — the headers say nothing; the body decides.
+    """
+    auto_submitted = str(msg.get("Auto-Submitted") or "").strip().lower()
+    if auto_submitted and not auto_submitted.startswith("no"):
+        return "auto_replied" if auto_submitted.startswith("auto-replied") else "auto_generated"
+    if any(msg.get(h) for h in _AUTO_REPLY_HEADERS):
+        return "auto_replied"
+    if str(msg.get("Precedence") or "").strip().lower() == "auto_reply":
+        return "auto_replied"
+    return None
+
+
+def is_bulk_mail(msg: email.message.Message) -> bool:
+    """True for newsletters / mailing-list traffic that cannot be a reply.
+
+    ``List-Unsubscribe``, ``List-Id`` or a bulk ``Precedence`` mark list
+    mail; a message that additionally answers another one (``In-Reply-To`` /
+    ``References``) is kept, so a ticket desk replying to our campaign with
+    bulk headers still reaches the auto-reply logic.
+    """
+    if msg.get("In-Reply-To") or msg.get("References"):
+        return False
+    if msg.get("List-Unsubscribe") or msg.get("List-Id"):
+        return True
+    return bool(_BULK_PRECEDENCE_RE.match(str(msg.get("Precedence") or "")))
+
+
+# ─── Campaign echo stripping ─────────────────────────────────────────────────
+#
+# Quote-header detection can never know every mail client and locale. The
+# campaign we sent is the one text we know for certain, so any reply line that
+# repeats it is our own copy quoted back — never the prospect's words. This is
+# the backstop that keeps a footer like "reply 'remove me' to opt out" from
+# reading as an opt-out when the client's quote header was not recognised.
+
+_TEMPLATE_TAG_RE = re.compile(r"\{\{.*?\}\}", re.DOTALL)
+_URL_RE = re.compile(r"https?://\S+|<[^>\s]*>")
+_ECHO_SPACE_RE = re.compile(r"\s+")
+_ECHO_APOSTROPHES = str.maketrans({"’": "'", "‘": "'", "ʼ": "'",
+                                   "“": '"', "”": '"'})
+# A reply line shorter than this is too generic ("Thanks,") to call an echo
+# by substring; whole-line equality has a lower floor.
+ECHO_MIN_SUBSTRING = 20
+ECHO_MIN_LINE = 8
+
+
+def _echo_norm(text: str) -> str:
+    text = (text or "").translate(_ECHO_APOSTROPHES)
+    text = _URL_RE.sub(" ", text)
+    text = text.replace("*", " ").replace("_", " ")
+    return _ECHO_SPACE_RE.sub(" ", text).strip(" >\t").lower()
+
+
+def campaign_echo_index(*sources: str) -> tuple[list[str], set[str]]:
+    """Build the lookup used by :func:`strip_campaign_echo`.
+
+    ``sources`` are campaign bodies (HTML or plain) and template bodies.
+    Returns ``(segments, lines)``: whitespace-collapsed runs of text between
+    template tags (so a re-wrapped quoted line is still a substring), and
+    the exact tag-free lines.
+    """
+    segments: list[str] = []
+    lines: set[str] = set()
+    for src in sources:
+        if not src or not isinstance(src, str):
+            continue
+        text = html_to_text(src) if "<" in src and ">" in src else src
+        for chunk in _TEMPLATE_TAG_RE.split(text):
+            norm = _echo_norm(chunk)
+            if len(norm) >= ECHO_MIN_SUBSTRING:
+                segments.append(norm)
+        for line in text.splitlines():
+            if _TEMPLATE_TAG_RE.search(line):
+                continue
+            norm = _echo_norm(line)
+            if len(norm) >= ECHO_MIN_LINE:
+                lines.add(norm)
+    return segments, lines
+
+
+def _is_long_echo(norm: str, segments: list[str]) -> bool:
+    if len(norm) < ECHO_MIN_SUBSTRING:
+        return False
+    if any(norm in seg for seg in segments):
+        return True  # our copy, possibly re-wrapped by the client
+    # A personalised line ("Hi Jane, if you're interested…") is a long static
+    # run of our copy once the substituted words at either end are dropped.
+    # At least 60% of the line must remain, so a prospect's own sentence that
+    # merely ends with a phrase of ours is kept.
+    words = norm.split(" ")
+    floor = max(ECHO_MIN_SUBSTRING, len(norm) * 0.6)
+    for i in range(1, len(words)):
+        head, tail = " ".join(words[:-i]), " ".join(words[i:])
+        if len(tail) < floor and len(head) < floor:
+            break
+        for part in (tail, head):
+            if len(part) >= floor and any(part in seg for seg in segments):
+                return True
+    return False
+
+
+def strip_campaign_echo(reply_text: str, index: tuple[list[str], set[str]] | None) -> str:
+    """Drop the reply lines that repeat the campaign copy we sent.
+
+    A long line (``ECHO_MIN_SUBSTRING``+) that is a run of our copy is always
+    dropped. A short line equal to one of ours ("Unsubscribe" — a footer link
+    text) is dropped only inside a block of our quoted copy: a prospect whose
+    whole answer is the single word "Unsubscribe" means it.
+    """
+    if not reply_text or not index or not (index[0] or index[1]):
+        return reply_text
+    segments, lines = index
+    kept: list[str] = []
+    in_echo = False
+    for ln in reply_text.splitlines():
+        norm = _echo_norm(ln)
+        if _is_long_echo(norm, segments):
+            in_echo = True
+            continue
+        if in_echo and len(norm) >= ECHO_MIN_LINE and norm in lines:
+            continue
+        kept.append(ln)
+    return "\n".join(kept).strip()
+
+
+async def campaign_echo_index_for(client, campaign: dict | None, cache: dict) -> tuple[list[str], set[str]] | None:
+    """Echo index for a ListMonk campaign: its body, alt body and template.
+
+    ``cache`` is per scan (keys ``("c", id)`` / ``("t", id)``) so a busy
+    campaign costs at most one campaign and one template fetch. The campaign
+    listing normally carries ``body`` already; it is fetched only when
+    missing. Any upstream failure degrades to the parts we do have — echo
+    stripping is a backstop and must never fail a scan.
+    """
+    if not campaign or not campaign.get("id"):
+        return None
+    key = ("c", campaign["id"])
+    if key in cache:
+        return cache[key]
+
+    full = campaign
+    if not isinstance(campaign.get("body"), str):
+        try:
+            res = await client.get_campaign(campaign["id"])
+            data = res.get("data") if isinstance(res, dict) else None
+            if isinstance(data, dict):
+                full = data
+        except Exception as e:
+            logger.debug(f"echo index: campaign {campaign['id']} fetch failed: {e}")
+
+    sources = [full.get("body"), full.get("altbody")]
+    template_id = full.get("template_id")
+    if isinstance(template_id, int) and template_id:
+        tkey = ("t", template_id)
+        if tkey not in cache:
+            body = None
+            try:
+                res = await client.get_template(template_id)
+                data = res.get("data") if isinstance(res, dict) else None
+                body = data.get("body") if isinstance(data, dict) else None
+            except Exception as e:
+                logger.debug(f"echo index: template {template_id} fetch failed: {e}")
+            cache[tkey] = body if isinstance(body, str) else None
+        sources.append(cache[tkey])
+
+    index = campaign_echo_index(*[s for s in sources if isinstance(s, str)])
+    cache[key] = index if (index[0] or index[1]) else None
+    return cache[key]

@@ -31,6 +31,7 @@ from app.services.unsubscribe_log import (
 from app.services.imap_helpers import (
     safe_email_for_query, imap_date, extract_email_body,
     fetch_state_ids, message_state_id,
+    strip_campaign_echo, campaign_echo_index_for,
 )
 
 logger = logging.getLogger("imap_unsubscribe")
@@ -55,13 +56,74 @@ KEYWORD_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# The "wrote" verb of reply attribution lines in the locales cold outreach
+# meets most. Only English "wrote:" used to be recognised, so a French
+# ("a écrit :"), German ("schrieb"), or Spanish ("escribió") reply kept our
+# whole quoted campaign as if the prospect had written it.
+_WROTE_VERB = (
+    r"(?:wrote|a\s+[ée]crit|schrieb|escribi[óo]|ha\s+scritto|schreef|"
+    r"escreveu|skrev|napisa[łl]|kirjoitti)"
+)
+_ATTRIBUTION_OPENER = r"(?:On|Le|Am|El|Il|Op|Em|Den|P[åa]|W\s+dniu)"
+
 # "On <date>,\n<person> wrote:" quote headers wrapped over up to a few lines,
 # which a line-by-line scan cannot see. The inner part rejects blank lines so
-# the match cannot jump across a paragraph break into unrelated text.
+# the match cannot jump across a paragraph break into unrelated text. The verb
+# may be followed by the sender ("Am … schrieb Sam <sam@x.com>:").
 _MULTILINE_QUOTE_RE = re.compile(
-    r"^On\s+[^\n]*(?:\n(?![ \t]*\n)[^\n]*){0,3}?wrote:\s*$",
+    rf"^{_ATTRIBUTION_OPENER}\s+[^\n]*(?:\n(?![ \t]*\n)[^\n]*){{0,3}}?"
+    rf"\b{_WROTE_VERB}\b[^\n]*:\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
+
+# Single-line attribution: ends with ":" and carries a "wrote" verb, plus an
+# opener word, an address or a date digit — so "My boss wrote:" stays text,
+# while "Sam <sam@x.com> schrieb am Mo., 3. Nov.:" (Gmail mobile) is a quote.
+_ATTRIBUTION_LINE_RE = re.compile(rf"\b{_WROTE_VERB}\b.*:\s*$", re.IGNORECASE)
+_ATTRIBUTION_HINT_RE = re.compile(rf"^{_ATTRIBUTION_OPENER}\s|@|\d", re.IGNORECASE)
+
+# Outlook-style quoted header block: a "From:" label (any locale, possibly
+# bold "*From:*" in plain-text renderings) followed within a few lines by
+# another header label. Outlook writes "From: Sam Sender" without an address
+# and "Sent: Monday, November 3…" without a leading digit, which the old
+# "From: …@…" / "Sent: <digit>" rules both missed — the quoted campaign then
+# counted as the prospect's own words.
+_HEADER_FROM_RE = re.compile(
+    r"^\*?(From|Von|De|Da|Van|Fr[åa]n|Fra|Od|L[äa]hett[äa]j[äa]|Felad[óo])\s*:\*?\s*\S",
+    re.IGNORECASE,
+)
+_HEADER_FIELD_RE = re.compile(
+    r"^\*?(Sent|Date|To|Subject|Cc|Gesendet|Datum|An|Betreff|Envoy[ée]|[ÀA]|Objet|"
+    r"Enviado|Fecha|Para|Asunto|Inviato|Data|Oggetto|Verzonden|Aan|Onderwerp|"
+    r"Skickat|Till|[ÄA]mne|Sendt|Til|Emne|L[äa]hetetty|Vastaanottaja|Aihe)\s*:",
+    re.IGNORECASE,
+)
+
+# Mobile signatures always close the prospect's own text; anything below them
+# is the quoted thread.
+_MOBILE_SIGNATURE_RE = re.compile(
+    r"^(Sent from my \w+|Get Outlook for (iOS|Android)|Sent from Outlook|"
+    r"Von meinem \w+ gesendet|Envoy[ée] de mon \w+|Enviado desde mi \w+|"
+    r"Inviato da \w+|Verzonden met \w+|Skickat fr[åa]n min \w+)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_header_block_start(lines: list[str], i: int) -> bool:
+    """True when ``lines[i]`` opens a quoted "From:/Sent:/To:" header block."""
+    if not _HEADER_FROM_RE.match(lines[i].strip()):
+        return False
+    seen = 0
+    for nxt in lines[i + 1:]:
+        stripped = nxt.strip()
+        if not stripped:
+            continue
+        if _HEADER_FIELD_RE.match(stripped):
+            return True
+        seen += 1
+        if seen >= 3:
+            break
+    return False
 
 
 def _extract_body(msg: email.message.EmailMessage) -> str:
@@ -83,6 +145,14 @@ def _extract_reply_only(full_body: str) -> str:
     - "From: <address>" forwarding headers
     - "-----Original Message-----" (Outlook)
     - "Sent: " / "To: " / "Subject: " header blocks in quoted replies
+    - Outlook "From: Name" + "Sent: Monday, …" blocks without an address,
+      in any common locale ("Von:/Gesendet:", "De:/Envoyé:", …)
+    - Localised attribution lines ("a écrit :", "schrieb", "escribió", …)
+    - Mobile signatures ("Sent from my iPhone") and the "-- " delimiter
+
+    Callers that know the campaign the reply answers should also pass the
+    result through ``imap_helpers.strip_campaign_echo`` — the backstop for
+    quote headers no pattern here recognises.
     """
     lines = full_body.splitlines()
     reply_lines = []
@@ -97,8 +167,19 @@ def _extract_reply_only(full_body: str) -> str:
     quote_start_patterns = [
         # "On Mon, Jan 1, 2026 at 12:00 PM John Doe <john@example.com> wrote:"
         re.compile(r'^On\s+.+wrote:\s*$', re.IGNORECASE),
-        # "-----Original Message-----"
-        re.compile(r'^-{2,}\s*Original Message\s*-{2,}', re.IGNORECASE),
+        # "-----Original Message-----" (and its localised / forwarded forms)
+        re.compile(
+            r"^-{2,}\s*(Original Message|Urspr[üu]ngliche Nachricht|Message d'origine|"
+            r"Mensaje original|Messaggio originale|Oorspronkelijk bericht|"
+            r"Ursprungligt meddelande|Opprinnelig melding|Oprindelig meddelelse|"
+            r"Mensagem original|Forwarded message|Weitergeleitete Nachricht|"
+            r"Message transf[ée]r[ée])\s*-{2,}",
+            re.IGNORECASE,
+        ),
+        re.compile(r'^(Begin forwarded message|Anfang der weitergeleiteten Nachricht)\s*:', re.IGNORECASE),
+        # RFC 3676 signature delimiter ("-- "): company footers below it carry
+        # words like "unsubscribe" that are not the prospect's request.
+        re.compile(r'^--$'),
         # "From: Name <email>" or "From: email" at start of line (forwarded header)
         re.compile(r'^From:\s+.+@.+', re.IGNORECASE),
         # "Sent: 3/7/26 12:17 AM" (Outlook-style quoted header)
@@ -122,6 +203,14 @@ def _extract_reply_only(full_body: str) -> str:
             if pattern.match(stripped):
                 is_quote_start = True
                 break
+
+        if not is_quote_start:
+            is_quote_start = (
+                _is_header_block_start(lines, i)
+                or bool(_MOBILE_SIGNATURE_RE.match(stripped))
+                or (bool(_ATTRIBUTION_LINE_RE.search(stripped))
+                    and bool(_ATTRIBUTION_HINT_RE.search(stripped)))
+            )
 
         if is_quote_start:
             # Everything from here is quoted content — stop collecting
@@ -456,6 +545,8 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
         # or not an actionable unsubscribe request) — see EXAMINED_FILE.
         examined_now: list[str] = []
         seen_after_persist: list = []
+        # Per-scan cache of campaign/template copy for the echo backstop.
+        echo_cache: dict = {}
 
         try:
             # Campaign history, newest first. One page is enough to match
@@ -723,6 +814,28 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                         )
                         if not campaign:
                             logger.info(f"[IMAP] No list-matched campaign for '{subject}' from {sender_email}; skipping")
+                            examined_now.append(state_id)
+                            continue
+
+                        # Backstop for quote headers the stripper does not
+                        # know: if the keyword survives only in lines that
+                        # repeat our own campaign copy ("reply 'remove me' to
+                        # opt out"), it is our footer quoted back, not a
+                        # request. A polite "Thanks, will review" from such a
+                        # client used to unsubscribe (and blocklist) the lead.
+                        raw_campaign = next(
+                            (c for c in campaigns_list
+                             if c.get("id") == campaign["campaign_id"]), None,
+                        )
+                        echo_index = await campaign_echo_index_for(
+                            client, raw_campaign, echo_cache,
+                        )
+                        if echo_index and not KEYWORD_PATTERN.search(
+                                strip_campaign_echo(reply_text, echo_index)):
+                            logger.warning(
+                                f"[IMAP] FILTERED OUT: {sender_email} ('{subject}') — "
+                                "keyword only in quoted campaign copy, not in actual reply"
+                            )
                             examined_now.append(state_id)
                             continue
 

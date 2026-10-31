@@ -97,9 +97,6 @@ async def update_reply_settings(request: Request):
     for key, value in patch.items():
         if key in _BOOL_SETTINGS and not isinstance(value, bool):
             raise HTTPException(status_code=400, detail=f"{key} must be a boolean")
-        if key == "lead_tag" and (not isinstance(value, str) or not value.strip()
-                                  or len(value) > 100):
-            raise HTTPException(status_code=400, detail="lead_tag must be a non-empty string")
         if key == "scan_interval_minutes" and (
                 isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 1440):
             raise HTTPException(

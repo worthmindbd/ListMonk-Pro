@@ -24,8 +24,9 @@ PROCESSED_FILE = settings.data_path("reply_processed.json")
 MAX_PROCESSED_IDS = 5000
 
 _DEFAULT_SETTINGS = {
+    # Promote positive replies to the "lead" status (Hot Lead) on ingestion.
     "auto_tag_leads": True,
-    "lead_tag": "lead",
+    # Background reply-scan interval, read by app.main.reply_scan_loop.
     "scan_interval_minutes": 15,
     # Opt-in auto-blocklisting of automated replies, decided per reply by the
     # reply scanner (see imap_reply_tracker._auto_reply_kind). "machine"
@@ -230,7 +231,9 @@ def load_settings() -> dict:
         data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
         if isinstance(data, dict):
             merged = dict(_DEFAULT_SETTINGS)
-            merged.update(data)
+            # Known keys only: a retired setting (``lead_tag`` was stored but
+            # never read) must not linger in the API or stay writable.
+            merged.update({k: v for k, v in data.items() if k in _DEFAULT_SETTINGS})
             return merged
     except (FileNotFoundError, json.JSONDecodeError, IsADirectoryError, PermissionError):
         pass
