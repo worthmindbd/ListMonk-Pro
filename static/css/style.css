@@ -4151,6 +4151,152 @@ td .tag {
     word-break: break-word;
 }
 
+/* ── Email format (HTML design ↔ plain text per campaign) ──── */
+.deliv-format {
+    margin-top: 24px;
+}
+
+.deliv-format-head {
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--glass-border);
+}
+
+.deliv-format-head .deliv-sub {
+    max-width: 78ch;
+    line-height: 1.55;
+}
+
+.deliv-format-head .deliv-sub b {
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.deliv-format-list {
+    list-style: none;
+    border-bottom: 1px solid var(--glass-border);
+}
+
+.deliv-format-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 14px 0;
+}
+
+.deliv-format-row + .deliv-format-row {
+    border-top: 1px solid var(--glass-border);
+}
+
+.deliv-format-row.is-busy {
+    opacity: 0.75;
+}
+
+.deliv-format-main {
+    min-width: 0;
+}
+
+.deliv-format-title {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+}
+
+.deliv-format-name {
+    font-size: 0.87rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+}
+
+.deliv-format-meta {
+    margin-top: 4px;
+    font-size: 0.76rem;
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+}
+
+.deliv-format-reason {
+    color: #fbbf24;
+}
+
+.deliv-format-empty,
+.deliv-format-foot {
+    font-size: 0.76rem;
+    line-height: 1.55;
+    color: var(--text-muted);
+}
+
+.deliv-format-empty {
+    padding: 18px 0 4px;
+}
+
+.deliv-format-foot {
+    max-width: 78ch;
+    padding-top: 14px;
+}
+
+.deliv-format-static {
+    flex-shrink: 0;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+/* Two-option segmented switch. The active option carries the brand colour;
+   the track reuses the input surface so it reads as one control. */
+.deliv-seg {
+    display: inline-flex;
+    flex-shrink: 0;
+    padding: 3px;
+    gap: 2px;
+    border: 1px solid var(--glass-border-hover);
+    border-radius: var(--radius-pill);
+    background: var(--bg-input);
+}
+
+.deliv-seg-btn {
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 14px;
+    border: 0;
+    border-radius: var(--radius-pill);
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: var(--transition-ui);
+}
+
+.deliv-seg-btn:hover:not(:disabled):not(.is-active) {
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
+}
+
+.deliv-seg-btn.is-active {
+    background: var(--primary);
+    color: #ffffff;
+    box-shadow: 0 2px 10px var(--primary-glow);
+    cursor: default;
+}
+
+.deliv-seg-btn:disabled:not(.is-active) {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.deliv-seg-btn:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+}
+
 /* ── Field notes ───────────────────────────────────────────── */
 .deliv-notes {
     margin-top: 24px;
@@ -4263,6 +4409,7 @@ td .tag {
 [data-theme="light"] .deliv-check-sev.is-fail { color: #b3123a; }
 [data-theme="light"] .deliv-check-sev.is-warn { color: #a35a00; }
 [data-theme="light"] .deliv-tpl-state.is-on { color: #047857; }
+[data-theme="light"] .deliv-format-reason { color: #a35a00; }
 [data-theme="light"] .deliv-tpl-state.is-off,
 [data-theme="light"] .deliv-tpl-state.is-mixed { color: #a35a00; }
 [data-theme="light"] .deliv-toggle-state,
@@ -4346,6 +4493,14 @@ td .tag {
     .deliv-check-controls {
         grid-column: 1 / -1;
         max-width: none;
+    }
+    .deliv-format-row {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 10px;
+    }
+    .deliv-seg {
+        align-self: flex-start;
     }
     .deliv-savebar {
         bottom: 10px;

@@ -11,6 +11,10 @@
  * Two unsubscribe controls exist on purpose: the List-Unsubscribe *header*
  * (a ListMonk setting, invisible in the message body) and the footer *link*
  * (markup in the campaign templates, toggled via /unsubscribe-link).
+ *
+ * The "Email format" card switches each campaign between its HTML design and
+ * a plain-text version. Unlike the settings rows it applies immediately: it
+ * only swaps a template (no ListMonk reload) and is undone by switching back.
  */
 const Deliverability = {
     checklistData: null,
@@ -21,6 +25,10 @@ const Deliverability = {
     checkedAt: null,
     // Staged edits: setting key → new value. Cleared on save/discard/reload.
     pending: {},
+    // GET /email-format result: { campaigns: [...] } or { error }.
+    formats: null,
+    // Campaign id whose format switch is in flight.
+    switchingFormat: null,
     // Keys whose input currently holds an unparseable value (blocks Save).
     invalid: new Set(),
 
@@ -37,7 +45,15 @@ const Deliverability = {
         try {
             // silent: an upstream outage (now a 502) renders in this page's
             // own error state below — a toast on top would say it twice.
-            this.checklistData = await API.get('/api/deliverability/checklist', true);
+            // The format card degrades on its own: a campaigns read failure
+            // must not take the whole audit down with it.
+            const [checklist, formats] = await Promise.all([
+                API.get('/api/deliverability/checklist', true),
+                API.get('/api/deliverability/email-format', true)
+                    .catch(err => ({ error: err?.message || 'Unknown error' })),
+            ]);
+            this.checklistData = checklist;
+            this.formats = formats;
             this.checkedAt = new Date();
             if (App.stale(this._seq)) return;
             this.renderPage();
@@ -120,6 +136,7 @@ const Deliverability = {
         }
 
         html += this.summaryHtml({ score, scored, passing, unresolved, isOptimal, checks });
+        html += this.formatHtml();
         html += this.auditHtml({ buckets, passing, scored, unresolved });
         html += this.notesHtml();
         html += `<div class="deliv-savebar" id="delivSavebar" role="region" aria-label="Unsaved deliverability changes" hidden></div>`;
@@ -763,6 +780,102 @@ const Deliverability = {
         document.querySelectorAll('.deliv-check-controls input, .deliv-check-controls select').forEach(el => {
             el.disabled = disabled;
         });
+    },
+
+    /* ── Email format ────────────────────────────────────────────────────── */
+
+    formatHtml() {
+        const data = this.formats || {};
+        const rows = Array.isArray(data.campaigns) ? data.campaigns : [];
+        let body;
+        if (data.error) {
+            body = `<p class="deliv-check-note is-warn">${_dSvgIcon('alert')}<span>Campaigns could not be read: ${App.escapeHtml(data.error)}</span></p>`;
+        } else if (!rows.length) {
+            body = `<p class="deliv-format-empty">No draft, scheduled, paused or running campaigns. Finished campaigns keep the format they were sent with.</p>`;
+        } else {
+            body = `<ul class="deliv-format-list">${rows.map(r => this.formatRowHtml(r)).join('')}</ul>`;
+        }
+        return `
+            <section class="card deliv-format" id="delivFormat">
+                <header class="deliv-format-head">
+                    <div>
+                        <h2 class="card-title">Email format</h2>
+                        <p class="deliv-sub">
+                            <b>HTML design</b> sends your branded template: logo, layout, colours.
+                            <b>Plain text</b> sends the same message the way a typed email looks, with no images or layout, plus a text-only part. Plain text usually lands better for cold outreach.
+                        </p>
+                    </div>
+                </header>
+                ${body}
+                <p class="deliv-format-foot">
+                    Switching applies immediately and keeps the list, subject and schedule. The first switch to plain text builds a plain version of the campaign's template (named “… · plain”); each campaign remembers both versions, so you can switch back and forth.
+                </p>
+            </section>
+        `;
+    },
+
+    formatRowHtml(row) {
+        const name = App.escapeHtml(row.name || `Campaign ${row.id}`);
+        const busy = this.switchingFormat === row.id;
+        let control;
+        if (row.format === 'text' || row.format === 'visual') {
+            control = `<span class="deliv-format-static">${row.format === 'text' ? 'Text only' : 'Visual design'}</span>`;
+        } else {
+            const disabled = !row.can_switch || busy || this.switchingFormat !== null;
+            const btn = (fmt, label) => {
+                const active = row.format === fmt;
+                return `<button type="button" class="deliv-seg-btn ${active ? 'is-active' : ''}" aria-pressed="${active}"
+                            ${disabled ? 'disabled' : ''} onclick="Deliverability.switchFormat(${Number(row.id)}, '${fmt}')">
+                            ${busy && !active ? '<span class="spinner-sm" aria-hidden="true"></span>' : ''}${label}
+                        </button>`;
+            };
+            control = `<div class="deliv-seg" role="group" aria-label="Email format for ${name}">${btn('html', 'HTML design')}${btn('plain', 'Plain text')}</div>`;
+        }
+        const meta = row.reason
+            ? `<span class="deliv-format-reason">${App.escapeHtml(row.reason)}</span>`
+            : (row.template_name ? `Template: ${App.escapeHtml(row.template_name)}` : 'No template');
+        return `
+            <li class="deliv-format-row ${busy ? 'is-busy' : ''}" data-campaign="${Number(row.id)}" ${busy ? 'aria-busy="true"' : ''}>
+                <div class="deliv-format-main">
+                    <div class="deliv-format-title">
+                        <span class="deliv-format-name">${name}</span>
+                        ${App.statusBadge(row.status)}
+                    </div>
+                    <p class="deliv-format-meta">${meta}</p>
+                </div>
+                ${control}
+            </li>
+        `;
+    },
+
+    /** Re-render only the format card, so staged audit edits are untouched. */
+    refreshFormatCard() {
+        const card = document.getElementById('delivFormat');
+        if (card) card.outerHTML = this.formatHtml();
+    },
+
+    async switchFormat(campaignId, fmt) {
+        const rows = (this.formats || {}).campaigns || [];
+        const row = rows.find(r => r.id === campaignId);
+        if (!row || row.format === fmt || this.switchingFormat !== null) return;
+
+        this.switchingFormat = campaignId;
+        this.refreshFormatCard();
+        try {
+            const res = await API.put(`/api/deliverability/email-format/${campaignId}`, { format: fmt }, API.LONG_TIMEOUT);
+            Object.assign(row, {
+                format: res.format,
+                template_id: res.template_id,
+                template_name: res.template_name,
+            });
+            App.toast(`“${row.name}” now sends as ${fmt === 'plain' ? 'plain text' : 'HTML design'}${res.template_name ? ` (${res.template_name})` : ''}.`, 'success');
+        } catch (err) {
+            // API.request already surfaced the server message.
+            console.error('Email format switch failed:', err);
+        } finally {
+            this.switchingFormat = null;
+        }
+        if (App.currentPage === 'deliverability') this.refreshFormatCard();
     },
 
     /* ── Field notes ─────────────────────────────────────────────────────── */

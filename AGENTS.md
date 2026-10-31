@@ -36,6 +36,7 @@ ListMonk-Pro/
 │       ├── campaign_scheduler.py  # Timezone-aware send window scheduler (auto-pause/auto-resume, _SCHED_LOCK-serialized)
 │       ├── csv_converter.py       # Converts arbitrary CSV to ListMonk schema (JSON attributes)
 │       ├── deliverability_service.py # Audit rules, score computation, and preset application
+│       ├── email_format.py        # Per-campaign HTML design ↔ plain text switch (plain twins, text parts, memory in campaign attribs)
 │       ├── export_service.py      # CSV generators (sync list + async streamed, formula-injection sanitized)
 │       ├── hard_bounce_cache.py   # In-memory hard bounce counts per campaign with background refresh
 │       ├── imap_helpers.py        # Shared IMAP utilities (body extraction, date formatting, query escaping,
@@ -62,7 +63,8 @@ ListMonk-Pro/
 │   │   ├── campaigns.js           # Campaign management (incl. plain-text alt body), status transitions, test sends
 │   │   ├── charts.js              # Mode-aware dashboard overview charts & stat summary cards
 │   │   ├── converter.js           # CSV converter UI, column mapping, live preview & import modal
-│   │   ├── deliverability.js      # Deliverability audit with a control per setting (staged edits + save bar) & 1-click presets
+│   │   ├── deliverability.js      # Deliverability audit with a control per setting (staged edits + save bar), 1-click presets
+│   │   │                          #   & per-campaign Email format switch (HTML design / Plain text)
 │   │   ├── lists.js               # List management, modal forms, tag pills, subscriber drill-down & exports
 │   │   ├── replies.js             # Prospect reply feed, sentiment badges, hot lead flagging, bulk triage
 │   │   ├── settings.js            # Settings UI: send window scheduler, auto-unblock, unsubscribe settings
@@ -92,6 +94,7 @@ ListMonk-Pro/
 │   ├── test_fourth_review_fixes.py # Regressions for the fourth review (bounce totals, auto-unblock scope, CSRF, unsubscribe scan vs \Seen, bulk payloads)
 │   ├── test_reply_filtering.py    # Inbox filtering: sentiment corpus, quote/echo stripping, auto-reply headers, not-a-reply gate
 │   ├── test_deliverability_controls.py # Per-setting edits (whitelist/validation) & footer unsubscribe link template toggle
+│   ├── test_email_format.py       # HTML ↔ plain switch: twin/text conversion, remembered setups, compile rollback, attribs kept on edit
 │   ├── conftest.py                # Resets module-level caches between tests
 │   └── test_regressions.py        # Route order, IMAP seen-marking, prune, timestamp regressions
 ├── .github/
@@ -374,7 +377,24 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | **Deliverability** | `/api/deliverability/checklist` | GET | Audit Listmonk settings against deliverability rules (10 checks: tracking, individual tracking, unsubscribe header, batch size, concurrency, public archive, bounce feedback loop, hard-bounce action, send cadence, upload allow-list). The one-click `List-Unsubscribe` header is **required** (Gmail/Yahoo bulk-sender rules) and both presets keep it on |
 | | `/api/deliverability/apply-preset` | POST | 1-click apply 'cold_email' or 'newsletter' preset (merged onto current settings via `apply_settings`) |
 | | `/api/deliverability/settings` | PUT | Change individual settings from the page's row controls. Only keys in `deliverability_service.EDITABLE_SETTINGS` are accepted (strictly typed, no coercion → 400); the virtual `bounce.actions.hard` key is merged into `bounce.actions`. Returns the refreshed checklist (retried briefly while ListMonk reloads) |
+| | `/api/deliverability/email-format` | GET | Draft/scheduled/paused/running campaigns with their format (`html`, `plain`, or locked `text`/`visual`), template and why a switch is blocked (running → "pause first") |
+| | `/api/deliverability/email-format/{id}` | PUT | `{"format": "html"\|"plain"}` — swap the campaign's `template_id` + `altbody`; see *Email format switch* below |
 | | `/api/deliverability/unsubscribe-link` | PUT | `{"enabled": bool, "template_ids"?: [...]}` — show/hide the **visible footer** unsubscribe link in campaign templates. `privacy.unsubscribe_header` only sets the List-Unsubscribe header and never changes the body. Hiding wraps the link in a never-rendered `{{/* lmp:unsub-off */}}{{ if false }}…{{ end }}` block (a paragraph holding only unsubscribe links is hidden whole); enabling strips the wrapper byte-for-byte. Transactional templates and templates with no link are never edited; partial failures are reported, total failure is a 502 |
+
+**Email format switch** (`app/services/email_format.py`): a template is a *design* when it
+contains `<img>`, `<table>` or `<style>`, otherwise *plain*. Switching only changes the
+campaign's `template_id` and `altbody` (both formats stay `richtext`). Each format's
+`{template_id, altbody}` is remembered in the campaign's own `attribs.lmp_email_format`
+(stored in ListMonk, so every app instance sees it); `PUT /api/campaigns/{id}` therefore
+carries the stored `attribs` over when the client omits them, because ListMonk writes
+`attribs` unconditionally. Without memory, the plain version is an app-managed twin
+(`"<name> · plain"`, marked `{{/* lmp:plain-of=<id> */}}`, regenerated from the design on
+each such switch) and the text part is derived from the design: output actions are wrapped
+in `Safe` (the altbody is an html/template), `{{ template "content" . }}` is replaced by a
+text snapshot of the campaign body (it would recurse inside the altbody), and ListMonk's link
+helpers (`UnsubscribeURL`, `TrackLink`, …) are left in their bare shorthand, the only form
+ListMonk's pre-compile rewrite resolves. ListMonk compiles templates only at send time, so
+every switch renders the campaign preview and rolls back on a compile error (`422`).
 
 The audit has 12 checks: the ten above plus `unsubscribe_link` (footer link state read from
 the campaign templates; `info` when templates are unreadable or none has a link) and

@@ -472,6 +472,12 @@ async def test_campaign(campaign_id: int, data: dict):
 
 @router.put("/{campaign_id}")
 async def update_campaign(campaign_id: int, data: dict):
+    # ListMonk writes `attribs` unconditionally, so an edit that leaves it out
+    # wipes it — including the Deliverability page's remembered HTML/plain
+    # setup (attribs.lmp_email_format). Carry the stored value over.
+    if "attribs" not in data:
+        current = (await listmonk.get_campaign(campaign_id)).get("data") or {}
+        data = {**data, "attribs": current.get("attribs") or {}}
     return await listmonk.update_campaign(campaign_id, data)
 
 

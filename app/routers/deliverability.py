@@ -6,7 +6,9 @@ preset configuration for Cold Email vs Newsletter modes.
 
 import asyncio
 import logging
-from fastapi import APIRouter, HTTPException, Request
+
+import httpx
+from fastapi import APIRouter, HTTPException, Path, Request
 from app.services.bulk_ops import parse_ids
 from app.services.deliverability_service import (
     get_deliverability_checklist,
@@ -14,6 +16,7 @@ from app.services.deliverability_service import (
     update_deliverability_settings,
     validate_settings_patch,
 )
+from app.services.email_format import FormatError, list_email_formats, set_email_format
 from app.services.listmonk_client import listmonk
 from app.services.template_unsubscribe import describe_error, set_unsubscribe_links
 
@@ -115,6 +118,37 @@ async def toggle_unsubscribe_link(request: Request):
         raise HTTPException(status_code=502, detail=f"No template could be updated ({names})")
 
     return {"status": "ok", **result, "checklist": await get_deliverability_checklist(listmonk)}
+
+
+@router.get("/email-format")
+async def email_formats():
+    """Campaigns that can still send, each with its HTML/plain format."""
+    try:
+        return {"campaigns": await list_email_formats(listmonk)}
+    except Exception as e:
+        logger.error(f"Email format listing error: {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Could not read campaigns: {describe_error(e)}")
+
+
+@router.put("/email-format/{campaign_id}")
+async def switch_email_format(request: Request, campaign_id: int = Path(..., ge=1)):
+    """Switch one campaign between its HTML design and plain-text version."""
+    data = await _json_body(request)
+    fmt = data.get("format")
+    if fmt not in ("html", "plain"):
+        raise HTTPException(status_code=400, detail="format must be 'html' or 'plain'")
+    try:
+        return await set_email_format(listmonk, campaign_id, fmt)
+    except FormatError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        logger.error(f"Email format switch error: {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Failed to switch format: {describe_error(e)}")
+    except Exception as e:
+        logger.error(f"Email format switch error: {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Failed to switch format: {describe_error(e)}")
 
 
 @router.post("/apply-preset")
