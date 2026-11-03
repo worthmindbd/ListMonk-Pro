@@ -321,17 +321,99 @@ async def test_threaded_reply_from_unknown_address_is_kept(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_threaded_automated_reply_from_unknown_address_is_filed_as_automated(tmp_path, monkeypatch):
+@pytest.mark.parametrize("body,sender", [
+    # A ticket desk's acknowledgement, a polite decline from a desk, a stray "hi".
+    ("Your incident was received. Reply above this line to add a comment. We would love to hear updates.",
+     "help@desk.example"),
+    ("Thank you for reaching out. We are not interested at this time.", "support@desk.example"),
+    ("Hi", "someone@gmail.example"),
+], ids=["automated", "decline", "neutral"])
+async def test_threaded_mail_from_outside_the_campaign_is_not_kept(tmp_path, monkeypatch, body, sender):
+    """Only mail that is part of a campaign is shown: a threaded answer from an
+    address that is neither a subscriber nor a subject match is dropped, and
+    recorded as handled so it is not re-examined every scan."""
     T, rl = _patch_state(tmp_path, monkeypatch)
-    msgs = [_raw("help@desk.example", "Request #4411 Question About Firm?",
-                 "Your incident was received. Reply above this line to add a comment. We would love to hear updates.",
-                 "<t3@x>", "In-Reply-To: <sent-2@listmonk>\r\n")]
+    msgs = [_raw(sender, "Re: Question About Firm?", body, "<t3@x>",
+                 "In-Reply-To: <sent-2@listmonk>\r\n")]
+    monkeypatch.setattr(T, "_connect_imap", lambda: _InboxIMAP(msgs))
+    stats = await T._scan_and_track_replies_impl(_LM(), days_back=14)
+
+    assert rl.load_log() == []
+    assert stats["not_reply"] == 1
+    assert "<t3@x>" in rl.load_processed_message_ids()
+
+
+@pytest.mark.asyncio
+async def test_subscriber_reply_is_kept_even_when_no_campaign_subject_matches(tmp_path, monkeypatch):
+    """The campaign subject is a personalised template, so a subscriber's own
+    answer is recognised by the sender and carries ``campaign_checked``."""
+    T, rl = _patch_state(tmp_path, monkeypatch)
+    msgs = [_raw("prospect@example.com", "Re: Question About Firm?", "Not interested, thanks.", "<t4@x>",
+                 "In-Reply-To: <sent-3@listmonk>\r\n")]
     monkeypatch.setattr(T, "_connect_imap", lambda: _InboxIMAP(msgs))
     await T._scan_and_track_replies_impl(_LM(), days_back=14)
 
     [record] = rl.load_log()
-    assert record["sentiment"] == "auto_reply" and record["status"] == "unread"
-    assert record["campaign_id"] is None
+    assert record["from_email"] == "prospect@example.com"
+    assert record["campaign_checked"] is True
+
+
+def _stored(rid, email, sentiment, **extra):
+    return {"id": rid, "message_id": f"<{rid}@x>", "from_email": email, "subject": "Re: Hi",
+            "date": "Wed, 14 Oct 2026 10:00:00 +0000", "full_body": "text", "body_preview": "text",
+            "sentiment": sentiment, "status": "unread", "headers_checked": True,
+            "campaign_id": None, "campaign_name": None, **extra}
+
+
+@pytest.mark.asyncio
+async def test_prune_removes_stored_replies_outside_any_campaign(tmp_path, monkeypatch):
+    """Replies stored by older versions: strangers go, everything with a
+    campaign, a subscriber, a positive tone or a human's touch stays."""
+    T, rl = _patch_state(tmp_path, monkeypatch)
+    rl.save_log([
+        _stored("desk", "help@desk.example", "auto_reply"),                       # stranger
+        _stored("decline", "support@desk.example", "negative"),                   # stranger
+        _stored("hi", "someone@gmail.example", "neutral"),                        # stranger
+        _stored("sub", "prospect@example.com", "auto_reply"),                     # subscriber
+        _stored("camp", "colleague@firm.example", "negative", campaign_id=6, campaign_name="C"),
+        _stored("lead", "colleague@firm.example", "positive", status="lead"),     # interested
+        _stored("interested", "other@firm.example", "positive"),                  # interested, still unread
+        _stored("touched", "x@desk.example", "neutral", status="archived"),       # human acted
+    ])
+    removed = await T.prune_non_campaign_replies(_LM())
+
+    assert removed == 3
+    kept = {r["id"]: r for r in rl.load_log()}
+    assert set(kept) == {"sub", "camp", "lead", "interested", "touched"}
+    # Verified (by lookup or attribution) -> never judged again; a positive
+    # reply or a human-touched one needs no verdict and is not marked.
+    assert kept["sub"]["campaign_checked"] is True
+    assert kept["camp"]["campaign_checked"] is True
+    assert "campaign_checked" not in kept["lead"]
+
+
+@pytest.mark.asyncio
+async def test_prune_is_idempotent_and_skips_lookups_once_checked(tmp_path, monkeypatch):
+    T, rl = _patch_state(tmp_path, monkeypatch)
+    rl.save_log([_stored("sub", "prospect@example.com", "auto_reply")])
+    lm = _LM()
+    assert await T.prune_non_campaign_replies(lm) == 0
+    assert lm.lookups == 1
+    assert await T.prune_non_campaign_replies(lm) == 0
+    assert lm.lookups == 1
+
+
+@pytest.mark.asyncio
+async def test_prune_keeps_everything_when_listmonk_cannot_be_asked(tmp_path, monkeypatch):
+    """Not knowing is not "stranger": nothing is deleted on a failed lookup,
+    and the next scan decides."""
+    T, rl = _patch_state(tmp_path, monkeypatch)
+    rl.save_log([_stored("desk", "help@desk.example", "auto_reply")])
+    assert await T.prune_non_campaign_replies(_LM(fail=True)) == 0
+    assert [r["id"] for r in rl.load_log()] == ["desk"]
+    # ListMonk is back: the record is judged now.
+    assert await T.prune_non_campaign_replies(_LM()) == 1
+    assert rl.load_log() == []
 
 
 def test_header_backfill_targets_only_unchecked_records():
@@ -568,7 +650,8 @@ async def test_scan_backfills_a_record_older_than_the_scan_window(tmp_path, monk
          "status_source": "auto", "campaign_id": 6, "campaign_name": "Mixed Leads 12K"},
         {"id": "rep_gone", "message_id": "<gone@x>", "from_email": "jane@acme.com",
          "subject": "Re: Hi", "date": "Mon, 05 Oct 2026 11:00:00 +0000",
-         "full_body": "Who is this?", "sentiment": "neutral", "status": "unread", "status_source": "auto"},
+         "full_body": "Who is this?", "sentiment": "neutral", "status": "unread", "status_source": "auto",
+         "campaign_id": 6, "campaign_name": "Mixed Leads 12K"},
     ])
     await rl.mark_processed_message_ids(["<old-auto@x>", "<gone@x>"])
     archived = _raw("desk@vendor.example", "Request received", "We are looking into it.",
@@ -597,7 +680,7 @@ async def test_scan_retries_the_lookup_after_an_imap_error(tmp_path, monkeypatch
         {"id": "rep_old", "message_id": "<old-auto@x>", "from_email": "desk@vendor.example",
          "subject": "Request received", "date": "Mon, 05 Oct 2026 10:00:00 +0000",
          "full_body": "We are looking into it.", "sentiment": "neutral", "status": "unread",
-         "status_source": "auto"},
+         "status_source": "auto", "campaign_id": 6, "campaign_name": "Mixed Leads 12K"},
     ])
     await rl.mark_processed_message_ids(["<old-auto@x>"])
     archived = _raw("desk@vendor.example", "Request received", "We are looking into it.",

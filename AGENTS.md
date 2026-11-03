@@ -94,7 +94,7 @@ ListMonk-Pro/
 │   ├── test_full_review_fixes.py  # Regressions for the second full-codebase review (CSV blank headers, archive body, scan aborts, state races)
 │   ├── test_fourth_review_fixes.py # Regressions for the fourth review (bounce totals, auto-unblock scope, CSRF, unsubscribe scan vs \Seen, bulk payloads)
 │   ├── test_reply_filtering.py    # Inbox filtering: sentiment corpus, quote/echo stripping, auto-reply headers, not-a-reply gate
-│   ├── test_real_world_replies.py # Replies mis-filed on a live mailbox, multilingual corpus, precision guard, threaded-reply gate, header backfill
+│   ├── test_real_world_replies.py # Replies mis-filed on a live mailbox, multilingual corpus, precision guard, campaign-only gate + prune, header backfill
 │   ├── test_deliverability_controls.py # Per-setting edits (whitelist/validation) & footer unsubscribe link template toggle
 │   ├── test_email_format.py       # HTML ↔ plain switch: twin/text conversion, remembered setups, compile rollback, attribs kept on edit
 │   ├── conftest.py                # Resets module-level caches between tests
@@ -228,16 +228,23 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | `start_cache_updater` | 5 minutes | Refreshes in-memory hard bounce counts per campaign |
 
 ### 5a. Reply Classification (`app/services/imap_reply_tracker.py`)
-- **Only answers to our outreach are stored.** Newsletter/list mail (`List-Unsubscribe`,
-  `List-Id`, `Precedence: bulk|list|junk` without `In-Reply-To`/`References`) is skipped,
-  and so is mail whose sender is not a ListMonk subscriber, whose subject matches no
-  campaign, *and* that does not answer another message (`In-Reply-To`/`References`).
-  The subject test cannot vouch for a personalised subject template
-  (`{{ .Subscriber.Attribs… }}` never equals the sent subject), and prospects often reply
-  from another address than the one we mailed (a colleague, a ticket desk), so a threaded
-  reply from an unknown address is kept — unattributed (`campaign_id=null`) rather than
-  dropped. Skips are terminal (`not_reply` in scan stats, recorded in `reply_processed.json`);
+- **Only mail that is part of a campaign is stored.** Newsletter/list mail (`List-Unsubscribe`,
+  `List-Id`, `Precedence: bulk|list|junk` without `In-Reply-To`/`References`) is skipped, and
+  so is anything whose subject matches no campaign *and* whose sender is not a ListMonk
+  subscriber — a ticket desk answering from its own address, a stranger's "Re: Hi". The
+  subject test cannot vouch for a personalised subject template (`{{ .Subscriber.Attribs… }}`
+  never equals the sent subject), so in practice the sender decides. **One exception:** a
+  *positive* answer to one of our messages (`In-Reply-To`/`References`) from an unknown
+  address is kept, unattributed (`campaign_id=null`) — an interested prospect replying from
+  a colleague's or personal mailbox is a lead, and dropping it lost a genuine "Yes. Please
+  share." Skips are terminal (`not_reply` in scan stats, recorded in `reply_processed.json`);
   a failed subscriber lookup is **deferred** (`deferred`), never treated as "unknown sender".
+  The same rule is applied once to already-stored records (`prune_non_campaign_replies`,
+  `pruned` in scan stats, before re-classification so an automated reply that loses its
+  attribution there is not mistaken for a stranger): a record passes if it has a campaign,
+  its sender is a subscriber, it is positive, or a human already acted on it (any status but
+  `unread`); passing records are marked `campaign_checked` and never looked up again, and a
+  failed lookup leaves the record undecided.
 - **Quote stripping** (`imap_unsubscribe._extract_reply_only`, shared with the unsubscribe
   scanner) recognises Outlook `From:`/`Sent:` blocks without an address or leading digit, in
   common locales (`Von:/Gesendet:`, `De :/Envoyé :` …), localised attribution lines

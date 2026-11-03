@@ -1176,6 +1176,65 @@ async def reattribute_replies(
     return updated
 
 
+async def prune_non_campaign_replies(
+    listmonk: ListMonkClient, cache: Optional[dict] = None,
+) -> int:
+    """Remove stored replies that do not belong to any campaign.
+
+    Older versions kept every threaded answer from an unknown address. Those
+    are now filtered at ingestion (see the gate in the scan); this applies the
+    same rule to what is already stored, once per record: a record that passes
+    is marked ``campaign_checked`` and never looked up again.
+
+    Kept, always: a reply with a campaign, a reply from a ListMonk subscriber,
+    a positive reply (an interested prospect who answers from another address
+    is a lead, however they reached us), and anything a human already acted on
+    (any status other than ``unread``). A failed ListMonk lookup leaves the
+    record undecided for the next scan -- not knowing is not "stranger".
+    """
+    cache = cache if cache is not None else {}
+    verdicts: dict[str, bool] = {}
+    for r in load_log():
+        if r.get("campaign_checked") or not r.get("id"):
+            continue
+        if r.get("campaign_id"):
+            # Attributed to a campaign: the evidence is on the record. Marked
+            # now because an automated reply loses its attribution when it is
+            # re-classified, and must not then look like a stranger.
+            verdicts[str(r["id"])] = True
+            continue
+        sender = (r.get("from_email") or "").strip().lower()
+        if r.get("sentiment") == "positive" or r.get("status") != "unread" or not sender:
+            # Needs no lookup and is never removed. Not marked as checked:
+            # a later re-classification may change what applies to it.
+            continue
+        subscriber, ok = await _lookup_subscriber(listmonk, sender, cache)
+        if not ok:
+            continue
+        verdicts[str(r["id"])] = subscriber is not None
+
+    if not verdicts:
+        return 0
+    async with _log_lock:
+        records = load_log()
+        kept: list[dict] = []
+        removed = marked = 0
+        for r in records:
+            keep = verdicts.get(str(r.get("id")))
+            # Re-check the conditions under the lock: the record may have been
+            # actioned or re-tagged since the lookup.
+            if keep is False and r.get("status") == "unread" and r.get("sentiment") != "positive":
+                removed += 1
+                continue
+            if keep is True and not r.get("campaign_checked"):
+                r["campaign_checked"] = True
+                marked += 1
+            kept.append(r)
+        if removed or marked:
+            save_log(kept)
+    return removed
+
+
 async def _ingest_inbox_dsn(
     listmonk: ListMonkClient,
     msg: email.message.EmailMessage,
@@ -1356,6 +1415,8 @@ async def _scan_and_track_replies_impl(
         # Messages left for the next scan because ListMonk could not be asked
         # whether the sender is a subscriber.
         "deferred": 0,
+        # Stored records removed because they are not part of any campaign.
+        "pruned": 0,
     }
 
     # Opt-in auto-blocklist toggles (reply_settings.json), read once per
@@ -1461,6 +1522,19 @@ async def _scan_and_track_replies_impl(
                 )
     except Exception as e:
         logger.warning(f"[ReplyTracker] Body repair pass failed (non-fatal): {e}")
+
+    # Apply the campaign-only rule to what is already stored. Runs before the
+    # re-classification: an automated reply is stripped of its campaign there,
+    # and attribution is the evidence that the record belonged to one.
+    try:
+        stats["pruned"] = await prune_non_campaign_replies(listmonk, sub_cache)
+        if stats["pruned"]:
+            logger.info(
+                f"[ReplyTracker] Removed {stats['pruned']} stored reply record(s) "
+                "that are not part of any campaign"
+            )
+    except Exception as e:
+        logger.warning(f"[ReplyTracker] Non-campaign prune failed (non-fatal): {e}")
 
     # Judge old records by the automation headers they were stored without.
     # Runs before the re-classification below, which then acts on the verdict.
@@ -1596,23 +1670,25 @@ async def _scan_and_track_replies_impl(
             continue
         clean_subj = _clean_subject_for_matching(subject)
         subscriber = None
-        # A message that answers another message (In-Reply-To / References) is
-        # a reply to something this mailbox sent. That matters because the
-        # subject test above cannot vouch for it: a personalised subject
-        # ("{{ .Subscriber.Attribs.subject }}") never equals the campaign's
-        # template text, and prospects routinely answer from another address
-        # than the one we wrote to (a colleague, a ticket desk, a personal
-        # mailbox). Dropping those lost the genuine "Yes. Please share." lead
-        # whose sender was not a ListMonk subscriber.
+        # Only mail that is part of a campaign is kept: the subject matches one
+        # of our campaigns, or the sender is one of our ListMonk subscribers.
+        # Anything else (a ticket desk answering from its own address, a
+        # stranger's "Re: Hi") is not shown. One exception: a *positive* answer
+        # to one of our messages (In-Reply-To / References) is an interested
+        # prospect replying from another address (a colleague, a personal
+        # mailbox) -- the campaign subject is usually a personalised template
+        # that never equals the text we sent, so the subject test cannot vouch
+        # for it. Dropping those lost a genuine "Yes. Please share." lead.
         answers_a_message = bool(msg.get("In-Reply-To") or msg.get("References"))
-        if not any(_subject_matches(clean_subj, c) for c in campaigns):
+        subject_hit = any(_subject_matches(clean_subj, c) for c in campaigns)
+        if not subject_hit:
             subscriber, lookup_ok = await _lookup_subscriber(listmonk, from_email, sub_cache)
             if not lookup_ok:
                 # ListMonk unreachable: not knowing is not "unknown sender".
                 # Leave the message unprocessed so the next scan decides.
                 stats["deferred"] += 1
                 continue
-            if subscriber is None and not answers_a_message:
+            if subscriber is None and not (answers_a_message and sentiment == "positive"):
                 stats["not_reply"] += 1
                 if state_id:
                     new_msg_ids.append(state_id)
@@ -1683,6 +1759,10 @@ async def _scan_and_track_replies_impl(
             # Judged with its automation headers already; the header backfill
             # (collect_header_backfills) skips these.
             "headers_checked": True,
+            # Passed the campaign gate on evidence (subject or subscriber), so
+            # prune_non_campaign_replies has nothing left to look up. A
+            # positive reply kept by the exception is not marked: it has none.
+            "campaign_checked": bool(subject_hit or subscriber is not None),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
