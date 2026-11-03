@@ -701,11 +701,14 @@ const App = {
             if (!count) return '';
             const cfg = this.configs[key] || {};
             const noun = cfg.noun || 'item';
+            // Pages whose noun does not pluralise with a plain "s" ("reply" →
+            // "replies") pass `plural`; everyone else keeps noun + "s".
+            const label = count === 1 ? noun : (cfg.plural || `${noun}s`);
             const actions = (cfg.actions || []).map(a =>
                 `<button class="btn btn-sm ${a.danger ? 'btn-danger' : ''}" onclick="${a.onclick}">${a.label}</button>`
             ).join('');
             return `
-                <span class="bulk-bar-count"><strong>${count}</strong> ${noun}${count === 1 ? '' : 's'} selected</span>
+                <span class="bulk-bar-count"><strong>${count}</strong> ${label} selected</span>
                 <div class="action-btns">
                     ${actions}
                     <button class="btn btn-sm" onclick="App.selection.clear('${key}')">Clear</button>

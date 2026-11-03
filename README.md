@@ -259,7 +259,7 @@ ListMonk-Pro/
       unsubscribe_log.py       # Thread-safe persistent JSON state manager
       task_utils.py            # Fire-and-forget task references & shutdown drain
   static/
-    css/style.css              # Dark theme stylesheet with mode toggle & reply feed cards
+    css/style.css              # Dark theme stylesheet with mode toggle & replies inbox
     js/
       api.js                   # Fetch API wrapper with 401 handling
       app.js                   # Single-Page Application router, mode switcher & onboarding
@@ -269,7 +269,7 @@ ListMonk-Pro/
       converter.js             # CSV converter UI, column mapping, and import modal
       deliverability.js        # Deliverability pre-flight audit checklist & 1-click presets
       lists.js                 # Mailing list management
-      replies.js               # Prospect reply feed, sentiment badges, hot lead flagging
+      replies.js               # Replies inbox: sentiment tabs, list + reading pane, hot lead flagging
       settings.js              # Settings UI (scheduler, auto-unblock, unsubscribe toggles)
       subscribers.js           # Subscriber management, search, edit modal, bulk actions
       unsubscribes.js          # Campaign-grouped unsubscribe view, source badges, undo/reset

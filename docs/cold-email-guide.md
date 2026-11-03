@@ -52,8 +52,9 @@ In cold email, **Reply Rate** is the primary success metric (not open rate).
    - 🔴 **Not Interested**: Detects opt-outs (*"unsubscribe"*, *"not interested"*, *"stop"*).
 4. **Campaign Attribution**: Matches incoming replies to active ListMonk campaigns by subject line, recipient, or `In-Reply-To` headers.
 5. **Feed & Lead Management**:
-   - Replies appear in real-time under `#/replies`.
-   - 1-click status actions: **Mark as Hot Lead**, **Copy Email**, **Blocklist / Unsubscribe**.
+   - Replies appear in real-time under `#/replies` as an inbox: the sentiment tabs at the top filter the list, the selected reply is read in the pane beside it (`J` / `K` or the arrow keys move between replies).
+   - Set a reply's status from the pane header (**Unread**, **Hot lead**, **Replied**, **Archived**), **Copy Email**, or **Blocklist / Unsubscribe** the sender.
+   - Hot-lead flagging, auto-blocklisting and the scan interval live under the **Automation** button.
 
 ---
 

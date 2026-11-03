@@ -64,8 +64,9 @@
     --glass-bg: var(--bg-surface);
     --input-bg: var(--bg-input);
     --input-border: var(--glass-border);
-    /* Card surface alias: .reply-card / .onboarding-modal reference this and
-       must follow the theme like every other surface token. */
+    /* Card surface alias: .onboarding-modal references this (the reply feed's
+       cards used to as well) and must follow the theme like every other
+       surface token. */
     --bg-card: var(--bg-surface);
     /* Explicit transition list (never `all`): hover/focus feedback stays on
        repaint/compositor properties instead of animating layout. */
@@ -1051,7 +1052,10 @@ td .action-btns {
 /* Compact form controls — the reply feed's per-card status selects reference
    these; without them the selects rendered at full input size. */
 .form-control {
-    background: var(--bg-input);
+    /* background-color, not the shorthand: on a <select> the shorthand wiped
+       the global arrow's no-repeat/position, so the light theme tiled the
+       chevron across the whole control and the dark theme lost it. */
+    background-color: var(--bg-input);
     border: 1px solid var(--glass-border);
     color: var(--text-primary);
     border-radius: var(--radius-sm);
@@ -1558,30 +1562,6 @@ tbody tr.row-selected td.cell-actions {
 
 tbody tr.row-selected td:first-child {
     box-shadow: inset 3px 0 0 var(--primary);
-}
-
-/* Card-based pages (Reply feed) reuse the same checkbox and highlight. */
-.reply-card.selected {
-    border-color: var(--primary);
-    box-shadow: 0 0 0 1px var(--primary-glow), var(--glass-shadow);
-}
-
-.reply-card-select {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 0.8rem;
-    color: var(--text-secondary);
-    cursor: pointer;
-    user-select: none;
-}
-
-.reply-card-select input[type="checkbox"] {
-    width: 16px;
-    height: 16px;
-    margin: 0;
-    cursor: pointer;
-    accent-color: var(--primary);
 }
 
 /* ── Charts Grid ───────────────────────────────────────────── */
@@ -2671,7 +2651,6 @@ td .tag {
     .modal,
     .toast,
     .content-area,
-    .reply-card,
     .campaign-card {
         backdrop-filter: none !important;
         -webkit-backdrop-filter: none !important;
@@ -3141,33 +3120,26 @@ td .tag {
     padding: 10px;
 }
 
-/* Replies Feed & Cards */
-.replies-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 14px;
-    flex-wrap: wrap;
-}
+/* ==========================================================================
+   Replies Inbox
+   A triage layout: summary strip (totals + sentiment tabs), one compact
+   toolbar, a scannable list on the left and the selected reply pinned on the
+   right. Sentiment colour travels in a single custom property (--sent) set by
+   the .sent-* classes, so rows, tabs, badges and the distribution bar always
+   agree. Everything sits on the existing glass surfaces and indigo accent.
+   ========================================================================== */
 
-/* The search box takes its own row and the filter group sits below it. With
-   both on one line the search was squeezed to ~450px while "Select page" plus
-   the two selects and the scan button stacked into four rows beside it. */
-.replies-toolbar .search-input-wrap {
-    flex: 1 1 100%;
-}
+.sent-positive { --sent: #34d399; }
+.sent-neutral { --sent: #94a3b8; }
+.sent-auto { --sent: #7c8ba1; }
+.sent-negative { --sent: #ff5c8a; }
 
-.replies-toolbar .replies-filters {
-    flex: 1 1 auto;
-}
+[data-theme="light"] .sent-positive { --sent: #059669; }
+[data-theme="light"] .sent-neutral { --sent: #475569; }
+[data-theme="light"] .sent-auto { --sent: #64748b; }
+[data-theme="light"] .sent-negative { --sent: #dc2626; }
 
-/* The global `select { width: 100% }` made each filter take a whole row, so
-   three controls stacked instead of sitting side by side. */
-.replies-filters .filter-select {
-    width: auto;
-    flex: 0 1 auto;
-}
-
+/* Shared search & filter controls (search box + compact selects). */
 .search-input-wrap {
     position: relative;
     flex: 1;
@@ -3193,194 +3165,973 @@ td .tag {
     padding-left: 36px;
 }
 
-.replies-filters {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
-}
-
 .filter-select {
     min-width: 150px;
-    padding: 8px 12px;
+    /* Right padding keeps the label clear of the dropdown arrow. */
+    padding: 8px 36px 8px 12px;
 }
 
-/* Opt-in auto-blocklist switches in the replies toolbar: compact checkbox
-   labels that sit beside the scan button and never stretch like form
-   controls do. */
-.auto-blocklist-toggle {
+/* ── Summary strip ─────────────────────────────────────────── */
+.reply-hero {
+    display: grid;
+    grid-template-columns: minmax(200px, 270px) minmax(0, 1fr);
+    gap: 32px;
+    align-items: center;
+    padding: 22px 28px;
+    margin-bottom: 14px;
+}
+
+.reply-eyebrow {
+    font-size: 0.67rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.reply-hero-figure {
+    min-width: 0;
+}
+
+.reply-hero-total {
+    display: flex;
+    align-items: baseline;
+    gap: 9px;
+    margin-top: 6px;
+}
+
+.reply-hero-number {
+    font-family: var(--font-display);
+    font-size: 3rem;
+    font-weight: 600;
+    line-height: 1;
+    letter-spacing: -0.045em;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
+}
+
+.reply-hero-unit {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+.reply-hero-caption {
+    margin-top: 10px;
+    font-size: 0.79rem;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+
+.reply-hero-caption strong {
+    color: var(--text-secondary);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.reply-hero-note {
+    display: block;
+    font-size: 0.74rem;
+    opacity: 0.85;
+}
+
+.reply-hero-body {
+    min-width: 0;
+    padding-left: 32px;
+    border-left: 1px solid var(--glass-border);
+}
+
+/* One segment per sentiment, sized by its count. Automated replies are
+   hatched: they are left out of the human reply rate. */
+.reply-dist {
+    display: flex;
+    gap: 3px;
+    height: 8px;
+    overflow: hidden;
+    border-radius: 4px;
+    background: var(--bg-input);
+}
+
+.reply-dist-seg {
+    flex: 1 1 0;
+    min-width: 4px;
+    border-radius: 3px;
+    background: var(--sent);
+}
+
+.reply-dist-seg.sent-auto {
+    background: repeating-linear-gradient(135deg, var(--sent) 0 3px, transparent 3px 6px);
+}
+
+.reply-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 14px;
+}
+
+.reply-tab {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    width: auto;
-    margin: 0;
-    padding: 6px 10px;
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    font-size: 0.82rem;
+    gap: 8px;
+    padding: 6px 12px 6px 10px;
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-pill);
+    background: transparent;
     color: var(--text-secondary);
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: 600;
     cursor: pointer;
-    white-space: nowrap;
     transition: var(--transition-ui);
 }
 
-.auto-blocklist-toggle:hover {
+.reply-tab:hover {
+    background: var(--bg-surface-hover);
+    border-color: var(--glass-border-hover);
+    color: var(--text-primary);
+}
+
+.reply-tab:focus-visible,
+.reply-seg-btn:focus-visible,
+.reply-icon-btn:focus-visible,
+.reply-clear:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+}
+
+.reply-tab-dot {
+    flex-shrink: 0;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--sent, var(--primary));
+}
+
+/* Hollow dot: the same "not a human" cue as the hatched segment. */
+.reply-tab.sent-auto .reply-tab-dot {
+    background: transparent;
+    box-shadow: inset 0 0 0 1.5px var(--sent);
+}
+
+.reply-tab-count {
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+}
+
+.reply-tab.is-zero:not(.is-active) {
+    opacity: 0.6;
+}
+
+.reply-tab.is-active {
+    background: var(--primary-subdued);
     border-color: var(--primary);
     color: var(--text-primary);
 }
 
-.auto-blocklist-toggle input {
-    width: auto;
-    margin: 0;
-    accent-color: var(--primary);
+.reply-tab.is-active .reply-tab-count {
+    color: var(--primary-soft);
 }
 
-.reply-card {
-    border: 1px solid var(--border-color);
-    background: var(--bg-card);
-    border-radius: 12px;
-    padding: 20px;
-    margin-bottom: 16px;
-    transition: var(--transition-ui);
+[data-theme="light"] .reply-tab.is-active .reply-tab-count {
+    color: var(--primary);
 }
 
-.reply-card.lead-highlight {
-    border-left: 4px solid #10b981;
-    background: linear-gradient(90deg, rgba(16, 185, 129, 0.05) 0%, var(--bg-card) 20%);
-}
-
-.reply-header {
+/* ── Toolbar ───────────────────────────────────────────────── */
+.reply-toolbar {
     display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 16px;
-    margin-bottom: 12px;
     flex-wrap: wrap;
-}
-
-.reply-sender-info {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-}
-
-.reply-avatar {
-    width: 40px;
-    height: 40px;
-    border-radius: 50%;
-    background: linear-gradient(135deg, var(--primary), #3b82f6);
-    color: #ffffff;
-    font-weight: 700;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 1.1rem;
-    flex-shrink: 0;
-}
-
-.reply-sender-name strong {
-    color: var(--text-primary);
-    font-size: 0.95rem;
-}
-
-.reply-sender-email {
-    color: var(--text-muted);
-    font-size: 0.82rem;
-    margin-left: 6px;
-}
-
-.reply-meta {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 3px;
-    font-size: 0.78rem;
-    color: var(--text-secondary);
-}
-
-.campaign-tag {
-    background: var(--bg-input);
-    padding: 2px 8px;
-    border-radius: 4px;
-    border: 1px solid var(--border-color);
-}
-
-/* A reply the scanner could not attribute to any campaign (e.g. an ad-hoc
-   test mail). Dashed + muted so it never reads as a real campaign name. */
-.campaign-tag-unattributed {
-    border-style: dashed;
-    color: var(--text-muted);
-}
-
-.reply-header-actions {
-    display: flex;
     align-items: center;
     gap: 10px;
-}
-
-.sentiment-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 4px 10px;
-    border-radius: 9999px;
-    font-size: 0.8rem;
-    font-weight: 600;
-}
-
-.sentiment-badge.badge-positive {
-    background: rgba(16, 185, 129, 0.15);
-    color: #10b981;
-    border: 1px solid rgba(16, 185, 129, 0.35);
-}
-
-.sentiment-badge.badge-neutral {
-    background: rgba(100, 116, 139, 0.15);
-    /* #64748b only reached ~3.2:1 on this tinted fill; the lifted slate keeps
-       the badge above the 4.5:1 WCAG AA threshold (same fix as --text-muted). */
-    color: #94a3b8;
-    border: 1px solid rgba(100, 116, 139, 0.35);
-}
-
-.sentiment-badge.badge-auto-reply {
-    background: rgba(100, 116, 139, 0.15);
-    color: #94a3b8;
-    border: 1px solid rgba(100, 116, 139, 0.35);
-}
-
-.sentiment-badge.badge-negative {
-    background: rgba(244, 63, 94, 0.15);
-    color: #f43f5e;
-    border: 1px solid rgba(244, 63, 94, 0.35);
-}
-
-.reply-subject {
-    font-size: 0.92rem;
-    color: var(--text-primary);
-    margin-bottom: 10px;
-}
-
-.reply-body-container {
-    background: var(--bg-input, rgba(15, 23, 42, 0.4));
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    padding: 12px 16px;
+    padding: 12px 14px;
     margin-bottom: 14px;
 }
 
-.reply-body-text {
-    font-size: 0.88rem;
-    color: var(--text-secondary);
-    line-height: 1.6;
-    white-space: pre-wrap;
-    word-break: break-word;
+.reply-toolbar .search-input-wrap {
+    flex: 1 1 180px;
+    min-width: 180px;
 }
 
-.reply-actions {
+/* The repaint wrapper adds no box of its own: its controls wrap in the
+   toolbar's flow, so Scan stays on the search row whenever there is room. */
+#repliesFilters {
+    display: contents;
+}
+
+/* The global `select { width: 100% }` would give the campaign picker a row. */
+.reply-toolbar .filter-select {
+    width: auto;
+    flex: 0 1 auto;
+    min-width: 140px;
+    max-width: 190px;
+}
+
+.reply-scan-btn {
+    margin-left: auto;
+}
+
+.reply-seg {
+    display: inline-flex;
+    max-width: 100%;
+    gap: 2px;
+    padding: 3px;
+    overflow-x: auto;
+    border: 1px solid var(--glass-border-hover);
+    border-radius: var(--radius-pill);
+    background: var(--bg-input);
+    scrollbar-width: none;
+}
+
+.reply-seg::-webkit-scrollbar {
+    display: none;
+}
+
+.reply-seg-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 6px 11px;
+    border: 0;
+    border-radius: var(--radius-pill);
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: var(--transition-ui);
+}
+
+.reply-seg-btn:hover:not(.is-active) {
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
+}
+
+.reply-seg-btn.is-active {
+    background: var(--primary);
+    color: #ffffff;
+    box-shadow: 0 2px 10px var(--primary-glow);
+}
+
+.reply-auto-btn[aria-expanded="true"] {
+    border-color: var(--primary);
+    background: var(--primary-subdued);
+}
+
+.reply-count-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    background: var(--primary-subdued);
+    color: var(--primary-soft);
+    font-size: 0.7rem;
+    font-variant-numeric: tabular-nums;
+}
+
+[data-theme="light"] .reply-count-chip {
+    color: var(--primary);
+}
+
+/* ── Automation panel ──────────────────────────────────────── */
+.reply-auto {
+    padding: 20px 22px;
+    margin-bottom: 14px;
+}
+
+.reply-auto-head h3 {
+    margin: 0 0 4px;
+    font-size: 0.98rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.reply-auto-head p {
+    margin: 0 0 16px;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+
+.reply-auto-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 12px;
+}
+
+.reply-interval {
+    align-items: center;
+    cursor: default;
+}
+
+.reply-interval:hover {
+    border-color: var(--glass-border);
+}
+
+.reply-interval .filter-select {
+    flex-shrink: 0;
+    width: auto;
+    min-width: 130px;
+}
+
+/* ── List + reading pane ───────────────────────────────────── */
+.reply-layout {
+    display: grid;
+    grid-template-columns: minmax(340px, 420px) minmax(0, 1fr);
+    gap: 16px;
+    align-items: start;
+}
+
+.reply-list {
+    padding: 0;
+    overflow: hidden;
+}
+
+.reply-list-head {
     display: flex;
     align-items: center;
     gap: 8px;
+    padding: 8px 14px 8px 12px;
+    border-bottom: 1px solid var(--glass-border);
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}
+
+.reply-select-all {
+    margin: 0;
+    font-weight: 600;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.reply-list-range {
+    font-variant-numeric: tabular-nums;
+}
+
+.reply-clear {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: 4px;
+    padding: 3px 9px;
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-pill);
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 0.72rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: var(--transition-ui);
+}
+
+.reply-clear:hover {
+    border-color: var(--glass-border-hover);
+    color: var(--text-primary);
+}
+
+.reply-kbd-hint {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+    font-size: 0.72rem;
+    white-space: nowrap;
+}
+
+.reply-kbd-hint kbd {
+    padding: 1px 5px;
+    border: 1px solid var(--glass-border-hover);
+    border-radius: 4px;
+    background: var(--bg-input);
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 0.68rem;
+}
+
+.reply-item {
+    position: relative;
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr);
+    border-bottom: 1px solid var(--glass-border);
+    transition: background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.reply-item:last-child {
+    border-bottom: 0;
+}
+
+.reply-item:hover {
+    background: var(--bg-surface-hover);
+}
+
+.reply-item:has(.row-select:checked) {
+    background: color-mix(in srgb, var(--primary) 8%, transparent);
+}
+
+.reply-item.is-active {
+    background: var(--primary-subdued);
+    box-shadow: inset 3px 0 0 var(--primary);
+}
+
+.reply-item-check {
+    display: flex;
+    justify-content: center;
+    padding-top: 17px;
+}
+
+.reply-item-main {
+    display: grid;
+    grid-template-columns: 38px minmax(0, 1fr);
+    gap: 12px;
+    width: 100%;
+    min-width: 0;
+    padding: 14px 16px 14px 2px;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.reply-item-main:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: -2px;
+    border-radius: var(--radius-md);
+}
+
+.reply-item.is-archived .reply-item-main {
+    opacity: 0.62;
+}
+
+.reply-item.is-archived:hover .reply-item-main,
+.reply-item.is-archived.is-active .reply-item-main {
+    opacity: 1;
+}
+
+.reply-avatar {
+    position: relative;
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--primary), #3b82f6);
+    color: #ffffff;
+    font-size: 1rem;
+    font-weight: 700;
+}
+
+.reply-avatar-lg {
+    width: 48px;
+    height: 48px;
+    font-size: 1.2rem;
+}
+
+/* Sentiment rides on the avatar corner so the row needs no extra column. */
+.reply-avatar-dot {
+    position: absolute;
+    right: -2px;
+    bottom: -2px;
+    width: 13px;
+    height: 13px;
+    border: 2px solid var(--bg-table-sticky);
+    border-radius: 50%;
+    background: var(--sent);
+}
+
+.sent-auto .reply-avatar {
+    background: var(--bg-surface-hover);
+    box-shadow: inset 0 0 0 1px var(--glass-border-hover);
+    color: var(--text-secondary);
+}
+
+.sent-auto .reply-avatar-dot {
+    border-color: var(--sent);
+    background: var(--bg-table-sticky);
+}
+
+.reply-item-body {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.reply-item-top {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+}
+
+.reply-item-name {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.reply-item-name-text,
+.reply-item-subject {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.reply-unread-dot {
+    flex-shrink: 0;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--primary);
+    box-shadow: 0 0 0 3px var(--primary-subdued);
+}
+
+.reply-item-time {
+    flex-shrink: 0;
+    font-size: 0.73rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+}
+
+.reply-item-subject {
+    font-size: 0.83rem;
+    color: var(--text-secondary);
+}
+
+.reply-item.is-unread .reply-item-subject {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.reply-item-snippet {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+}
+
+.reply-item-snippet.is-empty {
+    font-style: italic;
+}
+
+.reply-item-tags {
+    display: flex;
     flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 7px;
+}
+
+.reply-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 100%;
+    padding: 2px 9px;
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-pill);
+    background: var(--bg-input);
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+    font-weight: 600;
+    line-height: 1.5;
+    white-space: nowrap;
+}
+
+.reply-tag-lg {
+    padding: 4px 11px;
+    font-size: 0.76rem;
+}
+
+.reply-tag-sent {
+    border-color: color-mix(in srgb, var(--sent) 34%, transparent);
+    background: color-mix(in srgb, var(--sent) 13%, transparent);
+    color: var(--sent);
+}
+
+/* Dashed outline, like the hatched segment: an automated reply, not a person. */
+.sent-auto .reply-tag-sent {
+    border-style: dashed;
+}
+
+.reply-tag-lead {
+    border-color: rgba(245, 158, 11, 0.38);
+    background: var(--lemon-bg);
+    color: #fbbf24;
+}
+
+[data-theme="light"] .reply-tag-lead {
+    color: #b45309;
+}
+
+.reply-tag-blocked {
+    border-color: rgba(234, 34, 97, 0.35);
+    background: var(--ruby-bg);
+    color: #ff5c8a;
+}
+
+[data-theme="light"] .reply-tag-blocked {
+    color: var(--ruby);
+}
+
+.reply-tag-camp {
+    max-width: 210px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* A reply no campaign claimed (e.g. an ad-hoc test mail). Dashed + muted so
+   it never reads as a real campaign name. */
+.reply-tag-camp.is-unattributed {
+    border-style: dashed;
+    background: transparent;
+    color: var(--text-muted);
+}
+
+/* ── Reading pane ──────────────────────────────────────────── */
+.reply-detail {
+    position: sticky;
+    top: 12px;
+    display: flex;
+    flex-direction: column;
+    min-height: 360px;
+    max-height: calc(100vh - var(--topbar-height) - 40px);
+    padding: 0;
+    overflow: hidden;
+}
+
+.reply-detail-top {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 14px 10px 12px;
+    border-bottom: 1px solid var(--glass-border);
+}
+
+/* The pane, not the viewport, decides how its header folds: it is ~680px wide
+   beside the list on a desktop but 358px when it replaces the list on a phone.
+   Narrow: navigation and actions share the first row, and the status switch
+   takes a full-width row of its own instead of overflowing. */
+.reply-detail {
+    container: reply-pane / inline-size;
+}
+
+@container reply-pane (max-width: 640px) {
+    .reply-detail-top .reply-seg {
+        order: 3;
+        flex: 1 1 100%;
+    }
+
+    .reply-detail-top .reply-seg-btn {
+        flex: 1 1 auto;
+        justify-content: center;
+    }
+}
+
+@container reply-pane (max-width: 430px) {
+    .reply-detail-pos {
+        display: none;
+    }
+}
+
+.reply-detail-nav,
+.reply-detail-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.reply-back svg {
+    flex-shrink: 0;
+}
+
+.reply-back {
+    display: none;
+}
+
+.reply-icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: 1px solid var(--glass-border);
+    border-radius: 50%;
+    background: var(--bg-surface-elevated);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: var(--transition-ui);
+}
+
+.reply-icon-btn:hover:not(:disabled) {
+    border-color: var(--glass-border-hover);
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
+}
+
+.reply-icon-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.reply-icon-btn.is-danger {
+    border-color: rgba(234, 34, 97, 0.35);
+    background: var(--ruby-bg);
+    color: #ff5c8a;
+}
+
+[data-theme="light"] .reply-icon-btn.is-danger {
+    color: var(--ruby);
+}
+
+.reply-icon-btn.is-danger:hover:not(:disabled) {
+    border-color: var(--ruby);
+    background: var(--ruby);
+    color: #ffffff;
+}
+
+.reply-detail-pos {
+    min-width: 54px;
+    font-size: 0.76rem;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+    color: var(--text-muted);
+}
+
+.reply-detail-scroll {
+    flex: 1;
+    min-height: 0;
+    padding: 22px 26px 26px;
+    overflow-y: auto;
+}
+
+.reply-detail-from {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+.reply-detail-who {
+    min-width: 0;
+}
+
+.reply-detail-name {
+    font-family: var(--font-display);
+    font-size: 1.15rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+}
+
+.reply-detail-email {
+    font-size: 0.84rem;
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+    user-select: all;
+}
+
+.reply-detail-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+.reply-detail-subject {
+    margin: 18px 0 0;
+    font-family: var(--font-display);
+    font-size: 1.3rem;
+    font-weight: 500;
+    line-height: 1.3;
+    letter-spacing: -0.02em;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+}
+
+.reply-facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 14px 24px;
+    margin: 16px 0 0;
+    padding: 14px 0;
+    border-top: 1px solid var(--glass-border);
+    border-bottom: 1px solid var(--glass-border);
+}
+
+.reply-facts dt {
+    font-size: 0.67rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.reply-facts dd {
+    margin: 4px 0 0;
+    font-size: 0.86rem;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+}
+
+.reply-facts dd.is-muted {
+    color: var(--text-muted);
+}
+
+.reply-message {
+    margin-top: 18px;
+    padding: 18px 20px;
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font-size: 0.92rem;
+    line-height: 1.7;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.reply-message.is-empty {
+    font-style: italic;
+    color: var(--text-muted);
+}
+
+.reply-detail-empty {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 48px 24px;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    text-align: center;
+}
+
+/* ── Empty state ───────────────────────────────────────────── */
+.reply-empty {
+    gap: 6px;
+    padding: 56px 24px;
+}
+
+.reply-empty-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 64px;
+    height: 64px;
+    margin-bottom: 12px;
+    border-radius: 16px;
+    background: var(--primary-subdued);
+    color: var(--primary-soft);
+}
+
+[data-theme="light"] .reply-empty-icon {
+    color: var(--primary);
+}
+
+.reply-empty p {
+    max-width: 460px;
+    margin: 0 0 14px;
+    color: var(--text-secondary);
+}
+
+#repliesPager {
+    margin-top: 16px;
+}
+
+/* ── Replies: narrower screens ─────────────────────────────── */
+@media (max-width: 1100px) {
+    .reply-layout {
+        grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
+    }
+}
+
+/* Below 900px the panes stop sharing a row: the list is the page, and opening
+   a reply swaps it for the reading pane (with a way back). */
+@media (max-width: 900px) {
+    .reply-hero {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 18px;
+        padding: 20px;
+    }
+
+    .reply-hero-body {
+        padding-top: 18px;
+        padding-left: 0;
+        border-top: 1px solid var(--glass-border);
+        border-left: 0;
+    }
+
+    .reply-layout {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .reply-layout .reply-detail {
+        display: none;
+        position: static;
+        max-height: none;
+    }
+
+    .reply-layout.is-reading .reply-list {
+        display: none;
+    }
+
+    .reply-layout.is-reading .reply-detail {
+        display: flex;
+    }
+
+    /* Reading takes the whole screen: summary, toolbar, selection bar and
+       pager step aside so the reply starts at the top. */
+    .reply-page.is-reading > :not(#repliesBody) {
+        display: none;
+    }
+
+    .reply-detail-scroll {
+        overflow: visible;
+        padding: 18px 16px 22px;
+    }
+
+    .reply-back {
+        display: inline-flex;
+    }
+
+    .reply-kbd-hint {
+        display: none;
+    }
+
+    .reply-toolbar .filter-select {
+        flex: 1 1 100%;
+        max-width: none;
+    }
+
+    .reply-auto-btn,
+    .reply-scan-btn {
+        flex: 1 1 0;
+        margin-left: 0;
+    }
 }
 
 .btn-danger-outline {
