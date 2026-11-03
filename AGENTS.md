@@ -48,13 +48,14 @@ ListMonk-Pro/
 │       ├── listmonk_client.py     # Async HTTP client for ListMonk REST API (with paginate_all helper)
 │       ├── opener_cache.py        # In-memory campaign opener email cache with TTL & inflight deduplication
 │       ├── search_query.py        # Safe free-text → ListMonk ILIKE query builder (never raw `query`)
+│       ├── reply_i18n.py          # Non-English reply vocabulary (ack / refusal / interest / dead-address) merged into the classifier, plus opt-out phrases merged into the unsubscribe scanner
 │       ├── reply_log.py           # Persistent JSON storage for prospect replies and sentiments
 │       ├── task_utils.py          # Strong references for fire-and-forget tasks & shutdown drain
 │       ├── template_unsubscribe.py # Footer unsubscribe link toggle: reversibly hides/restores {{ UnsubscribeURL }} in campaign templates
 │       └── unsubscribe_log.py     # Persistent JSON state management for unsubscribe log/settings/processed
 ├── static/
 │   ├── css/
-│   │   └── style.css              # Dark theme CSS, segmented mode switcher, reply feed & cards
+│   │   └── style.css              # Dark theme CSS, segmented mode switcher, replies inbox (list + reading pane)
 │   ├── js/
 │   │   ├── analytics.js           # Campaign analytics charts, date filtering, link tracking
 │   │   ├── api.js                 # Centralized fetch wrapper with 401 redirect & error handling
@@ -66,7 +67,7 @@ ListMonk-Pro/
 │   │   ├── deliverability.js      # Deliverability audit with a control per setting (staged edits + save bar), 1-click presets
 │   │   │                          #   & per-campaign Email format switch (HTML design / Plain text)
 │   │   ├── lists.js               # List management, modal forms, tag pills, subscriber drill-down & exports
-│   │   ├── replies.js             # Prospect reply feed, sentiment badges, hot lead flagging, bulk triage
+│   │   ├── replies.js             # Replies inbox: sentiment tabs, list + pinned reading pane, hot lead flagging, bulk triage
 │   │   ├── settings.js            # Settings UI: send window scheduler, auto-unblock, unsubscribe settings
 │   │   ├── subscribers.js         # Subscriber/lead table: filters, edit modal, bulk list/blocklist/delete
 │   │   └── unsubscribes.js        # Campaign-grouped unsubscribe dashboard, source badges, bulk removal, undo reset
@@ -93,6 +94,7 @@ ListMonk-Pro/
 │   ├── test_full_review_fixes.py  # Regressions for the second full-codebase review (CSV blank headers, archive body, scan aborts, state races)
 │   ├── test_fourth_review_fixes.py # Regressions for the fourth review (bounce totals, auto-unblock scope, CSRF, unsubscribe scan vs \Seen, bulk payloads)
 │   ├── test_reply_filtering.py    # Inbox filtering: sentiment corpus, quote/echo stripping, auto-reply headers, not-a-reply gate
+│   ├── test_real_world_replies.py # Replies mis-filed on a live mailbox, multilingual corpus, precision guard, threaded-reply gate, header backfill
 │   ├── test_deliverability_controls.py # Per-setting edits (whitelist/validation) & footer unsubscribe link template toggle
 │   ├── test_email_format.py       # HTML ↔ plain switch: twin/text conversion, remembered setups, compile rollback, attribs kept on edit
 │   ├── conftest.py                # Resets module-level caches between tests
@@ -202,7 +204,7 @@ ListMonk-Pro/
 
 ### 4. Dual-Source Unsubscribe Engine
 - **IMAP Unsubscribe Monitor** (`app/services/imap_unsubscribe.py`):
-  - Scans primary inbox (`IMAP_*`) every hour for reply keywords (`"remove me"`, `"unsubscribe me"`, `"exclude me"`) in **every** message of the lookback window, read or unread — a request the human already opened in webmail must still be honoured (rule 13). A batched identity-header peek (`imap_helpers.fetch_state_ids`) skips messages already recorded in `unsubscribe_examined.json` (Message-ID / `From|Date|Subject` fingerprint, capped at 50,000) without downloading them; bodies are fetched with `BODY.PEEK[]` so examining never flips a message to read. On the first scan of a version with the examined set (file absent) the set is seeded once from messages already `\Seen` — the old scanner flagged everything it looked at, and "Undo All" relied on that, so upgrading never re-processes history. Blocking IMAP calls run via `asyncio.to_thread`.
+  - Scans primary inbox (`IMAP_*`) every hour for reply keywords (`"remove me"`, `"unsubscribe me"`, `"exclude me"` and their plural-subject forms `"remove us"`, `"unsubscribe us"`, `"exclude us"` — B2B prospects answer for their company) plus other plain instructions to stop the mail — `"please unsubscribe"`, `"stop emailing me"`, `"take us off your list"`, `"do not contact us"`, `"no further contact"`, a reply that is just `"STOP"`/`"Unsubscribe"` — and their equivalents in DE/FR/ES/IT/PT/NL/PL/DA/NO/SV (`reply_i18n.OPT_OUT_PATTERNS`). Only an *instruction aimed at the sender's own address* counts; a refusal ("not interested", `"nie jestem zainteresowany"`) does not unsubscribe, and neither do bare footer words (`"unsubscribe"`, `"désinscrire"`). Mail carrying RFC 3834 automation headers (`Auto-Submitted`, `X-Autoreply`, `Precedence: auto_reply`) is never acted on: a responder's footer is boilerplate, and acting on it would unenrol a real prospect who is merely away. The scan covers **every** message of the lookback window, read or unread — a request the human already opened in webmail must still be honoured (rule 13). A batched identity-header peek (`imap_helpers.fetch_state_ids`) skips messages already recorded in `unsubscribe_examined.json` (Message-ID / `From|Date|Subject` fingerprint, capped at 50,000) without downloading them; bodies are fetched with `BODY.PEEK[]` so examining never flips a message to read. On the first scan of a version with the examined set (file absent) the set is seeded once from messages already `\Seen` — the old scanner flagged everything it looked at, and "Undo All" relied on that, so upgrading never re-processes history. Blocking IMAP calls run via `asyncio.to_thread`.
   - Quote stripping (`_extract_reply_only`): ignores quoted history/template footers to eliminate false positives.
   - List-aware campaign matching: attributes replies to the latest campaign that targeted the subscriber's actual lists.
   - Actions: unenrolls subscriber from all lists, conditionally blocklists (if enabled in settings), logs to `unsubscribe_log.json`.
@@ -228,8 +230,13 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 ### 5a. Reply Classification (`app/services/imap_reply_tracker.py`)
 - **Only answers to our outreach are stored.** Newsletter/list mail (`List-Unsubscribe`,
   `List-Id`, `Precedence: bulk|list|junk` without `In-Reply-To`/`References`) is skipped,
-  and so is mail whose sender is not a ListMonk subscriber *and* whose subject matches no
-  campaign. Skips are terminal (`not_reply` in scan stats, recorded in `reply_processed.json`);
+  and so is mail whose sender is not a ListMonk subscriber, whose subject matches no
+  campaign, *and* that does not answer another message (`In-Reply-To`/`References`).
+  The subject test cannot vouch for a personalised subject template
+  (`{{ .Subscriber.Attribs… }}` never equals the sent subject), and prospects often reply
+  from another address than the one we mailed (a colleague, a ticket desk), so a threaded
+  reply from an unknown address is kept — unattributed (`campaign_id=null`) rather than
+  dropped. Skips are terminal (`not_reply` in scan stats, recorded in `reply_processed.json`);
   a failed subscriber lookup is **deferred** (`deferred`), never treated as "unknown sender".
 - **Quote stripping** (`imap_unsubscribe._extract_reply_only`, shared with the unsubscribe
   scanner) recognises Outlook `From:`/`Sent:` blocks without an address or leading digit, in
@@ -248,8 +255,38 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
   machine notices is decisive. **Body-only** away / acknowledgement / departure wording yields
   to an explicit human signal (`_HUMAN_OVERRIDE_PATTERNS`: "interested", "let's talk",
   "yes please" …) — never to calls, meetings or pricing, which vacation notices mention.
+- **Locales** (`app/services/reply_i18n.py`): German, French, Spanish, Italian, Portuguese,
+  Dutch, Polish and Danish/Norwegian/Swedish wording is appended to the same-named English
+  lists (`_NEGATIVE_PATTERNS`, `_ACK_PATTERNS` …) at import, so one classifier and one
+  ordering cover every language — a Polish "nie jestem zainteresowany" is `negative`, not
+  `neutral`. Spelling is accent-tolerant. **Precision rules, because a wrong `auto_reply`
+  tag can blocklist a real prospect when the auto-blocklist toggles are on:** acknowledgement
+  patterns match *receipt / promise-to-answer* phrasing only (never a bare "thanks for your
+  message"); dead-address phrases must sit next to a mailbox word ("no longer available" can
+  describe anything); and the human-signal override is deliberately narrow — explicit
+  interest / refusal only, never "call me" / "senden Sie mir" (vacation notices say those) or
+  "désinscrire" (footers do). Third-person promotional offers ("Wenn Sie interessiert sind …",
+  "Dear Interested Party") are filtered in every locale (`CONDITIONAL_OFFER_RE`).
+  B2B opt-outs are written for the company, so "remove **us**" / "take **us** off" are
+  refusals alongside the singular forms. New phrasing goes in `reply_i18n.py` with a case in
+  `tests/test_real_world_replies.py` — including a look-alike a person could write.
 - Re-classification re-strips stored bodies with the current rules and restores campaign
-  attribution (`reattribute_replies`) for records that stop being `auto_reply`.
+  attribution (`reattribute_replies`) for records that stop being `auto_reply`. An
+  `auto_reply` never carries a campaign: the clear also runs when the verdict is unchanged
+  (records stored before attribution was skipped for automated mail inflated the
+  per-campaign chart).
+- **Header backfill**: records stored before automation-header support have no `auto_header`
+  and no `headers_checked`. The scan re-fetches their message once (inside the normal scan
+  window) to read `Auto-Submitted` / `X-Autoreply`, stores the verdict, then re-classifies —
+  a responder with no tell-tale wording (e.g. a registration auto-reply) was otherwise a
+  neutral reply, or a fake Hot Lead, forever. New records are written with
+  `headers_checked: true`. Records whose message is older than the scan window (or beyond
+  its 200-message cap) are looked up by `SEARCH HEADER Message-ID` instead
+  (`lookup_header_verdicts`, at most `HEADER_LOOKUP_LIMIT` per scan, headers only via
+  `BODY.PEEK[HEADER]`, exact-id match because IMAP matches substrings). The verdict is final
+  whether the headers say nothing or the message has left the INBOX; an IMAP error is *not*
+  final and is retried. Message-IDs come from strangers, so only ids made of RFC 5322
+  characters (no quote / backslash / CRLF) are ever put into a search command.
 - `auto_tag_leads=false` keeps positive replies `unread` instead of promoting them to `lead`.
 
 ### 6. CSV Converter (`app/services/csv_converter.py`)
@@ -419,7 +456,7 @@ Every data page exposes row-level actions plus a multi-select bulk bar
 | Cold Outreach/Campaigns | View, Start/Pause/Resume, Test Send, Archive, Delete | Archive, Export Selected (CSV), Delete |
 | Templates | Preview, Duplicate, Edit, Set Default, Delete (search by name) | Delete |
 | Bounces | Delete | Export Selected (CSV), Delete Selected (plus the existing filter-wide Delete All) |
-| Replies & Leads | Status dropdown, Mark as Hot Lead, Copy Email, Full Details, Blocklist, Delete | Mark Hot Lead / Replied / Archived / Unread, Blocklist, Delete |
+| Replies & Leads | Reading pane: status switch (Unread / Hot lead / Replied / Archived), Copy Email, Blocklist, Delete (`J`/`K` or ↑/↓ move between replies) | Mark Hot Lead / Replied / Archived / Unread, Blocklist, Delete |
 | Unsubscribes | per-campaign Remove, Remove List (detail view), record removal | Delete Records for the selected campaign cards |
 
 Frontend conventions:
@@ -433,6 +470,27 @@ Frontend conventions:
   (`App.selection.clearAll()` in `App.route`).
 - Client-side CSVs (`Export Selected`) only cover rows loaded on the current page;
   the filter-wide exports still use the streaming server endpoints.
+- The bulk bar pluralises `noun` with a plain "s"; a noun that does not ("reply" →
+  "replies") passes `plural` to `App.selection.register`.
+
+Replies page (`static/js/replies.js`) is an inbox, not a feed of cards:
+
+- `render()` is the navigation entry and reads the deep-link query **once**;
+  every in-page change (filter, search, status, scan, bulk action) goes through
+  `reload()` → `refresh()`, which repaints only the data-dependent regions
+  (`#repliesHero`, `#repliesFilters`, `#repliesAuto`, `#repliesBody`, `#repliesPager`).
+  The search box and scroll position are therefore never rebuilt. Do not call
+  `render()` for an in-page change — a stale route query would override the filter
+  that was just chosen.
+- The sentiment tabs in the summary strip *are* the sentiment filter; the
+  auto-blocklist / auto-flag / scan-interval settings live in a collapsible
+  "Automation" panel. Sentiment colour is a single `--sent` custom property set by
+  `.sent-*` classes, so rows, tabs, badges and the distribution bar stay in sync.
+- The reading pane is `position: sticky` beside the list; below 900px it replaces
+  the list (`is-reading` on `#repliesPage` / `#repliesLayout`) and the page hides
+  its summary and toolbar so the reply opens at the top of the screen.
+- Everything interpolated into markup goes through `Replies._esc()` /
+  `Replies._arg()` (the latter for values inside `onclick` attributes).
 
 Backend conventions:
 

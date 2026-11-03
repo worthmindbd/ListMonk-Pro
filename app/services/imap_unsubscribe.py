@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from app.config import settings
+from app.services import reply_i18n as _i18n
 from app.services.listmonk_client import ListMonkClient
 from app.services.unsubscribe_log import (
     load_log, save_log, append_log, load_settings,
@@ -32,6 +33,7 @@ from app.services.imap_helpers import (
     safe_email_for_query, imap_date, extract_email_body,
     fetch_state_ids, message_state_id,
     strip_campaign_echo, campaign_echo_index_for,
+    automated_header_kind,
 )
 
 logger = logging.getLogger("imap_unsubscribe")
@@ -49,10 +51,42 @@ UNSUBSCRIBE_KEYWORDS = [
     "remove me",
     "unsubscribe me",
     "exclude me",
+    # B2B prospects answer for their company: "please remove us from your
+    # list". Same phrases, plural subject — an opt-out that was never acted on
+    # while the reply feed already tagged it "not interested".
+    "remove us",
+    "unsubscribe us",
+    "exclude us",
+]
+
+# Instructions that are not one of the literal phrases above but ask just as
+# plainly to stop the mail. Every one needs an object ("take us off your
+# list") or an explicit "no more mail"; a bare "unsubscribe" is only an
+# opt-out when it is the whole reply. "Don't stop emailing me" is a
+# compliment, hence the lookbehinds on the stop-verbs.
+_OPT_OUT_PATTERNS = [
+    r"\b(?:please|kindly|pls)\s+unsubscribe\b",
+    r"\b(?:i|we)(?:\s+(?:would\s+like|want|wish|need)|['’]d\s+like)\s+to\s+unsubscribe\b",
+    r"\btake\s+(?:me|us)\s+off\s+(?:of\s+)?(?:your|the|this|that|any|all)\s+(?:\w+\s+){0,2}"
+    r"(?:lists?|mailing|distribution|database|contacts?|e-?mails?|campaigns?)\b",
+    r"\b(?:remove|delete)\s+(?:my|our)\s+(?:e-?mail(?:\s+address)?|address|details|"
+    r"contact(?:\s+(?:details|information))?|information|data|name)\b"
+    r"(?!\s+from\s+(?:this|the)\s+(?:thread|chain|conversation|cc|loop))",
+    r"(?<!n't )(?<!n’t )(?<!not )(?<!never )\bstop\s+(?:e-?mailing|sending|contacting|messaging|writing)\b",
+    r"\b(?:do\s*n[o']?t|do\s+not|never)\s+(?:e-?mail|contact|message|write\s+to)\s+(?:me|us)\b",
+    r"\bno\s+(?:more|further)\s+(?:e-?mails?|mails?|messages?|contact|correspondence|communications?)\b"
+    r"(?!\s+(?:is\s+|are\s+)?(?:needed|necessary|required))",
+    r"\bopt\s+(?:me|us)\s+out\b|\bopt[\s-]*out\s+of\s+(?:your|the|this|these|all)\b",
+    # The whole answer is the instruction: "Unsubscribe", "STOP", "Remove".
+    r"\A\s*(?:please\s+)?(?:unsubscribe|stop|remove|opt[\s-]*out)\s*[.!]*\s*(?:\n|\Z)",
 ]
 
 KEYWORD_PATTERN = re.compile(
-    "|".join(re.escape(kw) for kw in UNSUBSCRIBE_KEYWORDS),
+    "|".join(
+        [re.escape(kw) for kw in UNSUBSCRIBE_KEYWORDS]
+        + [f"(?:{p})" for p in _OPT_OUT_PATTERNS]
+        + [f"(?:{p.pattern})" for p in _i18n.OPT_OUT_PATTERNS]
+    ),
     re.IGNORECASE,
 )
 
@@ -732,6 +766,16 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                         examined_now.append(state_id)
                         continue
 
+                    # A responder (vacation notice, ticket desk) never asks to
+                    # be removed — it only repeats footer boilerplate ("to
+                    # unsubscribe …"), and acting on that would unenrol (and
+                    # maybe blocklist) a real prospect who is merely away.
+                    # RFC 3834 headers are decisive; the reply tracker files
+                    # the message as automated.
+                    if automated_header_kind(msg):
+                        examined_now.append(state_id)
+                        continue
+
                     body = _extract_body(msg)
                     # Only scan the user's actual reply, NOT quoted
                     # template content (which may contain "Remove me" etc.)
@@ -766,7 +810,7 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                         examined_now.append(state_id)
                         continue
 
-                    matched_keyword = keyword_match.group(0).lower()
+                    matched_keyword = keyword_match.group(0).strip().lower()
                     subject = msg.get("Subject", "(no subject)")
                     logger.info(f"[IMAP] Keyword match: {sender_email} ('{matched_keyword}')")
 
