@@ -71,6 +71,7 @@ ListMonk requires a specific CSV format (`email`, `name`, `attributes` as JSON).
 
 ### Settings & Automation
 - **Campaign Scheduler** — Enforces daily sending windows (e.g., 8:00 AM – 8:00 PM EST) and allowed days (Mon–Fri, weekends). Running campaigns outside the window auto-pause, and auto-paused campaigns automatically resume when the window opens.
+- **Sending Warm-up** — Ramps the daily send volume up gradually so a new domain or mailbox builds reputation safely (e.g. 10 → 20 → 40 … up to your target, or a gentler +10–20 % a day). Campaigns pause the moment the day's quota is used up and resume automatically the next day. The ramp only steps up after a day that actually sent ≥ 80 % of its plan, so weekends, an empty queue or a pause never push you to a bigger volume. Includes a live usage meter, ramp preview and a forecast of how long the queued recipients will take.
 - **Auto-Unblock Protection** — Identifies engaged subscribers (who clicked links or opened campaigns) who were accidentally blocklisted by false bounces, re-enables them, and purges their bounce records. Only bounce-driven blocklistings are reversed: anyone who unsubscribed, and blocklists you set yourself, stay blocked. Runs every 6 hours or manually.
 - **Persistent Data Store** — Runtime configuration and logs persist to `DATA_DIR` (backed by a named volume in Docker).
 
@@ -213,6 +214,7 @@ The dashboard runs six background loops started during application lifecycle:
 | Background Task | Frequency | Description |
 |-----------------|-----------|-------------|
 | **Campaign Scheduler** | Every 60s | Checks running campaigns and pauses/resumes them based on the send window |
+| **Warm-up Quota** | Every 1s while a campaign runs (3s idle, only while enabled) | Counts live ListMonk send counts and pauses running campaigns when today's warm-up quota is reached |
 | **Hard Bounce Cache** | On startup + every 5 min | Computes true hard bounce counts per campaign, excluding openers |
 | **Prospect Reply Tracker** | Every 15 min | Scans IMAP inbox for cold email prospect replies and sentiment classification |
 | **IMAP & Link Unsubscribe Scan** | Every 1 hour | Scans inbox for reply keywords and polls ListMonk for link unsubscribes |
@@ -244,7 +246,8 @@ ListMonk-Pro/
       csv_converter.py         # CSV converter transforming arbitrary columns to ListMonk schema
       export_service.py        # Memory-efficient streaming CSV generator
       auto_unblock.py          # Auto-unblock bounce-blocklisted engaged contacts (never opt-outs)
-      campaign_scheduler.py    # Timezone-aware send window scheduler
+      campaign_scheduler.py    # Timezone-aware send window scheduler + fast warm-up quota loop
+      warmup.py                # Warm-up ramp maths, daily quota accounting and day roll-over
       deliverability_service.py# Deliverability audit engine and 1-click preset sync
       bounce_ingest.py         # RFC 3463 DSN classifier & IMAP bounce mailbox scanner
       bounce_filters.py        # Opener false-positive bounce filtering
@@ -270,7 +273,7 @@ ListMonk-Pro/
       deliverability.js        # Deliverability pre-flight audit checklist & 1-click presets
       lists.js                 # Mailing list management
       replies.js               # Replies inbox: sentiment tabs, list + reading pane, hot lead flagging
-      settings.js              # Settings UI (scheduler, auto-unblock, unsubscribe toggles)
+      settings.js              # Settings UI (scheduler, warm-up, auto-unblock, unsubscribe toggles)
       subscribers.js           # Subscriber management, search, edit modal, bulk actions
       unsubscribes.js          # Campaign-grouped unsubscribe view, source badges, undo/reset
       vendor/chart.umd.min.js  # Vendored Chart.js 4.5.1 (no CDN dependency)
@@ -361,6 +364,10 @@ Once running, visit **http://localhost:8000/docs** for the interactive Swagger U
 | **Scheduler** | `GET /api/scheduler` | GET | Get send window schedule configuration & status |
 | | `PUT /api/scheduler` | PUT | Update send window schedule settings |
 | | `POST /api/scheduler/run` | POST | Manually trigger scheduler evaluation tick |
+| **Warm-up** | `GET /api/warmup` | GET | Ramp settings, today's quota & usage, forecast and recent days |
+| | `PUT /api/warmup` | PUT | Update warm-up settings (enable, timezone, start volume, daily increase, target, current ramp day) |
+| | `GET /api/warmup/preview` | GET | Preview the ramp a set of values would produce |
+| | `GET /api/warmup/insights` | GET | Queued recipients, forecast days to send them, and ListMonk send-speed warning |
 | **Auto-Unblock** | `GET /api/auto-unblock/status` | GET | Get count of blocklisted engaged contacts |
 | | `POST /api/auto-unblock/run` | POST | Manually run auto-unblock process |
 | **Unsubscribes** | `GET /api/unsubscribes` | GET | Paginated unsubscribe log |

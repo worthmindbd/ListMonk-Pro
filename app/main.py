@@ -20,7 +20,7 @@ from app.services.auto_unblock import (
 )
 from app.services.campaign_scheduler import (
     load_schedule, is_within_send_window,
-    scheduler_loop, run_scheduler_tick, update_schedule_settings,
+    scheduler_loop, run_scheduler_tick, update_schedule_settings, warmup_loop,
 )
 from app.services.imap_unsubscribe import scan_and_unsubscribe
 from app.services.link_unsubscribe import scan_link_unsubscribes
@@ -36,7 +36,7 @@ from app.services.task_utils import shutdown as shutdown_tasks
 from app.services.imap_reply_tracker import scan_and_track_replies
 from app.routers import (
     subscribers, lists, campaigns, templates, bounces, converter, unsubscribes,
-    replies, deliverability, appsettings,
+    replies, deliverability, appsettings, warmup,
 )
 
 logger = logging.getLogger("listmonk-dashboard")
@@ -75,6 +75,7 @@ _imap_scan_task = None
 _bounce_ingest_task = None
 _hard_bounce_cache_task = None
 _reply_scan_task = None
+_warmup_task = None
 
 
 # ── Auth Middleware ───────────────────────────────────────
@@ -283,15 +284,16 @@ async def reply_scan_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _auto_unblock_task, _scheduler_task, _imap_scan_task, _bounce_ingest_task, _hard_bounce_cache_task, _reply_scan_task
+    global _auto_unblock_task, _scheduler_task, _imap_scan_task, _bounce_ingest_task, _hard_bounce_cache_task, _reply_scan_task, _warmup_task
     await listmonk.start()
     _auto_unblock_task = asyncio.create_task(auto_unblock_loop())
     _scheduler_task = asyncio.create_task(scheduler_loop(listmonk))
+    _warmup_task = asyncio.create_task(warmup_loop(listmonk))
     _imap_scan_task = asyncio.create_task(imap_scan_loop())
     _bounce_ingest_task = asyncio.create_task(bounce_ingest_loop())
     _hard_bounce_cache_task = asyncio.create_task(start_cache_updater())
     _reply_scan_task = asyncio.create_task(reply_scan_loop())
-    logger.info("Background tasks started: auto-unblock (6h), campaign scheduler (60s), IMAP+link scan (1h), bounce ingest (1h), hard bounce cache (5min), reply tracker (%dmin)", _reply_scan_interval() // 60)
+    logger.info("Background tasks started: auto-unblock (6h), campaign scheduler (60s), warm-up quota (1-3s, only while enabled), IMAP+link scan (1h), bounce ingest (1h), hard bounce cache (5min), reply tracker (%dmin)", _reply_scan_interval() // 60)
     warn_if_default_credentials()
     logger.warning(
         "Login rate-limit state is in-memory only and was reset on this restart. "
@@ -309,6 +311,7 @@ async def lifespan(app: FastAPI):
     loop_tasks = [
         _auto_unblock_task, _scheduler_task, _imap_scan_task,
         _bounce_ingest_task, _hard_bounce_cache_task, _reply_scan_task,
+        _warmup_task,
     ]
     for task in loop_tasks:
         task.cancel()
@@ -381,6 +384,7 @@ app.include_router(unsubscribes.router, prefix="/api/unsubscribes", tags=["Unsub
 app.include_router(replies.router, prefix="/api/replies", tags=["Replies"])
 app.include_router(deliverability.router, prefix="/api/deliverability", tags=["Deliverability"])
 app.include_router(appsettings.router, prefix="/api/app-settings", tags=["App Settings"])
+app.include_router(warmup.router, prefix="/api/warmup", tags=["Warm-up"])
 
 
 # ── Template Helper ───────────────────────────────────────

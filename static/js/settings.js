@@ -1,24 +1,31 @@
 /**
- * Settings page - combines Scheduler and Auto-Unblock into one page with tabs.
+ * Settings page - combines Scheduler, Warm-up and Auto-Unblock into one page with tabs.
  */
 const Settings = {
     activeTab: 'scheduler',
     schedule: null,
+    warmup: null,
     unblockStatus: null,
     _refreshInterval: null,
+    _previewTimer: null,
+    _previewSeq: 0,
 
     async render() {
         this._seq = App.seq();
         App.setContent('<div class="loading-spinner">Loading settings...</div>');
 
         try {
-            const [sched, unblock] = await Promise.all([
+            const [sched, unblock, warmup] = await Promise.all([
                 API.get('/api/scheduler'),
                 API.get('/api/auto-unblock/status'),
+                // Warm-up is its own feature: if it fails to load, the other
+                // tabs must still work (the Warm-up tab explains the failure).
+                API.get('/api/warmup', true).catch(() => null),
             ]);
             if (App.stale(this._seq)) return;
             this.schedule = sched;
             this.unblockStatus = unblock;
+            this.warmup = warmup;
         } catch {
             if (App.stale(this._seq)) return;
             App.setContent('<div class="empty-state"><h2>Failed to load settings</h2></div>');
@@ -28,7 +35,7 @@ const Settings = {
         this.renderPage();
 
         if (this._refreshInterval) clearInterval(this._refreshInterval);
-        this._refreshInterval = setInterval(() => this.refreshStatus(), 30000);
+        this._refreshInterval = setInterval(() => this.refreshStatus(), 15000);
     },
 
     renderPage() {
@@ -38,6 +45,10 @@ const Settings = {
                 <button class="settings-tab ${this.activeTab === 'scheduler' ? 'active' : ''}" onclick="Settings.switchTab('scheduler')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                     Campaign Scheduler
+                </button>
+                <button class="settings-tab ${this.activeTab === 'warmup' ? 'active' : ''}" onclick="Settings.switchTab('warmup')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
+                    Sending Warm-up
                 </button>
                 <button class="settings-tab ${this.activeTab === 'autounblock' ? 'active' : ''}" onclick="Settings.switchTab('autounblock')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
@@ -62,12 +73,18 @@ const Settings = {
         if (!el) return;
         if (this.activeTab === 'scheduler') {
             el.innerHTML = this.renderScheduler();
+        } else if (this.activeTab === 'warmup') {
+            el.innerHTML = this.renderWarmup();
         } else {
             el.innerHTML = this.renderAutoUnblock();
         }
         // These tabs replace innerHTML *after* App.setContent() ran, so they
         // miss the central accessible-name pass unless they re-run it here.
         App.labelControls(el);
+        if (this.activeTab === 'warmup' && this.warmup) {
+            this._previewWarmup();
+            this._loadWarmupInsights();
+        }
     },
 
     // ── Scheduler Tab ────────────────────────────────────
@@ -253,6 +270,339 @@ const Settings = {
                 </div>
             </div>
         `;
+    },
+
+    // ── Warm-up Tab ──────────────────────────────────────
+    _n(value) {
+        return Number(value).toLocaleString();
+    },
+
+    _warmupBadge(w) {
+        const style = 'font-size:0.9rem;padding:6px 14px';
+        if (!w.enabled) return `<span class="badge badge-default" style="${style}">OFF</span>`;
+        if (w.state === 'quota_reached') {
+            return `<span class="badge badge-warning" style="${style}">DAILY LIMIT REACHED - resumes tomorrow</span>`;
+        }
+        if (w.state === 'sending') {
+            return `<span class="badge badge-success" style="${style}">SENDING - ${this._n(w.remaining)} left today</span>`;
+        }
+        return `<span class="badge badge-info" style="${style}">READY - nothing is sending</span>`;
+    },
+
+    _warmupProgressText(w) {
+        if (w.at_target) return `Day ${this._n(w.day)} - at your target of ${this._n(w.target_volume)} a day`;
+        const left = w.days_to_target;
+        return `Day ${this._n(w.day)} - tomorrow up to ${this._n(w.next_quota)} - target ${this._n(w.target_volume)} in ${this._n(left)} more day${left === 1 ? '' : 's'}`;
+    },
+
+    renderWarmup() {
+        const w = this.warmup;
+        if (!w) {
+            return `<div class="card"><div class="empty-state"><h2>Warm-up unavailable</h2>
+                <p>The warm-up status could not be loaded. Reload the page to try again.</p></div></div>`;
+        }
+        const pct = w.quota > 0 ? Math.min(100, Math.round(w.sent_today / w.quota * 100)) : 0;
+
+        const timezones = [
+            'US/Eastern', 'US/Central', 'US/Mountain', 'US/Pacific',
+            'UTC', 'Europe/London', 'Europe/Berlin', 'Europe/Paris',
+            'Asia/Tokyo', 'Asia/Shanghai', 'Asia/Kolkata', 'Asia/Dhaka',
+            'Australia/Sydney', 'Pacific/Auckland',
+        ];
+        // Never configured: start from the send-window timezone, which is
+        // almost always the one the user means by "my day".
+        const savedTz = (w.enabled || (w.history && w.history.length) || w.sent_today > 0)
+            ? w.timezone : (this.schedule?.timezone || w.timezone);
+        if (savedTz && !timezones.includes(savedTz)) timezones.unshift(savedTz);
+        const tzOptions = timezones.map(tz =>
+            `<option value="${App.escapeHtml(tz)}" ${tz === savedTz ? 'selected' : ''}>${App.escapeHtml(tz)}</option>`
+        ).join('');
+
+        const presetButtons = Object.entries(w.presets || {}).map(([key, p]) =>
+            `<button type="button" class="btn btn-sm" title="${App.escapeHtml(p.summary)}" onclick="Settings.applyWarmupPreset('${App.escapeHtml(key)}')">${App.escapeHtml(p.label)} <span style="color:var(--text-muted)">${p.growth_percent === 100 ? 'x2' : '+' + p.growth_percent + '%'}</span></button>`
+        ).join('');
+
+        const historyRows = (w.history || []).map(h => `
+            <tr>
+                <td>${App.escapeHtml(h.date || '')}</td>
+                <td>${this._n(h.day ?? 0)}</td>
+                <td>${this._n(h.quota ?? 0)}</td>
+                <td>${this._n(h.sent ?? 0)}</td>
+                <td>${h.advanced
+                    ? '<span class="badge badge-success">Stepped up</span>'
+                    : `<span class="badge badge-warning" title="Fewer than ${this._n(w.advance_min_percent)}% of the planned volume was sent, so the ramp waited">Held</span>`}</td>
+            </tr>`).join('');
+
+        return `
+            <div class="card" style="margin-bottom:20px">
+                <div class="card-header warmup-head">
+                    <h2 class="card-title">Sending Warm-up</h2>
+                    <div class="action-btns" id="warmupBadge">${this._warmupBadge(w)}</div>
+                </div>
+                <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+                    <span style="font-size:2rem;font-weight:700;line-height:1" id="warmupSent">${this._n(w.sent_today)}</span>
+                    <span style="color:var(--text-secondary)">of <strong id="warmupQuota">${this._n(w.quota)}</strong> emails sent today
+                        <span style="color:var(--text-muted)">(${App.escapeHtml(w.timezone)})</span></span>
+                </div>
+                <div class="progress-bar" role="progressbar" aria-label="Today's warm-up quota used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" id="warmupBar">
+                    <div class="progress-fill" id="warmupFill" style="width:${pct}%"></div>
+                </div>
+                <p style="font-size:0.85rem;color:var(--text-muted);margin-top:10px" id="warmupProgress">${this._warmupProgressText(w)}</p>
+            </div>
+
+            <div class="card" style="margin-bottom:20px">
+                <div class="card-header"><h2 class="card-title">Warm-up Plan</h2></div>
+
+                <div class="form-group" style="margin-bottom:20px">
+                    <label class="checkbox-label ${w.enabled ? 'toggle-on' : ''}" id="warmupEnabledBanner" style="font-size:1rem;padding:12px 18px;border-width:2px;display:flex;width:100%">
+                        <input type="checkbox" id="warmupEnabled" ${w.enabled ? 'checked' : ''} onchange="Settings.toggleWarmup(this.checked)">
+                        <span style="font-weight:600" id="warmupEnabledLabel">${w.enabled ? 'Warm-up is ON' : 'Warm-up is OFF'}</span>
+                        <span class="banner-switch" aria-hidden="true"></span>
+                    </label>
+                    <p style="font-size:0.85rem;color:var(--text-muted);margin-top:8px">
+                        While on, all campaigns together may send only today's quota. Running campaigns pause when it is used up
+                        and resume automatically on the next day. Manually paused campaigns are never touched.
+                    </p>
+                </div>
+
+                <div class="form-group">
+                    <label>Start from a preset</label>
+                    <div class="warmup-presets">${presetButtons}</div>
+                    <p style="font-size:0.8rem;color:var(--text-muted);margin-top:8px">Presets only fill in the start volume and daily increase; your target stays as set below.</p>
+                </div>
+
+                <div class="warmup-fields">
+                    <div class="form-group" style="margin-bottom:0">
+                        <label for="warmupStart">Day 1 volume</label>
+                        <input type="number" id="warmupStart" min="1" max="10000" step="1" value="${w.start_volume}" oninput="Settings._schedulePreview()">
+                    </div>
+                    <div class="form-group" style="margin-bottom:0">
+                        <label for="warmupGrowth">Daily increase (%)</label>
+                        <input type="number" id="warmupGrowth" min="0" max="300" step="1" value="${w.growth_percent}" oninput="Settings._schedulePreview()">
+                    </div>
+                    <div class="form-group" style="margin-bottom:0">
+                        <label for="warmupTarget">Target per day</label>
+                        <input type="number" id="warmupTarget" min="1" max="100000" step="1" value="${w.target_volume}" oninput="Settings._schedulePreview()">
+                    </div>
+                    <div class="form-group" style="margin-bottom:0">
+                        <label for="warmupLevel">Current ramp day</label>
+                        <input type="number" id="warmupLevel" min="1" max="365" step="1" value="${w.day}">
+                    </div>
+                    <div class="form-group" style="margin-bottom:0">
+                        <label for="warmupTimezone">Day starts at midnight in</label>
+                        <select id="warmupTimezone">${tzOptions}</select>
+                    </div>
+                </div>
+                <p style="font-size:0.8rem;color:var(--text-muted);margin:12px 0 0">
+                    Each day grows by the percentage but by at least one email. 100% doubles every day (10, 20, 40, 80 ...).
+                    Already sending for a while? Set <strong>Current ramp day</strong> to where you are. Set it to 1 to start over.
+                </p>
+
+                <div style="margin-top:24px">
+                    <label style="font-size:0.85rem;font-weight:500;color:var(--text-secondary);margin-bottom:10px;display:block">Ramp preview (emails per day)</label>
+                    <div id="warmupRamp" aria-live="polite"></div>
+                </div>
+
+                <div class="form-actions">
+                    <button class="btn btn-primary" onclick="Settings.saveWarmup()">Save Plan</button>
+                </div>
+            </div>
+
+            <div class="card" style="margin-bottom:20px">
+                <div class="card-header"><h2 class="card-title">Queue &amp; Sending Speed</h2></div>
+                <div id="warmupInsights" style="font-size:0.9rem;color:var(--text-secondary)">Checking the campaign queue...</div>
+            </div>
+
+            ${historyRows ? `
+            <div class="card" style="margin-bottom:20px">
+                <div class="card-header"><h2 class="card-title">Recent Days</h2></div>
+                <div class="table-wrapper" tabindex="0" role="region" aria-label="Scrollable data table"><table>
+                    <thead><tr><th>Date</th><th>Ramp day</th><th>Planned</th><th>Sent</th><th>Result</th></tr></thead>
+                    <tbody>${historyRows}</tbody>
+                </table></div>
+            </div>` : ''}
+
+            <div class="card">
+                <div class="card-header"><h2 class="card-title">How it works</h2></div>
+                <div style="font-size:0.85rem;color:var(--text-secondary);line-height:1.8">
+                    <ul style="padding-left:20px;margin:8px 0">
+                        <li>The quota is checked <strong>every second</strong> while a campaign is running. When it is used up, running campaigns are <strong>auto-paused</strong> and resume on their own the next day.</li>
+                        <li>The ramp <strong>steps up only after a day that sent at least ${this._n(w.advance_min_percent)}%</strong> of its planned volume. Weekends, an empty queue or a pause never push you to a bigger volume on a cold domain.</li>
+                        <li>It works together with the <strong>Campaign Scheduler</strong>: a campaign sends only inside the send window <em>and</em> while quota is left.</li>
+                        <li>The limit can be exceeded by whatever ListMonk sends between two checks (about a second of sending). Keep ListMonk's message rate low for a tight cap, see the box above.</li>
+                        <li>This app must be running for the limit to hold: if it is stopped, ListMonk keeps sending without one.</li>
+                    </ul>
+                </div>
+            </div>
+        `;
+    },
+
+    /** Update the live numbers in place (no re-render, so unsaved edits survive). */
+    _syncWarmupStatus() {
+        const w = this.warmup;
+        if (!w) return;
+        const set = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+        const badge = document.getElementById('warmupBadge');
+        if (badge) badge.innerHTML = this._warmupBadge(w);
+        set('warmupSent', this._n(w.sent_today));
+        set('warmupQuota', this._n(w.quota));
+        set('warmupProgress', this._warmupProgressText(w));
+        const pct = w.quota > 0 ? Math.min(100, Math.round(w.sent_today / w.quota * 100)) : 0;
+        const fill = document.getElementById('warmupFill');
+        if (fill) fill.style.width = pct + '%';
+        document.getElementById('warmupBar')?.setAttribute('aria-valuenow', String(pct));
+        const label = document.getElementById('warmupEnabledLabel');
+        const banner = document.getElementById('warmupEnabledBanner');
+        const box = document.getElementById('warmupEnabled');
+        if (label) label.textContent = w.enabled ? 'Warm-up is ON' : 'Warm-up is OFF';
+        if (banner) banner.classList.toggle('toggle-on', !!w.enabled);
+        if (box) box.checked = !!w.enabled;
+    },
+
+    _warmupForm() {
+        const read = id => {
+            const raw = document.getElementById(id)?.value ?? '';
+            return /^\d+$/.test(String(raw).trim()) ? parseInt(raw, 10) : NaN;
+        };
+        return {
+            start_volume: read('warmupStart'),
+            growth_percent: read('warmupGrowth'),
+            target_volume: read('warmupTarget'),
+            level: read('warmupLevel'),
+            timezone: document.getElementById('warmupTimezone')?.value,
+        };
+    },
+
+    applyWarmupPreset(key) {
+        const p = this.warmup?.presets?.[key];
+        if (!p) return;
+        document.getElementById('warmupStart').value = p.start_volume;
+        document.getElementById('warmupGrowth').value = p.growth_percent;
+        this._schedulePreview();
+    },
+
+    /** Debounced: redraw the ramp chart while the user types. */
+    _schedulePreview() {
+        clearTimeout(this._previewTimer);
+        this._previewTimer = setTimeout(() => this._previewWarmup(), 250);
+    },
+
+    async _previewWarmup() {
+        const el = document.getElementById('warmupRamp');
+        if (!el) return;
+        const f = this._warmupForm();
+        if ([f.start_volume, f.growth_percent, f.target_volume].some(Number.isNaN)) {
+            el.innerHTML = '<p style="color:var(--text-muted);font-size:0.85rem">Enter whole numbers to see the ramp.</p>';
+            return;
+        }
+        if (f.target_volume < f.start_volume) {
+            el.innerHTML = '<p style="color:var(--warning);font-size:0.85rem">The target must be at least the day 1 volume.</p>';
+            return;
+        }
+        const seq = ++this._previewSeq;
+        let data;
+        try {
+            data = await API.get(`/api/warmup/preview?start_volume=${f.start_volume}&growth_percent=${f.growth_percent}&target_volume=${f.target_volume}`, true);
+        } catch {
+            if (seq === this._previewSeq && document.getElementById('warmupRamp') === el) {
+                el.innerHTML = '<p style="color:var(--text-muted);font-size:0.85rem">Preview unavailable. Check the values (day 1: 1-10,000, increase: 0-300%, target: up to 100,000).</p>';
+            }
+            return;
+        }
+        // A newer keystroke (or leaving the tab) superseded this response.
+        if (seq !== this._previewSeq || document.getElementById('warmupRamp') !== el) return;
+
+        const shown = data.ramp.slice(0, 30);
+        const top = Math.max(...shown, 1);
+        const current = this.warmup?.day;
+        const bars = shown.map((v, i) => {
+            const day = i + 1;
+            return `<div class="warmup-bar ${day === current ? 'is-current' : ''}" style="height:${Math.max(3, Math.round(v / top * 100))}%" title="Day ${day}: ${this._n(v)} emails"></div>`;
+        }).join('');
+        const more = data.ramp.length > shown.length
+            ? ` (chart shows the first ${shown.length})` : '';
+        el.innerHTML = `
+            <div class="warmup-bars" role="img" aria-label="Daily volume by ramp day">${bars}</div>
+            <div class="warmup-ramp-axis"><span>Day 1: ${this._n(data.ramp[0])}</span><span>Day ${shown.length}: ${this._n(shown[shown.length - 1])}</span></div>
+            <p style="font-size:0.85rem;color:var(--text-secondary);margin-top:8px">
+                Reaches <strong>${this._n(f.target_volume)}/day on day ${this._n(data.days)}</strong>${more};
+                ${this._n(data.total)} emails in total by then.
+            </p>`;
+    },
+
+    async _loadWarmupInsights() {
+        const el = document.getElementById('warmupInsights');
+        if (!el) return;
+        let d;
+        try {
+            d = await API.get('/api/warmup/insights', true);
+        } catch {
+            if (document.getElementById('warmupInsights') === el) {
+                el.textContent = 'The campaign queue could not be read right now.';
+            }
+            return;
+        }
+        if (document.getElementById('warmupInsights') !== el) return;
+        const lines = [];
+        if (d.backlog === null) {
+            lines.push('Could not read the campaign queue from ListMonk.');
+        } else if (d.backlog === 0) {
+            lines.push('No running or paused campaign has recipients waiting.');
+        } else {
+            const days = d.days_to_finish;
+            const eta = days === 0 ? 'today\'s remaining quota covers it'
+                : days >= 365 ? 'more than a year at this ramp'
+                : `about ${this._n(days)} more day${days === 1 ? '' : 's'} after today at this ramp`;
+            lines.push(`<strong>${this._n(d.backlog)}</strong> recipients are waiting in running or paused campaigns: ${eta}.`);
+        }
+        if (d.max_per_second) {
+            lines.push(`ListMonk may send up to <strong>${this._n(d.max_per_second)}</strong> email${d.max_per_second === 1 ? '' : 's'} per second (message rate ${this._n(d.message_rate)} x concurrency ${this._n(d.concurrency)}).`);
+            if (d.overshoot_warning) {
+                lines.push('<span style="color:var(--warning)">That is fast compared with today\'s quota, so the daily limit could be overshot by a noticeable share. Lower the message rate and concurrency on the Deliverability page for a tighter cap.</span>');
+            }
+        }
+        el.innerHTML = lines.map(l => `<p style="margin:0 0 8px">${l}</p>`).join('');
+    },
+
+    async toggleWarmup(checked) {
+        try {
+            const res = await API.put('/api/warmup', { enabled: checked });
+            this.warmup = res.warmup;
+            App.toast(checked ? 'Warm-up enabled' : 'Warm-up disabled', 'success');
+            this._syncWarmupStatus();
+        } catch {
+            // API.request already surfaced the server message; put the switch back.
+            const box = document.getElementById('warmupEnabled');
+            if (box) box.checked = !checked;
+        }
+    },
+
+    async saveWarmup() {
+        const f = this._warmupForm();
+        if ([f.start_volume, f.growth_percent, f.target_volume, f.level].some(Number.isNaN)) {
+            App.toast('Use whole numbers in every field', 'error');
+            return;
+        }
+        if (f.target_volume < f.start_volume) {
+            App.toast('The target must be at least the day 1 volume', 'error');
+            return;
+        }
+        const body = {
+            start_volume: f.start_volume,
+            growth_percent: f.growth_percent,
+            target_volume: f.target_volume,
+            timezone: f.timezone,
+        };
+        // Only move the ramp when the user actually typed a different day.
+        if (f.level !== this.warmup.day) body.level = f.level;
+        try {
+            const res = await API.put('/api/warmup', body);
+            this.warmup = res.warmup;
+            App.toast('Warm-up plan saved', 'success');
+            this.renderTab();
+        } catch {
+            // API.request already surfaced the server message.
+        }
     },
 
     // ── Auto-Unblock Tab ─────────────────────────────────
@@ -452,5 +802,11 @@ const Settings = {
             const el = document.getElementById('schedulerCurrentTime');
             if (el) el.textContent = this.schedule.current_time || '-';
         } catch {}
+        if (this.activeTab === 'warmup' && this.warmup) {
+            try {
+                this.warmup = await API.get('/api/warmup', true);
+                this._syncWarmupStatus();
+            } catch {}
+        }
     },
 };

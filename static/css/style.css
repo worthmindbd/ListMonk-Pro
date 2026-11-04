@@ -1995,6 +1995,75 @@ td .tag {
     transition: width 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+/* ── Warm-up (Settings → Sending Warm-up) ─────────────────── */
+/* The status badge is a whole sentence ("Daily limit reached - resumes
+   tomorrow"); the global badge is nowrap and ran off the card on phones. */
+.warmup-head {
+    flex-wrap: wrap;
+}
+
+.warmup-head .action-btns {
+    flex-wrap: wrap;
+    max-width: 100%;
+}
+
+.warmup-head .badge {
+    white-space: normal;
+    text-align: center;
+    line-height: 1.35;
+}
+
+.warmup-presets {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.warmup-fields {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 16px;
+}
+
+.warmup-bars {
+    display: flex;
+    align-items: flex-end;
+    gap: 3px;
+    height: 120px;
+    padding: 8px 8px 0;
+    background: var(--bg-input);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+}
+
+.warmup-bar {
+    flex: 1;
+    min-width: 4px;
+    border-radius: 3px 3px 0 0;
+    background: linear-gradient(180deg, var(--primary-soft), var(--primary));
+    opacity: 0.7;
+    transition: height 0.2s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.15s;
+}
+
+.warmup-bar:hover,
+.warmup-bar.is-current {
+    opacity: 1;
+}
+
+.warmup-bar.is-current {
+    background: linear-gradient(180deg, var(--emerald), var(--primary));
+    box-shadow: 0 0 10px var(--primary-glow);
+}
+
+.warmup-ramp-axis {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-top: 6px;
+    padding: 0 2px;
+}
+
 /* ── File Drop Zone ────────────────────────────────────────── */
 .file-drop-zone {
     border: 2px dashed var(--glass-border);

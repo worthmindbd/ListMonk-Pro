@@ -8,6 +8,7 @@ __pycache__/
 .agents/
 .agent/
 schedule.json
+warmup.json
 session_secret.key
 session_revocations.json
 *.md

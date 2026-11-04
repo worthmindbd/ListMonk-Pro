@@ -7,6 +7,14 @@ Checks every 60 seconds:
 
 Tracks which campaigns were auto-paused so it doesn't interfere with manual pauses.
 Disabling the scheduler resumes the campaigns it auto-paused.
+
+Warm-up (app/services/warmup.py) is a second reason to hold campaigns back: a
+campaign may only send while it is inside the send window (when that scheduler
+is on) AND today's warm-up quota is not used up (when warm-up is on). Both
+share the one ``auto_paused_campaigns`` list, so a campaign paused for either
+reason resumes only when *neither* still applies. ``warmup_loop`` is the fast
+(1-3 s) path that pauses campaigns the moment the quota is reached; the 60 s
+tick below does the resuming.
 """
 
 import asyncio
@@ -15,9 +23,11 @@ import logging
 import os
 import tempfile
 from datetime import datetime, time
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 from app.config import settings
+from app.services import warmup
 from app.services.listmonk_client import ListMonkClient
 
 logger = logging.getLogger("campaign_scheduler")
@@ -162,6 +172,27 @@ def is_within_send_window(schedule: dict) -> bool:
             return False
 
 
+def _persist_auto_paused(schedule: dict, auto_paused: set, campaign_id: int) -> None:
+    """Persist the tracking list right after each successful pause.
+
+    Waiting for the end-of-tick save meant a save failure (disk
+    full, permissions) left a campaign paused in ListMonk without
+    a tracking record — the resume branch only resumes campaigns
+    in ``auto_paused_campaigns``, so it would stay stalled until a
+    human noticed.
+    """
+    schedule["auto_paused_campaigns"] = list(auto_paused)
+    try:
+        save_schedule(schedule)
+    except OSError as e:
+        logger.error(
+            f"Scheduler could not persist auto_paused_campaigns "
+            f"after pausing campaign #{campaign_id}: {e}. The "
+            "campaign is paused upstream but not tracked for "
+            "auto-resume."
+        )
+
+
 async def run_scheduler_tick(client: ListMonkClient):
     """Single tick of the scheduler. Called every 60 seconds.
 
@@ -171,8 +202,11 @@ async def run_scheduler_tick(client: ListMonkClient):
     """
     async with _SCHED_LOCK:
         schedule = load_schedule()
+        warm = warmup.load_state()
+        window_on = bool(schedule.get("enabled"))
+        warmup_on = bool(warm.get("enabled"))
 
-        if not schedule.get("enabled"):
+        if not window_on and not warmup_on:
             # Nothing is enforced while disabled — but campaigns the scheduler
             # itself paused used to stay paused forever (only an enabled,
             # in-window tick resumes them), indistinguishable from a manual
@@ -181,24 +215,29 @@ async def run_scheduler_tick(client: ListMonkClient):
                 await _release_auto_paused(client, schedule)
             return
 
-        # A schedule with no usable days is never "in window", which would make
-        # this tick pause every running campaign and never resume any of them.
-        # The API rejects an empty day list, so this only guards a hand-edited or
-        # corrupted schedule file — skip the tick rather than stall all sending.
-        day_map = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
-        if not day_map.intersection(schedule.get("days", [])):
-            logger.error(
-                "Schedule has no valid days configured; skipping this tick so "
-                "running campaigns are not paused indefinitely."
-            )
-            return
+        if window_on:
+            # A schedule with no usable days is never "in window", which would make
+            # this tick pause every running campaign and never resume any of them.
+            # The API rejects an empty day list, so this only guards a hand-edited or
+            # corrupted schedule file — skip the tick rather than stall all sending.
+            day_map = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+            if not day_map.intersection(schedule.get("days", [])):
+                logger.error(
+                    "Schedule has no valid days configured; skipping this tick so "
+                    "running campaigns are not paused indefinitely."
+                )
+                return
 
-        in_window = is_within_send_window(schedule)
+        # A campaign may send only when every enforced rule allows it. A rule
+        # that is switched off never blocks.
+        in_window = is_within_send_window(schedule) if window_on else True
+        quota_left = warmup.has_quota(warm) if warmup_on else True
+        may_send = in_window and quota_left
         auto_paused = set(schedule.get("auto_paused_campaigns") or [])
 
         tz = ZoneInfo(schedule["timezone"])
         now = datetime.now(tz)
-        logger.debug(f"Scheduler tick: {now.strftime('%A %H:%M %Z')} | in_window={in_window} | auto_paused={auto_paused}")
+        logger.debug(f"Scheduler tick: {now.strftime('%A %H:%M %Z')} | in_window={in_window} | quota_left={quota_left} | auto_paused={auto_paused}")
 
         try:
             # Only running/paused campaigns are relevant: running ones may need
@@ -214,50 +253,33 @@ async def run_scheduler_tick(client: ListMonkClient):
 
             changed = False
 
-            def _persist_auto_paused(campaign_id: int) -> None:
-                """Persist the tracking list right after each successful pause.
-
-                Waiting for the end-of-tick save meant a save failure (disk
-                full, permissions) left a campaign paused in ListMonk without
-                a tracking record — the resume branch only resumes campaigns
-                in ``auto_paused_campaigns``, so it would stay stalled until a
-                human noticed.
-                """
-                schedule["auto_paused_campaigns"] = list(auto_paused)
-                try:
-                    save_schedule(schedule)
-                except OSError as e:
-                    logger.error(
-                        f"Scheduler could not persist auto_paused_campaigns "
-                        f"after pausing campaign #{campaign_id}: {e}. The "
-                        "campaign is paused upstream but not tracked for "
-                        "auto-resume."
-                    )
-
             for camp in campaigns:
                 cid = camp["id"]
                 status = camp["status"]
 
-                if not in_window and status == "running":
-                    # Outside send window -> pause it
+                if not may_send and status == "running":
+                    # Outside send window / warm-up quota used up -> pause it
                     try:
                         await client.change_campaign_status(cid, "paused")
                         auto_paused.add(cid)
                         camp["status"] = "paused"
                         changed = True
-                        _persist_auto_paused(cid)
-                        logger.info(f"Auto-PAUSED campaign #{cid} '{camp['name']}' (outside {schedule['start_hour']:02d}:{schedule['start_minute']:02d}-{schedule['end_hour']:02d}:{schedule['end_minute']:02d} {schedule['timezone']})")
+                        _persist_auto_paused(schedule, auto_paused, cid)
+                        if not in_window:
+                            logger.info(f"Auto-PAUSED campaign #{cid} '{camp['name']}' (outside {schedule['start_hour']:02d}:{schedule['start_minute']:02d}-{schedule['end_hour']:02d}:{schedule['end_minute']:02d} {schedule['timezone']})")
+                        else:
+                            logger.info(f"Auto-PAUSED campaign #{cid} '{camp['name']}' (daily warm-up quota used up)")
                     except Exception as e:
                         logger.error(f"Failed to pause campaign #{cid}: {e}")
 
-                elif in_window and status == "paused" and cid in auto_paused:
-                    # Inside send window + was auto-paused -> resume it
+                elif may_send and status == "paused" and cid in auto_paused:
+                    # Allowed again + was auto-paused -> resume it
                     try:
                         await client.change_campaign_status(cid, "running")
                         auto_paused.discard(cid)
                         camp["status"] = "running"
                         changed = True
-                        logger.info(f"Auto-RESUMED campaign #{cid} '{camp['name']}' (inside send window)")
+                        logger.info(f"Auto-RESUMED campaign #{cid} '{camp['name']}' (send window open, warm-up quota available)")
                     except Exception as e:
                         logger.error(f"Failed to resume campaign #{cid}: {e}")
 
@@ -325,3 +347,109 @@ async def scheduler_loop(client: ListMonkClient):
         except Exception as e:
             logger.error(f"Scheduler loop error: {e}")
         await asyncio.sleep(60)
+
+
+# ── Warm-up enforcement (fast path) ──────────────────────────────────────────
+# ListMonk sends several emails per second, so a 60 s tick would let a whole
+# day's quota (or far more) slip out before it noticed. While a campaign is
+# running the quota is therefore checked every second; with nothing running a
+# slower poll is enough, and starting/resuming a campaign through this app
+# wakes the loop immediately (nudge_warmup). The cap can still be exceeded by
+# what ListMonk sends between two polls — roughly one second of sending.
+WARMUP_ACTIVE_POLL = 1.0
+WARMUP_IDLE_POLL = 3.0
+WARMUP_MAX_BACKOFF = 30.0
+
+# One wake-up event per running loop. Created lazily because an asyncio.Event
+# binds to the loop that first waits on it, and every test runs on a new one.
+_warmup_nudge: Optional[asyncio.Event] = None
+_warmup_nudge_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _nudge_event() -> asyncio.Event:
+    global _warmup_nudge, _warmup_nudge_loop
+    loop = asyncio.get_running_loop()
+    if _warmup_nudge is None or _warmup_nudge_loop is not loop:
+        _warmup_nudge = asyncio.Event()
+        _warmup_nudge_loop = loop
+    return _warmup_nudge
+
+
+def nudge_warmup() -> None:
+    """Wake the warm-up loop now instead of at its next poll."""
+    try:
+        _nudge_event().set()
+    except RuntimeError:
+        # No running event loop (called from a plain thread / test): the
+        # loop's regular poll picks the change up within seconds anyway.
+        pass
+
+
+def reset_warmup_nudge() -> None:
+    """Drop the cached wake-up event (tests; AGENTS.md rule 11)."""
+    global _warmup_nudge, _warmup_nudge_loop
+    _warmup_nudge = None
+    _warmup_nudge_loop = None
+
+
+async def _pause_for_quota(client: ListMonkClient, campaign_ids: list[int]) -> None:
+    """Pause the running campaigns and track them for the next day's resume.
+
+    Runs under ``_SCHED_LOCK`` and records the pauses in the same
+    ``auto_paused_campaigns`` list the tick uses, so a manual pause is never
+    mistaken for one of ours and the tick resumes these when the quota resets.
+    """
+    async with _SCHED_LOCK:
+        schedule = load_schedule()
+        auto_paused = set(schedule.get("auto_paused_campaigns") or [])
+        for cid in campaign_ids:
+            try:
+                await client.change_campaign_status(cid, "paused")
+            except Exception as e:
+                # Typically a human paused it between the poll and now.
+                logger.error(f"Failed to pause campaign #{cid} for the warm-up quota: {e}")
+                continue
+            auto_paused.add(cid)
+            _persist_auto_paused(schedule, auto_paused, cid)
+            logger.info(f"Auto-PAUSED campaign #{cid} (daily warm-up quota reached)")
+
+
+async def enforce_warmup(client: ListMonkClient) -> float:
+    """One iteration of the warm-up loop; returns the seconds to wait next."""
+    snap = await warmup.observe(client)
+    if not snap["enabled"]:
+        return WARMUP_IDLE_POLL
+    if snap["rolled"]:
+        # A new day began: campaigns held back by yesterday's quota may go on
+        # now rather than at the next 60 s tick.
+        await run_scheduler_tick(client)
+    elif snap["running"] and snap["remaining"] <= 0:
+        await _pause_for_quota(client, snap["running"])
+    return WARMUP_ACTIVE_POLL if snap["running"] else WARMUP_IDLE_POLL
+
+
+async def _sleep_or_nudge(delay: float) -> None:
+    event = _nudge_event()
+    try:
+        await asyncio.wait_for(event.wait(), timeout=delay)
+    except asyncio.TimeoutError:
+        pass
+    # Cleared after waking, not before waiting: a nudge that arrived while the
+    # last iteration was still running must trigger the next one immediately.
+    event.clear()
+
+
+async def warmup_loop(client: ListMonkClient):
+    """Background loop enforcing the daily warm-up quota (see above)."""
+    failures = 0
+    while True:
+        try:
+            delay = await enforce_warmup(client)
+            failures = 0
+        except Exception as e:
+            failures += 1
+            logger.error(f"Warm-up loop error (#{failures}): {e}")
+            # Back off while ListMonk is unreachable instead of logging and
+            # hammering it every second.
+            delay = min(WARMUP_MAX_BACKOFF, WARMUP_IDLE_POLL * 2 ** min(failures, 5))
+        await _sleep_or_nudge(delay)

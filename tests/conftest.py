@@ -7,6 +7,8 @@ and a later test asserts against a fresh mock. Resetting them per test keeps
 ordering from silently changing results.
 """
 
+import asyncio
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -35,6 +37,7 @@ def _isolate_state_files(tmp_path_factory, monkeypatch):
     """
     from app.services import (
         app_settings, bounce_ingest, campaign_scheduler, reply_log, unsubscribe_log,
+        warmup,
     )
 
     # A directory of its own, not tmp_path: tests list tmp_path's contents.
@@ -48,6 +51,7 @@ def _isolate_state_files(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(reply_log, "PROCESSED_FILE", state / "reply_processed.json")
     monkeypatch.setattr(bounce_ingest, "PROCESSED_FILE", state / "bounce_processed.json")
     monkeypatch.setattr(campaign_scheduler, "SCHEDULE_FILE", state / "schedule.json")
+    monkeypatch.setattr(warmup, "WARMUP_FILE", state / "warmup.json")
     monkeypatch.setattr(app_settings, "APP_SETTINGS_FILE", state / "app_settings.json")
     from app import auth
     monkeypatch.setattr(auth, "REVOCATIONS_FILE", state / "session_revocations.json")
@@ -75,6 +79,11 @@ def _reset_module_caches():
         # Logout revocations are cached in memory too (rule 11).
         auth._revoked = {}
         auth._revoked_mtime = None
+        # Warm-up: the wake-up event is bound to the loop that waited on it,
+        # and its file lock to the loop that contended it (rule 11).
+        from app.services import campaign_scheduler, warmup
+        campaign_scheduler.reset_warmup_nudge()
+        warmup._WARMUP_LOCK = asyncio.Lock()
 
     _reset()
     yield

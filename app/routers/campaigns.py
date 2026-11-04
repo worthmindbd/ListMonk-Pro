@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from typing import Optional
 from app.services.listmonk_client import listmonk
+from app.services.campaign_scheduler import nudge_warmup
 from app.services.bulk_ops import parse_ids, run_bulk
 from app.services.export_service import dict_list_to_csv, aiter_dicts_to_csv
 from app.services.bounce_list import fetch_filtered_bounces_page, iter_filtered_bounces
@@ -483,7 +484,14 @@ async def update_campaign(campaign_id: int, data: dict):
 
 @router.put("/{campaign_id}/status")
 async def change_campaign_status(campaign_id: int, data: dict):
-    return await listmonk.change_campaign_status(campaign_id, data.get("status", ""))
+    status = data.get("status", "")
+    result = await listmonk.change_campaign_status(campaign_id, status)
+    if status == "running":
+        # A campaign that was just started or resumed may already be over
+        # today's warm-up quota: have the quota loop look at it right away
+        # instead of at its next poll.
+        nudge_warmup()
+    return result
 
 
 @router.put("/{campaign_id}/archive")
