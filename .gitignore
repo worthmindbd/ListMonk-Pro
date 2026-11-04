@@ -11,6 +11,8 @@ build/
 uploads/
 schedule.json
 warmup.json
+email_cleanup.json*
+email_validation_results.json*
 .claude/
 .agents/
 .agent/

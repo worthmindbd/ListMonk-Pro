@@ -20,6 +20,7 @@ ListMonk-Pro/
 │   │   ├── campaigns.py           # Campaign CRUD, stats, analytics, viewer/clicker/bounce exports
 │   │   ├── converter.py           # CSV column detection, conversion & direct ListMonk import
 │   │   ├── deliverability.py      # Deliverability audit checklist & 1-click preset switching
+│   │   ├── email_validation.py    # Email Validation: quick check, subscriber scan, results list/export/blocklist/dismiss, scheduled-cleanup settings & run-now
 │   │   ├── lists.py               # List CRUD endpoints
 │   │   ├── replies.py             # Prospect reply monitoring, sentiment filters, status updates
 │   │   ├── subscribers.py         # Subscriber/Lead CRUD, memberships, blocklisting, exports
@@ -38,7 +39,10 @@ ListMonk-Pro/
 │       │                          #   + the fast warm-up quota loop (enforce_warmup / warmup_loop / nudge_warmup)
 │       ├── csv_converter.py       # Converts arbitrary CSV to ListMonk schema (JSON attributes)
 │       ├── deliverability_service.py # Audit rules, score computation, and preset application
+│       ├── email_cleanup.py       # Subscriber scan + scheduled "dead email" cleanup: single job slot, safety rails, daily/weekly/monthly slot maths, results store
 │       ├── email_format.py        # Per-campaign HTML design ↔ plain text switch (plain twins, text parts, memory in campaign attribs)
+│       ├── email_validation.py    # Pure address validator: syntax, DNS MX / Null MX, disposable / role / typo flags, per-domain DNS cache
+│       ├── email_validation_data.py # Bundled lists: disposable domains, role local parts, typo domains / TLDs, top providers
 │       ├── export_service.py      # CSV generators (sync list + async streamed, formula-injection sanitized)
 │       ├── hard_bounce_cache.py   # In-memory hard bounce counts per campaign with background refresh
 │       ├── imap_helpers.py        # Shared IMAP utilities (body extraction, date formatting, query escaping,
@@ -71,9 +75,10 @@ ListMonk-Pro/
 │   │   │                          #   & per-campaign Email format switch (HTML design / Plain text)
 │   │   ├── lists.js               # List management, modal forms, tag pills, subscriber drill-down & exports
 │   │   ├── replies.js             # Replies inbox: sentiment tabs, list + pinned reading pane, hot lead flagging, bulk triage
-│   │   ├── settings.js            # Settings UI: send window scheduler, sending warm-up (plan form, live meter, ramp chart), auto-unblock
+│   │   ├── settings.js            # Settings UI: send window scheduler, sending warm-up (plan form, live meter, ramp chart), email cleanup schedule, auto-unblock
 │   │   ├── subscribers.js         # Subscriber/lead table: filters, edit modal, bulk list/blocklist/delete
-│   │   └── unsubscribes.js        # Campaign-grouped unsubscribe dashboard, source badges, bulk removal, undo reset
+│   │   ├── unsubscribes.js        # Campaign-grouped unsubscribe dashboard, source badges, bulk removal, undo reset
+│   │   └── validation.js          # Email Validation page: quick check, scan card with live progress, issues table + bulk bar
 │   ├── favicon.png
 │   └── favicon.svg
 ├── templates/
@@ -101,6 +106,7 @@ ListMonk-Pro/
 │   ├── test_deliverability_controls.py # Per-setting edits (whitelist/validation) & footer unsubscribe link template toggle
 │   ├── test_warmup.py             # Warm-up: ramp maths, delta counting, day roll-over/advance rule, quota enforcement, scheduler interplay, API
 │   ├── test_email_format.py       # HTML ↔ plain switch: twin/text conversion, remembered setups, compile rollback, attribs kept on edit
+│   ├── test_email_validation.py   # Validator (syntax, DNS verdicts, flags, cache), scan, cleanup safety rails, schedule maths, API
 │   ├── conftest.py                # Resets module-level caches between tests
 │   └── test_regressions.py        # Route order, IMAP seen-marking, prune, timestamp regressions
 ├── .github/
@@ -125,9 +131,9 @@ ListMonk-Pro/
 
 ## Technology Stack
 
-- **Backend**: Python 3.12+, FastAPI 0.141+, Uvicorn, httpx (async HTTP), Jinja2, Python-dotenv
+- **Backend**: Python 3.12+, FastAPI 0.141+, Uvicorn, httpx (async HTTP), dnspython (async MX lookups), Jinja2, Python-dotenv
 - **Frontend**: Vanilla JavaScript (ES6+), Chart.js (vendored in `static/js/vendor/`), Modern Dark CSS (no build step)
-- **State & Storage**: Writable JSON state files in `DATA_DIR` (`schedule.json`, `warmup.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`, `unsubscribe_examined.json`, `bounce_processed.json`), in-memory caches (`opener_cache`, `hard_bounce_cache`)
+- **State & Storage**: Writable JSON state files in `DATA_DIR` (`schedule.json`, `warmup.json`, `email_cleanup.json`, `email_validation_results.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`, `unsubscribe_examined.json`, `bounce_processed.json`), in-memory caches (`opener_cache`, `hard_bounce_cache`)
 - **Testing**: Pytest 9.1+, pytest-asyncio, AnyIO
 - **Deployment**: Docker, Docker Compose, Nginx, Certbot
 
@@ -231,6 +237,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | `warmup_loop` | 1 s while a campaign is running, 3 s otherwise (only does work while warm-up is **enabled**; backs off to 30 s when ListMonk is unreachable) | Counts what ListMonk has sent since the last poll (`/api/campaigns/running/stats`) and pauses every running campaign the moment today's warm-up quota is used up (see *Sending warm-up* below). A new day closes the previous one and runs a scheduler tick so held-back campaigns resume at once. Starting/resuming a campaign through `PUT /api/campaigns/{id}/status` wakes it immediately (`nudge_warmup`) |
 | `reply_scan_loop` | `scan_interval_minutes` (15) | Scans IMAP for cold-outreach prospect replies, strips quotes, classifies sentiment (see *Reply classification* below). Delivery-failure DSNs (mailer-daemon subject/sender/body markers) are never stored as replies: they are routed through `bounce_ingest.ingest_parsed_dsn` so the failed prospect gets a real bounce record (Bounces page, Analytics bounce counts), deduped against `bounce_processed.json` so a mailbox both scanners watch yields one record. HTML-only replies (no usable `text/plain` part) are rendered to text via `imap_helpers.html_to_text` so genuine replies are never stored with an empty body; records already stored empty are repaired in place from the fetched messages, and a re-classification pass re-tags stored replies when the sentiment rules evolve (a DSN stored by an older version is removed from the feed outright). Dedup uses the Message-ID or, when absent, the same `From|Date|Subject` fingerprint as bounce ingestion, persisted to `reply_processed.json` (capped at 5000) |
 | `start_cache_updater` | 5 minutes | Refreshes in-memory hard bounce counts per campaign |
+| `email_cleanup_loop` | 60 seconds (only works when a slot is due) | Runs the scheduled dead-email cleanup (Settings → Email Cleanup, off by default) when a daily / weekly / monthly slot has passed unhandled; see *Email validation & cleanup* below. Backs off on errors like the other loops |
 
 ### 5b. Sending Warm-up (`app/services/warmup.py`, `app/services/campaign_scheduler.py`)
 - Caps the **total** campaign emails per day (all campaigns share one quota — reputation belongs to the sending domain) and raises the cap gradually: `build_ramp(start, growth_percent, target)` grows each day by the percentage but by at least one email (integer maths, rounded half up) and ends exactly on the target. `100` gives 10, 20, 40, 80 …; presets (`RAMP_PRESETS`: gentle +10 %, standard +20 %, doubling ×2) only fill start/growth.
@@ -240,6 +247,19 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 - **Day = calendar day in the warm-up `timezone`** (`today_for`). `_roll_day()` closes the stored day when the date moves on, appends it to `history` (capped at 60) and resets the counter. **The ramp advances only after a day that sent ≥ `ADVANCE_MIN_FRACTION` (80 %) of its quota** — a weekend, an empty queue or an app outage must never push a cold domain to a bigger volume. Only one day is closed however long the app was down. Changing the timezone moves `date` without closing the day. `view()` shows the next day's quota with a zero counter between midnight and the first poll (`pending_rollover`), so `has_quota()` is never stale-false.
 - **Known limits (also stated in the UI):** the cap can be exceeded by what ListMonk sends between two polls (≈ 1 s of sending: message rate × concurrency is the upper bound, so the Insights card warns when that is large against the quota); while this app is stopped ListMonk sends without a cap; a send that failed at SMTP is not counted.
 - Frontend: Settings → *Sending Warm-up* (`Settings.renderWarmup`). The live meter is refreshed in place by `_syncWarmupStatus()` (never re-rendered, so unsaved form edits survive); the ramp chart is drawn from `/api/warmup/preview` so the maths exists only in Python.
+
+### 5c. Email Validation & Cleanup (`app/services/email_validation.py`, `email_cleanup.py`)
+- **Verdicts:** `invalid` (can never receive mail), `risky` (disposable domain, role account such as `info@`, probable typo of a big provider), `unknown` (a DNS lookup failed transiently), `valid`. Checks: RFC 5321/5322 syntax (non-ASCII local parts and IDN domains are accepted), domain exists (NXDOMAIN → `no_domain`), mail server exists (MX; falls back to A/AAAA per RFC 5321; a Null MX per RFC 7505 → `null_mx`; nothing → `no_mx`). `hard_bounce` is added by subscriber scans only.
+- **The one rule that matters:** only a *definitive* DNS answer may produce `invalid`. A timeout, SERVFAIL, `NoNameservers` or any raw exception is `unknown`, never `invalid`: callers blocklist on `invalid`. The DNS call goes through the single seam `email_validation._resolve` (tests replace it; no network in tests). Per-domain results are cached (1 h; transient `unknown` only 60 s), bounded (50,000, swept) with in-flight dedup; `invalidate()` resets it and is called from `tests/conftest.py`. Settings: `EMAIL_VALIDATION_DNS_TIMEOUT` (5 s), `EMAIL_VALIDATION_CONCURRENCY` (50).
+- **Typo detection is conservative:** an explicit misspelling table, TLD slips (`.con`), and edit-distance matching limited to dropped / doubled / swapped letters against long-named providers. **Substitutions are excluded on purpose** (`email.com` vs `gmail.com` are two real providers).
+- **Not covered, deliberately:** whether a specific *mailbox* exists (needs an SMTP `RCPT TO` probe: unreliable, often blocked, can hurt the sending IP). Do not add one without an opt-in.
+- **Jobs:** `scan` (report only, optionally one list) and `cleanup` (scan + **blocklist**, never delete). One job at a time (`email_cleanup._job`, claimed synchronously in `_begin_job`; `409` when busy); started in the background via `task_utils.spawn`, progress polled from `GET /api/email-validation/status`. Only `status = 'enabled'` subscribers are read. Hard-bounced subscribers come from `get_bounces(bounce_type="hard")` with the same opener exclusion as the Bounces page (`bounce_filters.filter_bounces_excluding_openers`) and are matched by `subscriber_id` or email.
+- **What cleanup acts on:** `invalid` verdicts whose reasons are enabled in the settings (`clean_invalid` → syntax / no_domain / no_mx / null_mx, `clean_hard_bounces` → hard_bounce). `risky` and `unknown` are **never** acted on automatically.
+- **Safety rails (cleanup only):** (1) `resolver_healthy()` must pass (a well-known domain resolves) or the run fails without touching anyone; (2) if candidates exceed `HOLD_FRACTION` (20 %) of the checked subscribers (judged from `HOLD_MIN_SAMPLE` = 50) the run is **held** (`status: held`): nothing is blocklisted and the user reviews on the page; (3) candidates are collected first and blocklisted afterwards in chunks of 100, never while paginating (ListMonk paginates by offset); (4) partial failures are reported (`failed_blocklist`, `status: failed`), the unblocklisted rows stay listed for a retry.
+- **Schedule:** `latest_slot(cfg, now)` / `next_slot` are pure (timezone via `zoneinfo`; monthly uses days 1–28). A run is owed when `last_slot < latest_slot`. Enabling or moving the schedule **baselines** `last_slot` to the current slot, so saving "daily at 03:00" at 10:00 never fires at once; a slot missed while the app was down runs once on startup; a held / ok / cancelled run uses its slot up, a `failed` one keeps it and is retried after `RETRY_AFTER_FAILURE` (1 h).
+- **State:** `email_cleanup.json` (settings, `last_slot`, `last_scan`, `last_run`, `recent_cleaned` audit trail ≤ 100) and `email_validation_results.json` (the problem addresses only, capped at 50,000, worst first when trimming; valid addresses are counted, never stored). A complete full scan replaces the results; a list scan or a cancelled one only replaces the entries of subscribers it re-checked. Both are written atomically; module locks `_STATE_LOCK` / `_RESULTS_LOCK` are reset in `tests/conftest.py` (rule 11).
+- **Results actions** only touch submitted ids (rule 14): `PUT /results/blocklist` additionally refuses ids that are not in the stored results (`skipped`), and *Dismiss* (`DELETE /results`) forgets rows without touching ListMonk.
+- Frontend: `Validation` (`validation.js`) paints its shell once and repaints `#valScan` / `#valResults` in place, so the quick-check box and search field keep their input while a scan reports progress; the status poll stops when leaving the page (`App.route`). Settings → *Email Cleanup* (`Settings.renderCleanup`) syncs its live parts in place (`_syncCleanupStatus`), so unsaved form edits survive; turning the switch on saves the on-screen schedule with it.
 
 ### 5a. Reply Classification (`app/services/imap_reply_tracker.py`)
 - **Only mail that is part of a campaign is stored.** Newsletter/list mail (`List-Unsubscribe`,
@@ -348,7 +368,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
   first rows as JSON, so the UI previews the exact output ListMonk will receive.
 
 ### 7. Persistent Runtime State (`DATA_DIR`)
-- `app/config.py` provides `settings.data_path(filename)` to store mutable JSON state files (`schedule.json`, `warmup.json`, `app_settings.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`, `unsubscribe_examined.json`, `reply_log.json`, `reply_processed.json`, `reply_settings.json`, `bounce_processed.json`, `session_revocations.json`).
+- `app/config.py` provides `settings.data_path(filename)` to store mutable JSON state files (`schedule.json`, `warmup.json`, `email_cleanup.json`, `email_validation_results.json`, `app_settings.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`, `unsubscribe_examined.json`, `reply_log.json`, `reply_processed.json`, `reply_settings.json`, `bounce_processed.json`, `session_revocations.json`).
 - `bounce_processed.json` is a capped list of handled DSN Message-IDs (newest first) that makes bounce ingestion idempotent independently of IMAP `\Seen`. Its cap (50,000) is much larger than the other sets because bounce ingestion re-examines the whole 30-day window on every scan: a smaller cap started evicting ids of DSNs still inside the window and re-created them as duplicate bounce records. `unsubscribe_examined.json` and `unsubscribe_processed.json` use the same 50,000 cap for the same reason (the IMAP scanner re-reads its whole window; the link scanner re-polls ListMonk). `reply_processed.json` is capped at 5000 entries (oldest evicted), which is safe there — the reply scan only re-reads the 200 most recent messages. The reply scan peeks identity headers first and downloads only unprocessed messages (plus processed ones awaiting a body repair).
 - Every JSON state read/write is explicit UTF-8; writes are atomic (tempfile + `fsync` + `os.replace`). `app_settings.load_settings` also guards against a hand-edited file holding a non-object (falls back to defaults instead of 500-ing the onboarding gate).
 - In Docker, `DATA_DIR` defaults to `/data` (backed by a named volume).
@@ -411,6 +431,16 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/warmup/insights` | GET | Queued recipients (running + paused campaigns), days to send them on this ramp, ListMonk's max messages/second and an overshoot warning. Best effort: parts that cannot be read from ListMonk are `null`, never a 5xx |
 | **Auto-Unblock** | `/api/auto-unblock/status` | GET | Get count of blocklisted engaged contacts |
 | | `/api/auto-unblock/run` | POST | Manually run auto-unblock process |
+| **Email Validation** | `/api/email-validation/check` | POST | `{"emails": [...≤100]}`: verdict, reasons, detail and typo suggestion per address. Never touches ListMonk |
+| | `/api/email-validation/status` | GET | Running job progress (`running`, `kind`, `phase`, `checked`/`total`, counts) + the latest scan summary + stored-problem counts |
+| | `/api/email-validation/scan` | POST | Start a report-only scan in the background; optional `{"list_id": n}` (positive int, else 400); `409` while a job runs |
+| | `/api/email-validation/scan/cancel` | POST | Stop the running job after the current page (`409` when nothing runs) |
+| | `/api/email-validation/results` | GET | Stored problem addresses, worst first; `verdict` (`invalid`/`risky`/`unknown`), `search` (in-memory substring, never ListMonk SQL), `page` (≤ 100,000), `per_page` (≤ 200) |
+| | `/api/email-validation/results/export` | GET | CSV of the stored problems (formula-injection safe); `404` when empty |
+| | `/api/email-validation/results/blocklist` | PUT | `{"ids": [...]}` blocklist the selected rows only (`parse_ids`, chunks of 100). Ids not in the stored results are `skipped`; failures are listed per id |
+| | `/api/email-validation/results` | DELETE | `?ids=…` dismiss rows from the list; ListMonk is not touched |
+| | `/api/email-validation/cleanup` | GET / PUT | Cleanup settings + `next_run`, last scan / run, recent audit trail. PUT is strictly typed (unknown key, bool-as-int, bad timezone / time / day → 400; enabling with nothing to clean → 400) and baselines the schedule slot |
+| | `/api/email-validation/cleanup/run` | POST | Run the real cleanup now in the background (`409` while a job runs, `400` when no criterion is enabled) |
 | **Unsubscribes** | `/api/unsubscribes` | GET | Paginated unsubscribe log |
 | | `/api/unsubscribes/stats` | GET | Unsubscribe counts & source breakdown |
 | | `/api/unsubscribes/settings` | GET / PUT | Get / update unsubscribe settings (blocklist toggle) |
@@ -482,6 +512,7 @@ Every data page exposes row-level actions plus a multi-select bulk bar
 | Bounces | Delete | Export Selected (CSV), Delete Selected (plus the existing filter-wide Delete All) |
 | Replies & Leads | Reading pane: status switch (Unread / Hot lead / Replied / Archived), Copy Email, Blocklist, Delete (`J`/`K` or ↑/↓ move between replies) | Mark Hot Lead / Replied / Archived / Unread, Blocklist, Delete |
 | Unsubscribes | per-campaign Remove, Remove List (detail view), record removal | Delete Records for the selected campaign cards |
+| Email Validation | Blocklist, Dismiss | Blocklist Selected, Dismiss Selected, Export Selected (CSV); filter-wide Export CSV |
 
 Frontend conventions:
 

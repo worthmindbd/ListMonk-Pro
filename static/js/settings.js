@@ -1,12 +1,14 @@
 /**
- * Settings page - combines Scheduler, Warm-up and Auto-Unblock into one page with tabs.
+ * Settings page - combines Scheduler, Warm-up, Email Cleanup and Auto-Unblock into one page with tabs.
  */
 const Settings = {
     activeTab: 'scheduler',
     schedule: null,
     warmup: null,
+    cleanup: null,
     unblockStatus: null,
     _refreshInterval: null,
+    _cleanupPoll: null,
     _previewTimer: null,
     _previewSeq: 0,
 
@@ -15,17 +17,20 @@ const Settings = {
         App.setContent('<div class="loading-spinner">Loading settings...</div>');
 
         try {
-            const [sched, unblock, warmup] = await Promise.all([
+            const [sched, unblock, warmup, cleanup] = await Promise.all([
                 API.get('/api/scheduler'),
                 API.get('/api/auto-unblock/status'),
                 // Warm-up is its own feature: if it fails to load, the other
                 // tabs must still work (the Warm-up tab explains the failure).
                 API.get('/api/warmup', true).catch(() => null),
+                // Same for email cleanup.
+                API.get('/api/email-validation/cleanup', true).catch(() => null),
             ]);
             if (App.stale(this._seq)) return;
             this.schedule = sched;
             this.unblockStatus = unblock;
             this.warmup = warmup;
+            this.cleanup = cleanup;
         } catch {
             if (App.stale(this._seq)) return;
             App.setContent('<div class="empty-state"><h2>Failed to load settings</h2></div>');
@@ -49,6 +54,10 @@ const Settings = {
                 <button class="settings-tab ${this.activeTab === 'warmup' ? 'active' : ''}" onclick="Settings.switchTab('warmup')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
                     Sending Warm-up
+                </button>
+                <button class="settings-tab ${this.activeTab === 'cleanup' ? 'active' : ''}" onclick="Settings.switchTab('cleanup')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+                    Email Cleanup
                 </button>
                 <button class="settings-tab ${this.activeTab === 'autounblock' ? 'active' : ''}" onclick="Settings.switchTab('autounblock')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
@@ -75,6 +84,8 @@ const Settings = {
             el.innerHTML = this.renderScheduler();
         } else if (this.activeTab === 'warmup') {
             el.innerHTML = this.renderWarmup();
+        } else if (this.activeTab === 'cleanup') {
+            el.innerHTML = this.renderCleanup();
         } else {
             el.innerHTML = this.renderAutoUnblock();
         }
@@ -84,6 +95,10 @@ const Settings = {
         if (this.activeTab === 'warmup' && this.warmup) {
             this._previewWarmup();
             this._loadWarmupInsights();
+        }
+        if (this.activeTab === 'cleanup' && this.cleanup) {
+            this._cleanupFreqChanged();
+            if (this.cleanup.job?.running) this._startCleanupPoll();
         }
     },
 
@@ -605,6 +620,377 @@ const Settings = {
         }
     },
 
+    // ── Email Cleanup Tab ────────────────────────────────
+    WEEKDAYS: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'],
+
+    /** An ISO instant shown in the schedule's own timezone, so "03:00" means 03:00. */
+    _cleanupWhen(iso, tz) {
+        if (!iso) return '-';
+        try {
+            const text = new Date(iso).toLocaleString([], {
+                timeZone: tz || undefined, weekday: 'short', month: 'short', day: 'numeric',
+                hour: '2-digit', minute: '2-digit',
+            });
+            return App.escapeHtml(`${text}${tz ? ' (' + tz + ')' : ''}`);
+        } catch {
+            return App.escapeHtml(App.formatDateTime(iso));
+        }
+    },
+
+    _cleanupBadge(c) {
+        const style = 'font-size:0.9rem;padding:6px 14px';
+        const job = c.job || {};
+        if (job.running) {
+            const label = job.kind === 'cleanup' ? 'CLEANING…' : 'SCAN RUNNING…';
+            return `<span class="badge badge-warning" style="${style}">${label}</span>`;
+        }
+        if (c.enabled) {
+            return `<span class="badge badge-success" style="${style}">ON - next run ${this._cleanupWhen(c.next_run, c.timezone)}</span>`;
+        }
+        return `<span class="badge badge-default" style="${style}">OFF</span>`;
+    },
+
+    /** Progress bar while a job runs, otherwise nothing. */
+    _cleanupProgressHtml(c) {
+        const job = c.job || {};
+        if (!job.running) return '';
+        const pct = job.total > 0 ? Math.min(100, Math.round(job.checked / job.total * 100)) : 0;
+        const what = job.kind === 'cleanup' ? 'Cleanup' : 'A scan';
+        return `
+            <div class="progress-bar" role="progressbar" aria-label="Cleanup progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}">
+                <div class="progress-fill" style="width:${pct}%"></div>
+            </div>
+            <p style="font-size:0.85rem;color:var(--text-muted);margin:10px 0 0">
+                ${what} is running: ${this._n(job.checked)} of ${job.total ? this._n(job.total) : '…'} subscribers checked
+                (${App.escapeHtml(job.phase || '')})
+                <button class="btn btn-sm" style="margin-left:8px" onclick="Settings.cancelCleanup()" ${job.cancel_requested ? 'disabled' : ''}>${job.cancel_requested ? 'Stopping…' : 'Cancel'}</button>
+            </p>`;
+    },
+
+    _cleanupLastRunHtml(c) {
+        const r = c.last_run;
+        if (!r) {
+            return '<p style="font-size:0.9rem;color:var(--text-muted);margin:12px 0 0">No cleanup has run yet.</p>';
+        }
+        const tone = { ok: 'success', held: 'warning', failed: 'danger', cancelled: 'default' }[r.status] || 'default';
+        const label = { ok: 'Completed', held: 'Held for review', failed: 'Failed', cancelled: 'Stopped' }[r.status] || r.status;
+        const tile = (k, v) => `<div class="cell"><div class="k">${k}</div><div class="v">${this._n(v || 0)}</div></div>`;
+        return `
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:16px 0 10px">
+                <span class="badge badge-${tone}">${App.escapeHtml(label)}</span>
+                <span style="font-size:0.85rem;color:var(--text-secondary)">Last cleanup ${this._cleanupWhen(r.at, c.timezone)}</span>
+            </div>
+            <div class="import-summary">
+                ${tile('Checked', r.checked)}${tile('Dead found', r.candidates)}${tile('Blocklisted', r.blocklisted)}${tile('Not blocklisted', r.failed_blocklist)}
+            </div>
+            ${r.message ? `<p style="font-size:0.85rem;color:var(--text-secondary);margin:0">${App.escapeHtml(r.message)}</p>` : ''}
+            ${r.status === 'held' ? `<p style="font-size:0.85rem;margin:8px 0 0"><a href="#/validation?verdict=invalid">Review these addresses on the Email Validation page</a>, then blocklist the ones you agree with.</p>` : ''}`;
+    },
+
+    _cleanupRecentHtml(c) {
+        const rows = (c.recent_cleaned || []).slice(0, 15);
+        if (!rows.length) return '';
+        const reasonLabel = (r) => (typeof Validation !== 'undefined' ? Validation.reasonLabel(r) : r);
+        const body = rows.map(r => `
+            <tr>
+                <td>${this._cleanupWhen(r.at, c.timezone)}</td>
+                <td><strong class="cell-email">${App.escapeHtml(r.email || '')}</strong></td>
+                <td>${App.escapeHtml((r.reasons || []).map(reasonLabel).join(', '))}</td>
+            </tr>`).join('');
+        return `
+            <div class="card" style="margin-bottom:20px">
+                <div class="card-header"><h2 class="card-title">Recently Blocklisted</h2></div>
+                <p style="font-size:0.85rem;color:var(--text-muted);margin:0 0 12px">
+                    Blocklisted, never deleted. To bring one back, unblock it from the Leads page.
+                </p>
+                <div class="table-wrapper" tabindex="0" role="region" aria-label="Scrollable data table"><table>
+                    <thead><tr><th>When</th><th>Email</th><th>Why</th></tr></thead>
+                    <tbody>${body}</tbody>
+                </table></div>
+            </div>`;
+    },
+
+    renderCleanup() {
+        const c = this.cleanup;
+        if (!c) {
+            return `<div class="card"><div class="empty-state"><h2>Email cleanup unavailable</h2>
+                <p>The cleanup settings could not be loaded. Reload the page to try again.</p></div></div>`;
+        }
+        const [hh, mm] = String(c.time || '03:00').split(':').map(n => parseInt(n, 10));
+        const hourOptions = Array.from({ length: 24 }, (_, h) => {
+            const label = h === 0 ? '12 AM' : h < 12 ? `${h} AM` : h === 12 ? '12 PM' : `${h - 12} PM`;
+            return `<option value="${h}" ${h === hh ? 'selected' : ''}>${label}</option>`;
+        }).join('');
+        // The stored minute is always offered, even off the 15-minute grid.
+        const minutes = [0, 15, 30, 45];
+        if (Number.isInteger(mm) && !minutes.includes(mm)) { minutes.push(mm); minutes.sort((a, b) => a - b); }
+        const minuteOptions = minutes.map(m =>
+            `<option value="${m}" ${m === mm ? 'selected' : ''}>${String(m).padStart(2, '0')}</option>`).join('');
+
+        const timezones = [
+            'US/Eastern', 'US/Central', 'US/Mountain', 'US/Pacific',
+            'UTC', 'Europe/London', 'Europe/Berlin', 'Europe/Paris',
+            'Asia/Tokyo', 'Asia/Shanghai', 'Asia/Kolkata', 'Asia/Dhaka',
+            'Australia/Sydney', 'Pacific/Auckland',
+        ];
+        if (c.timezone && !timezones.includes(c.timezone)) timezones.unshift(c.timezone);
+        const tzOptions = timezones.map(tz =>
+            `<option value="${App.escapeHtml(tz)}" ${tz === c.timezone ? 'selected' : ''}>${App.escapeHtml(tz)}</option>`).join('');
+        const weekdayOptions = this.WEEKDAYS.map((d, i) =>
+            `<option value="${i}" ${i === c.weekday ? 'selected' : ''}>${d}</option>`).join('');
+        const running = !!c.job?.running;
+
+        return `
+            <div class="card" style="margin-bottom:20px">
+                <div class="card-header warmup-head">
+                    <h2 class="card-title">Automatic Email Cleanup</h2>
+                    <div class="action-btns" id="cleanupBadge">${this._cleanupBadge(c)}</div>
+                </div>
+                <p style="font-size:0.9rem;color:var(--text-secondary);margin:0">
+                    Finds addresses that can never receive mail and <strong>blocklists</strong> them, so they stop hurting your sender reputation.
+                    Nothing is deleted.
+                </p>
+                <div id="cleanupProgress" style="margin-top:14px">${this._cleanupProgressHtml(c)}</div>
+                <div id="cleanupLastRun">${this._cleanupLastRunHtml(c)}</div>
+            </div>
+
+            <div class="card" style="margin-bottom:20px">
+                <div class="card-header"><h2 class="card-title">Schedule</h2></div>
+
+                <div class="form-group" style="margin-bottom:20px">
+                    <label class="checkbox-label ${c.enabled ? 'toggle-on' : ''}" id="cleanupEnabledBanner" style="font-size:1rem;padding:12px 18px;border-width:2px;display:flex;width:100%">
+                        <input type="checkbox" id="cleanupEnabled" ${c.enabled ? 'checked' : ''} onchange="Settings.toggleCleanup(this.checked)">
+                        <span style="font-weight:600" id="cleanupEnabledLabel">${c.enabled ? 'Automatic cleanup is ON' : 'Automatic cleanup is OFF'}</span>
+                        <span class="banner-switch" aria-hidden="true"></span>
+                    </label>
+                    <p style="font-size:0.85rem;color:var(--text-muted);margin-top:8px">
+                        While on, every enabled subscriber is checked on the schedule below. If the app was stopped when a run was due, it runs once after it starts again.
+                    </p>
+                </div>
+
+                <div class="warmup-fields">
+                    <div class="form-group" style="margin-bottom:0">
+                        <label for="cleanupFrequency">How often</label>
+                        <select id="cleanupFrequency" onchange="Settings._cleanupFreqChanged()">
+                            <option value="daily" ${c.frequency === 'daily' ? 'selected' : ''}>Every day</option>
+                            <option value="weekly" ${c.frequency === 'weekly' ? 'selected' : ''}>Every week</option>
+                            <option value="monthly" ${c.frequency === 'monthly' ? 'selected' : ''}>Every month</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="margin-bottom:0" id="cleanupWeekdayWrap">
+                        <label for="cleanupWeekday">On</label>
+                        <select id="cleanupWeekday">${weekdayOptions}</select>
+                    </div>
+                    <div class="form-group" style="margin-bottom:0" id="cleanupDomWrap">
+                        <label for="cleanupDom">On day of the month</label>
+                        <input type="number" id="cleanupDom" min="1" max="28" step="1" value="${c.day_of_month}">
+                    </div>
+                    <div class="form-group" style="margin-bottom:0">
+                        <label for="cleanupHour">At</label>
+                        <div style="display:flex;gap:4px">
+                            <select id="cleanupHour" aria-label="Hour" style="width:auto">${hourOptions}</select>
+                            <select id="cleanupMin" aria-label="Minute" style="width:auto">${minuteOptions}</select>
+                        </div>
+                    </div>
+                    <div class="form-group" style="margin-bottom:0">
+                        <label for="cleanupTimezone">Timezone</label>
+                        <select id="cleanupTimezone">${tzOptions}</select>
+                    </div>
+                </div>
+                <p style="font-size:0.8rem;color:var(--text-muted);margin:12px 0 0">Monthly runs use days 1-28 so every month has the day.</p>
+
+                <div class="form-group" style="margin-top:20px">
+                    <label>What counts as dead</label>
+                    <div class="checkbox-group">
+                        <label class="checkbox-label"><input type="checkbox" id="cleanupInvalid" ${c.clean_invalid ? 'checked' : ''}><span>Invalid addresses</span></label>
+                        <label class="checkbox-label"><input type="checkbox" id="cleanupBounces" ${c.clean_hard_bounces ? 'checked' : ''}><span>Hard-bounced contacts</span></label>
+                    </div>
+                    <p style="font-size:0.8rem;color:var(--text-muted);margin-top:8px">
+                        <strong>Invalid</strong> = malformed, domain does not exist, or no mail server.
+                        <strong>Hard-bounced</strong> = a permanent bounce on record (people who opened that campaign are never counted).
+                        Disposable domains, shared inboxes like <code>info@</code> and typos are only reported on the Email Validation page, never blocklisted automatically.
+                    </p>
+                </div>
+
+                <div class="form-actions">
+                    <button class="btn btn-primary" onclick="Settings.saveCleanup()">Save Schedule</button>
+                    <button class="btn" id="cleanupRunBtn" onclick="Settings.runCleanupNow()" ${running ? 'disabled' : ''}>Run Cleanup Now</button>
+                    <a class="btn" href="#/validation">Open Email Validation</a>
+                </div>
+            </div>
+
+            <div id="cleanupRecent">${this._cleanupRecentHtml(c)}</div>
+
+            <div class="card">
+                <div class="card-header"><h2 class="card-title">How it works</h2></div>
+                <div style="font-size:0.85rem;color:var(--text-secondary);line-height:1.8">
+                    <ul style="padding-left:20px;margin:8px 0">
+                        <li>Each address is checked for a valid format and for a domain that exists and <strong>can receive mail</strong> (MX / Null MX records). No email is ever sent.</li>
+                        <li>A <strong>DNS timeout or error never counts as dead</strong>: those addresses are only listed as "Unknown". Before any run the app confirms DNS works, otherwise it stops without changing anything.</li>
+                        <li>If a run would blocklist <strong>more than ${this._n(c.hold_percent || 20)}%</strong> of your subscribers, it is <strong>held for review</strong>: nothing is blocklisted and you decide on the Email Validation page. That size usually means a data problem, not dead addresses.</li>
+                        <li>It cannot confirm that a specific mailbox exists (that would need an SMTP probe, which is unreliable and can hurt your sending IP). Addresses that pass here can still bounce.</li>
+                    </ul>
+                </div>
+            </div>
+        `;
+    },
+
+    /** Show only the field the chosen frequency needs. */
+    _cleanupFreqChanged() {
+        const freq = document.getElementById('cleanupFrequency')?.value;
+        const wk = document.getElementById('cleanupWeekdayWrap');
+        const dom = document.getElementById('cleanupDomWrap');
+        if (wk) wk.style.display = freq === 'weekly' ? '' : 'none';
+        if (dom) dom.style.display = freq === 'monthly' ? '' : 'none';
+    },
+
+    /** Update the live parts in place (never re-render: unsaved edits survive). */
+    _syncCleanupStatus() {
+        const c = this.cleanup;
+        if (!c) return;
+        const put = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
+        put('cleanupBadge', this._cleanupBadge(c));
+        put('cleanupProgress', this._cleanupProgressHtml(c));
+        put('cleanupLastRun', this._cleanupLastRunHtml(c));
+        put('cleanupRecent', this._cleanupRecentHtml(c));
+        const label = document.getElementById('cleanupEnabledLabel');
+        const banner = document.getElementById('cleanupEnabledBanner');
+        const box = document.getElementById('cleanupEnabled');
+        if (label) label.textContent = c.enabled ? 'Automatic cleanup is ON' : 'Automatic cleanup is OFF';
+        if (banner) banner.classList.toggle('toggle-on', !!c.enabled);
+        if (box) box.checked = !!c.enabled;
+        const run = document.getElementById('cleanupRunBtn');
+        if (run) run.disabled = !!c.job?.running;
+    },
+
+    /** The schedule form as a settings patch, or null (with a toast) if invalid. */
+    _cleanupForm() {
+        const val = (id) => document.getElementById(id)?.value;
+        const hour = parseInt(val('cleanupHour'), 10);
+        const minute = parseInt(val('cleanupMin'), 10);
+        const form = {
+            frequency: val('cleanupFrequency'),
+            time: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`,
+            weekday: parseInt(val('cleanupWeekday'), 10),
+            day_of_month: parseInt(val('cleanupDom'), 10),
+            timezone: val('cleanupTimezone'),
+            clean_invalid: !!document.getElementById('cleanupInvalid')?.checked,
+            clean_hard_bounces: !!document.getElementById('cleanupBounces')?.checked,
+        };
+        if (Number.isNaN(hour) || Number.isNaN(minute)) {
+            App.toast('Pick a time of day', 'error');
+            return null;
+        }
+        if (Number.isNaN(form.day_of_month) || form.day_of_month < 1 || form.day_of_month > 28) {
+            App.toast('Day of the month must be between 1 and 28', 'error');
+            return null;
+        }
+        if (Number.isNaN(form.weekday)) {
+            App.toast('Pick a day of the week', 'error');
+            return null;
+        }
+        return form;
+    },
+
+    async saveCleanup() {
+        const form = this._cleanupForm();
+        if (!form) return;
+        if (this.cleanup.enabled && !form.clean_invalid && !form.clean_hard_bounces) {
+            App.toast('Choose at least one kind of address to clean', 'error');
+            return;
+        }
+        try {
+            const res = await API.put('/api/email-validation/cleanup', form);
+            this.cleanup = res.cleanup;
+            App.toast('Cleanup schedule saved', 'success');
+            this.renderTab();
+        } catch {
+            // API.request already surfaced the server message.
+        }
+    },
+
+    async toggleCleanup(checked) {
+        // Turning it on applies what is on screen, so a schedule edited a
+        // moment ago is not silently ignored. Turning it off needs no form.
+        let body = { enabled: false };
+        if (checked) {
+            const form = this._cleanupForm();
+            if (!form) { this._syncCleanupStatus(); return; }
+            body = { ...form, enabled: true };
+        }
+        try {
+            const res = await API.put('/api/email-validation/cleanup', body);
+            this.cleanup = res.cleanup;
+            App.toast(checked ? 'Automatic cleanup enabled' : 'Automatic cleanup disabled', 'success');
+            this._syncCleanupStatus();
+        } catch {
+            // API.request already surfaced the server message; put the switch back.
+            const box = document.getElementById('cleanupEnabled');
+            if (box) box.checked = !checked;
+        }
+    },
+
+    async runCleanupNow() {
+        if (!await App.confirm('Run Email Cleanup',
+                'This scans every enabled subscriber now and blocklists addresses that can never receive mail (malformed, nonexistent domain, no mail server, or hard-bounced). They are blocklisted, not deleted, and you can unblock them later. If more than ' + (this.cleanup?.hold_percent || 20) + '% would be blocklisted, nothing is changed. Continue?')) return;
+        try {
+            const res = await API.post('/api/email-validation/cleanup/run');
+            this.cleanup = { ...this.cleanup, job: res.job };
+            this._syncCleanupStatus();
+            this._startCleanupPoll();
+            App.toast('Cleanup started', 'info');
+        } catch {
+            // Already surfaced (e.g. 409 when a scan is already running).
+        }
+    },
+
+    async cancelCleanup() {
+        try {
+            await API.post('/api/email-validation/scan/cancel');
+            App.toast('Stopping after the current batch…', 'info');
+        } catch {
+            // Already surfaced.
+        }
+    },
+
+    _startCleanupPoll() {
+        if (this._cleanupPoll) return;
+        this._cleanupPoll = setInterval(() => this._pollCleanup(), 2000);
+    },
+
+    _stopCleanupPoll() {
+        if (this._cleanupPoll) {
+            clearInterval(this._cleanupPoll);
+            this._cleanupPoll = null;
+        }
+    },
+
+    async _pollCleanup() {
+        if (App.currentPage !== 'settings' || this.activeTab !== 'cleanup') {
+            this._stopCleanupPoll();
+            return;
+        }
+        try {
+            const wasRunning = !!this.cleanup?.job?.running;
+            const fresh = await API.get('/api/email-validation/cleanup', true);
+            if (App.currentPage !== 'settings' || this.activeTab !== 'cleanup') return;
+            this.cleanup = fresh;
+            this._syncCleanupStatus();
+            if (!fresh.job?.running) {
+                this._stopCleanupPoll();
+                const r = fresh.last_run;
+                if (wasRunning && r) {
+                    if (r.status === 'failed') App.toast(r.message || 'Cleanup failed', 'error');
+                    else if (r.status === 'held') App.toast('Cleanup held for review: too many addresses looked dead', 'info');
+                    else if (r.status === 'cancelled') App.toast('Cleanup stopped', 'info');
+                    else App.toast(`Cleanup done: ${this._n(r.blocklisted)} blocklisted`, 'success');
+                }
+            }
+        } catch {
+            // Keep polling; the next tick may succeed.
+        }
+    },
+
     // ── Auto-Unblock Tab ─────────────────────────────────
     renderAutoUnblock() {
         const u = this.unblockStatus || {};
@@ -806,6 +1192,13 @@ const Settings = {
             try {
                 this.warmup = await API.get('/api/warmup', true);
                 this._syncWarmupStatus();
+            } catch {}
+        }
+        if (this.activeTab === 'cleanup' && this.cleanup) {
+            try {
+                this.cleanup = await API.get('/api/email-validation/cleanup', true);
+                this._syncCleanupStatus();
+                if (this.cleanup.job?.running) this._startCleanupPoll();
             } catch {}
         }
     },

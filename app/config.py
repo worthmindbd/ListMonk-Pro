@@ -60,6 +60,14 @@ class Settings:
     # the default.
     imap_timeout: int = _env_int("IMAP_TIMEOUT", default=60, minimum=5)
 
+    # Email validation (DNS/MX checks). The timeout bounds ONE DNS query: a
+    # slow resolver must turn into an "unknown" verdict, never stall a scan.
+    # The concurrency cap keeps a 100k-contact scan from flooding the resolver.
+    email_validation_dns_timeout: int = _env_int(
+        "EMAIL_VALIDATION_DNS_TIMEOUT", default=5, minimum=1)
+    email_validation_concurrency: int = _env_int(
+        "EMAIL_VALIDATION_CONCURRENCY", default=50, minimum=1)
+
     @property
     def imap_configured(self) -> bool:
         return bool(self.imap_host and self.imap_user and self.imap_pass)

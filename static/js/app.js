@@ -18,6 +18,7 @@ const App = {
         'unsubscribes': { title: 'Unsubscribes', render: () => Unsubscribes.render() },
         'replies': { title: 'Replies & Leads', render: () => Replies.render() },
         'deliverability': { title: 'Deliverability & Safety', render: () => Deliverability.render() },
+        'validation': { title: 'Email Validation', render: () => Validation.render() },
     },
 
     init() {
@@ -324,6 +325,11 @@ const App = {
         if (hash !== 'unsubscribes' && typeof Unsubscribes !== 'undefined') {
             Unsubscribes.activeCampaign = null;
             Unsubscribes.selectedEmails.clear();
+        }
+
+        // The validation page polls a running scan; that timer must not outlive it.
+        if (hash !== 'validation' && typeof Validation !== 'undefined') {
+            Validation.stopPoll();
         }
 
         // A dialog belongs to the page that opened it: Back/Forward or a deep

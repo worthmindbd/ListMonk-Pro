@@ -36,8 +36,8 @@ def _isolate_state_files(tmp_path_factory, monkeypatch):
     path themselves simply override this default.
     """
     from app.services import (
-        app_settings, bounce_ingest, campaign_scheduler, reply_log, unsubscribe_log,
-        warmup,
+        app_settings, bounce_ingest, campaign_scheduler, email_cleanup, reply_log,
+        unsubscribe_log, warmup,
     )
 
     # A directory of its own, not tmp_path: tests list tmp_path's contents.
@@ -53,6 +53,8 @@ def _isolate_state_files(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(campaign_scheduler, "SCHEDULE_FILE", state / "schedule.json")
     monkeypatch.setattr(warmup, "WARMUP_FILE", state / "warmup.json")
     monkeypatch.setattr(app_settings, "APP_SETTINGS_FILE", state / "app_settings.json")
+    monkeypatch.setattr(email_cleanup, "CLEANUP_FILE", state / "email_cleanup.json")
+    monkeypatch.setattr(email_cleanup, "RESULTS_FILE", state / "email_validation_results.json")
     from app import auth
     monkeypatch.setattr(auth, "REVOCATIONS_FILE", state / "session_revocations.json")
 
@@ -84,6 +86,13 @@ def _reset_module_caches():
         from app.services import campaign_scheduler, warmup
         campaign_scheduler.reset_warmup_nudge()
         warmup._WARMUP_LOCK = asyncio.Lock()
+        # Email validation: the per-domain DNS cache, in-flight lookups and
+        # semaphore, the single job slot and the state-file locks (rule 11).
+        from app.services import email_cleanup, email_validation
+        email_validation.invalidate()
+        email_cleanup.reset_job()
+        email_cleanup._STATE_LOCK = asyncio.Lock()
+        email_cleanup._RESULTS_LOCK = asyncio.Lock()
 
     _reset()
     yield

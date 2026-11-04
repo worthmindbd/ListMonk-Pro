@@ -72,6 +72,8 @@ ListMonk requires a specific CSV format (`email`, `name`, `attributes` as JSON).
 ### Settings & Automation
 - **Campaign Scheduler** — Enforces daily sending windows (e.g., 8:00 AM – 8:00 PM EST) and allowed days (Mon–Fri, weekends). Running campaigns outside the window auto-pause, and auto-paused campaigns automatically resume when the window opens.
 - **Sending Warm-up** — Ramps the daily send volume up gradually so a new domain or mailbox builds reputation safely (e.g. 10 → 20 → 40 … up to your target, or a gentler +10–20 % a day). Campaigns pause the moment the day's quota is used up and resume automatically the next day. The ramp only steps up after a day that actually sent ≥ 80 % of its plan, so weekends, an empty queue or a pause never push you to a bigger volume. Includes a live usage meter, ramp preview and a forecast of how long the queued recipients will take.
+- **Email Validation** — A dedicated page that checks addresses *before* you send: valid format, a domain that exists and can receive mail (MX / Null MX lookups), throwaway providers, shared inboxes like `info@` and likely typos (`gmial.com` → `gmail.com`). Check a pasted list instantly, or scan every subscriber (or one list) in the background and review the problem addresses with filters, bulk blocklist / dismiss and CSV export. Nothing is sent, and a scan never changes ListMonk by itself. A DNS timeout is reported as *unknown*, never as dead.
+- **Email Cleanup** — Optional automatic cleanup on a daily, weekly or monthly schedule (Settings → Email Cleanup). It **blocklists** (never deletes) addresses that can never receive mail: malformed, non-existent domain, no mail server, and hard-bounced contacts (people who opened that campaign are never counted). Safety rails: it stops if DNS isn't working, and holds for your review if more than 20 % of your subscribers would be removed. Includes a "Run Cleanup Now" button and an audit trail of what was blocklisted.
 - **Auto-Unblock Protection** — Identifies engaged subscribers (who clicked links or opened campaigns) who were accidentally blocklisted by false bounces, re-enables them, and purges their bounce records. Only bounce-driven blocklistings are reversed: anyone who unsubscribed, and blocklists you set yourself, stay blocked. Runs every 6 hours or manually.
 - **Persistent Data Store** — Runtime configuration and logs persist to `DATA_DIR` (backed by a named volume in Docker).
 
@@ -153,6 +155,10 @@ BOUNCE_IMAP_USER=bounces@yourdomain.com
 BOUNCE_IMAP_PASS=your-password
 BOUNCE_IMAP_USE_SSL=true
 
+# Email Validation (Optional)
+# EMAIL_VALIDATION_DNS_TIMEOUT=5    # seconds per DNS lookup before an address is reported "unknown"
+# EMAIL_VALIDATION_CONCURRENCY=50   # addresses checked in parallel during a scan
+
 # Persistent Data Storage Directory (Optional: defaults to /data in Docker, repo root in local dev)
 # DATA_DIR=/data
 ```
@@ -220,6 +226,7 @@ The dashboard runs six background loops started during application lifecycle:
 | **IMAP & Link Unsubscribe Scan** | Every 1 hour | Scans inbox for reply keywords and polls ListMonk for link unsubscribes |
 | **Bounce Ingestion** | Every 1 hour | Ingests and classifies new DSNs (last 30 days, read or unread) from the bounce IMAP mailbox |
 | **Auto-Unblock Protection** | Every 6 hours | Scans for engaged contacts blocklisted by bounces, re-enables them, and purges bounce records (opt-outs are never re-enabled) |
+| **Email Cleanup** | Checks every 60s, runs on its daily / weekly / monthly schedule (off by default) | Scans enabled subscribers and blocklists addresses that can never receive mail; held for review if more than 20 % would be removed |
 
 ---
 
@@ -241,6 +248,7 @@ ListMonk-Pro/
       unsubscribes.py          # Unsubscribe dashboard, campaign groups, manual scans, undo/reset
       replies.py               # Prospect reply feed, sentiment filters, hot lead status updates
       deliverability.py        # Deliverability pre-flight audit checklist & 1-click presets
+      email_validation.py      # Email Validation: quick check, subscriber scan, results, cleanup settings
     services/
       listmonk_client.py       # Async HTTP client for ListMonk REST API (with paginate_all helper)
       csv_converter.py         # CSV converter transforming arbitrary columns to ListMonk schema
@@ -248,6 +256,8 @@ ListMonk-Pro/
       auto_unblock.py          # Auto-unblock bounce-blocklisted engaged contacts (never opt-outs)
       campaign_scheduler.py    # Timezone-aware send window scheduler + fast warm-up quota loop
       warmup.py                # Warm-up ramp maths, daily quota accounting and day roll-over
+      email_validation.py      # Address validator: syntax, DNS MX / Null MX, disposable / role / typo flags
+      email_cleanup.py         # Subscriber scan + scheduled dead-email cleanup (blocklists, with safety rails)
       deliverability_service.py# Deliverability audit engine and 1-click preset sync
       bounce_ingest.py         # RFC 3463 DSN classifier & IMAP bounce mailbox scanner
       bounce_filters.py        # Opener false-positive bounce filtering
@@ -273,9 +283,10 @@ ListMonk-Pro/
       deliverability.js        # Deliverability pre-flight audit checklist & 1-click presets
       lists.js                 # Mailing list management
       replies.js               # Replies inbox: sentiment tabs, list + reading pane, hot lead flagging
-      settings.js              # Settings UI (scheduler, warm-up, auto-unblock, unsubscribe toggles)
+      settings.js              # Settings UI (scheduler, warm-up, email cleanup, auto-unblock, unsubscribe toggles)
       subscribers.js           # Subscriber management, search, edit modal, bulk actions
       unsubscribes.js          # Campaign-grouped unsubscribe view, source badges, undo/reset
+      validation.js            # Email Validation page: quick check, scan progress, problem addresses
       vendor/chart.umd.min.js  # Vendored Chart.js 4.5.1 (no CDN dependency)
     favicon.png
     favicon.svg

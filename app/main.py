@@ -33,10 +33,11 @@ from app.auth import (
     COOKIE_NAME,
 )
 from app.services.task_utils import shutdown as shutdown_tasks
+from app.services import email_cleanup
 from app.services.imap_reply_tracker import scan_and_track_replies
 from app.routers import (
     subscribers, lists, campaigns, templates, bounces, converter, unsubscribes,
-    replies, deliverability, appsettings, warmup,
+    replies, deliverability, appsettings, warmup, email_validation,
 )
 
 logger = logging.getLogger("listmonk-dashboard")
@@ -69,6 +70,7 @@ AUTO_UNBLOCK_INTERVAL = 6 * 60 * 60
 IMAP_SCAN_INTERVAL = 60 * 60  # 1 hour
 BOUNCE_INGEST_INTERVAL = 60 * 60  # 1 hour
 REPLY_SCAN_INTERVAL = 15 * 60  # 15 minutes
+EMAIL_CLEANUP_POLL = 60  # seconds between "is a cleanup due?" checks
 _auto_unblock_task = None
 _scheduler_task = None
 _imap_scan_task = None
@@ -76,6 +78,7 @@ _bounce_ingest_task = None
 _hard_bounce_cache_task = None
 _reply_scan_task = None
 _warmup_task = None
+_email_cleanup_task = None
 
 
 # ── Auth Middleware ───────────────────────────────────────
@@ -203,6 +206,30 @@ async def auto_unblock_loop():
         await asyncio.sleep(_backoff_delay(failures, AUTO_UNBLOCK_INTERVAL))
 
 
+async def email_cleanup_loop():
+    """Run the scheduled dead-email cleanup (Settings → Email Cleanup).
+
+    Polls cheaply every minute and only does work when a daily / weekly /
+    monthly slot has passed unhandled, so a changed schedule applies within a
+    minute and a slot missed while the app was down runs once on startup.
+    """
+    failures = 0
+    while True:
+        try:
+            summary = await email_cleanup.tick(listmonk)
+            if summary:
+                logger.info(
+                    "Email cleanup %s: checked %d, blocklisted %d (%s)",
+                    summary["status"], summary["checked"], summary["blocklisted"],
+                    summary["message"],
+                )
+            failures = 0
+        except Exception as e:
+            failures += 1
+            logger.error(f"Email cleanup error (#{failures}): {e}")
+        await asyncio.sleep(_backoff_delay(failures, EMAIL_CLEANUP_POLL))
+
+
 async def imap_scan_loop():
     """Scan IMAP inbox and ListMonk link unsubscribes every hour, starting immediately on startup."""
     failures = 0
@@ -284,7 +311,7 @@ async def reply_scan_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _auto_unblock_task, _scheduler_task, _imap_scan_task, _bounce_ingest_task, _hard_bounce_cache_task, _reply_scan_task, _warmup_task
+    global _auto_unblock_task, _scheduler_task, _imap_scan_task, _bounce_ingest_task, _hard_bounce_cache_task, _reply_scan_task, _warmup_task, _email_cleanup_task
     await listmonk.start()
     _auto_unblock_task = asyncio.create_task(auto_unblock_loop())
     _scheduler_task = asyncio.create_task(scheduler_loop(listmonk))
@@ -293,7 +320,8 @@ async def lifespan(app: FastAPI):
     _bounce_ingest_task = asyncio.create_task(bounce_ingest_loop())
     _hard_bounce_cache_task = asyncio.create_task(start_cache_updater())
     _reply_scan_task = asyncio.create_task(reply_scan_loop())
-    logger.info("Background tasks started: auto-unblock (6h), campaign scheduler (60s), warm-up quota (1-3s, only while enabled), IMAP+link scan (1h), bounce ingest (1h), hard bounce cache (5min), reply tracker (%dmin)", _reply_scan_interval() // 60)
+    _email_cleanup_task = asyncio.create_task(email_cleanup_loop())
+    logger.info("Background tasks started: auto-unblock (6h), campaign scheduler (60s), warm-up quota (1-3s, only while enabled), IMAP+link scan (1h), bounce ingest (1h), hard bounce cache (5min), email cleanup (60s check, only runs on its schedule), reply tracker (%dmin)", _reply_scan_interval() // 60)
     warn_if_default_credentials()
     logger.warning(
         "Login rate-limit state is in-memory only and was reset on this restart. "
@@ -311,7 +339,7 @@ async def lifespan(app: FastAPI):
     loop_tasks = [
         _auto_unblock_task, _scheduler_task, _imap_scan_task,
         _bounce_ingest_task, _hard_bounce_cache_task, _reply_scan_task,
-        _warmup_task,
+        _warmup_task, _email_cleanup_task,
     ]
     for task in loop_tasks:
         task.cancel()
@@ -385,6 +413,7 @@ app.include_router(replies.router, prefix="/api/replies", tags=["Replies"])
 app.include_router(deliverability.router, prefix="/api/deliverability", tags=["Deliverability"])
 app.include_router(appsettings.router, prefix="/api/app-settings", tags=["App Settings"])
 app.include_router(warmup.router, prefix="/api/warmup", tags=["Warm-up"])
+app.include_router(email_validation.router, prefix="/api/email-validation", tags=["Email Validation"])
 
 
 # ── Template Helper ───────────────────────────────────────

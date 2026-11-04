@@ -5395,3 +5395,66 @@ td .tag {
     }
 }
 
+/* ── Email Validation ─────────────────────────────────────── */
+.valid-result {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--glass-border);
+}
+
+.valid-result:last-child {
+    border-bottom: 0;
+}
+
+.valid-email {
+    font-weight: 600;
+    word-break: break-all;
+}
+
+.valid-reasons {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.valid-detail,
+.valid-suggest {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+
+.valid-suggest strong {
+    color: var(--text-primary);
+}
+
+/* Reasons sit under each other in a table cell, so give the hint some air. */
+td .valid-detail,
+td .valid-suggest {
+    margin-top: 6px;
+}
+
+.valid-tab-count {
+    opacity: 0.75;
+    font-weight: 400;
+    font-feature-settings: "tnum";
+}
+
+/* Five stat cards one-per-row on a phone would bury the results table, so the
+   scan strip packs two per row there. */
+@media (max-width: 520px) {
+    .valid-stats {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 10px;
+    }
+
+    .valid-stats .stat-card {
+        padding: 14px 16px;
+    }
+
+    .valid-stats .stat-value {
+        font-size: 1.7rem;
+    }
+}
