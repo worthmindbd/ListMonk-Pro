@@ -22,6 +22,11 @@ Only a *definitive* DNS answer may produce ``invalid``. A timeout or a
 resolver error is ``unknown``, always. Callers can blocklist on ``invalid``
 (see ``email_cleanup``), so a flaky network must never look like a dead domain.
 
+A resolver that cannot reach a domain's nameservers says nothing about the
+domain, so before giving up the lookup is retried on public fallback resolvers
+(``EMAIL_VALIDATION_FALLBACK_DNS``, see ``_resolve``). That only ever turns an
+``unknown`` into a real answer; it never turns an answer into something else.
+
 What this cannot tell you: whether one specific *mailbox* exists. That needs an
 SMTP ``RCPT TO`` probe, which is unreliable (greylisting, catch-all domains,
 blocked port 25) and can damage the sending IP's reputation, so it is
@@ -100,20 +105,22 @@ _domain_cache: dict[str, tuple[float, dict]] = {}
 _inflight: dict[str, "asyncio.Task[dict]"] = {}
 _dns_sem: Optional[asyncio.Semaphore] = None
 _resolver: Optional[dns.asyncresolver.Resolver] = None
+_fallback_resolvers: Optional[list] = None
 
 
 def invalidate() -> None:
     """Drop every cached domain verdict and shared state (tests, admin reset).
 
-    The semaphore and resolver are dropped too: an ``asyncio.Semaphore`` binds
+    The semaphore and resolvers are dropped too: an ``asyncio.Semaphore`` binds
     to the first event loop that contends it, and a test run uses a new loop
     per test.
     """
-    global _dns_sem, _resolver
+    global _dns_sem, _resolver, _fallback_resolvers
     _domain_cache.clear()
     _inflight.clear()
     _dns_sem = None
     _resolver = None
+    _fallback_resolvers = None
 
 
 def _sweep_cache(now: float) -> None:
@@ -208,14 +215,60 @@ def _get_resolver() -> dns.asyncresolver.Resolver:
     return _resolver
 
 
+def _get_fallback_resolvers() -> list:
+    """Lazily build one resolver per configured fallback server, in order.
+
+    Empty when ``EMAIL_VALIDATION_FALLBACK_DNS`` is empty (fallback disabled).
+    """
+    global _fallback_resolvers
+    if _fallback_resolvers is None:
+        timeout = float(settings.email_validation_dns_timeout)
+        built = []
+        for server in settings.email_validation_fallback_dns:
+            resolver = dns.asyncresolver.Resolver(configure=False)
+            resolver.nameservers = [server]
+            resolver.timeout = timeout
+            resolver.lifetime = timeout
+            built.append(resolver)
+        _fallback_resolvers = built
+    return _fallback_resolvers
+
+
+# An answer, even a negative one: the resolver reached an authority and was told.
+_ANSWERS = (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer)
+
+
 async def _resolve(domain: str, rdtype: str):
     """One DNS query. The single seam tests replace to avoid the network.
 
     Raises ``dns.resolver.NXDOMAIN`` (name does not exist), ``NoAnswer`` (name
-    exists, no record of this type) or a ``dns.exception.DNSException`` for
-    everything transient.
+    exists, no record of this type) or any other exception for everything
+    transient.
+
+    The system resolver is asked first. Only when it gives *no answer at all*
+    (SERVFAIL, timeout, socket error) are the fallback resolvers tried, in
+    order: a resolver that cannot reach a domain's nameservers says nothing
+    about the domain, and another one often can. An answer, including NXDOMAIN
+    or NoAnswer, is taken as it comes from whichever resolver gave it; if every
+    resolver fails, the system resolver's error is raised, which the caller
+    reports as ``unknown`` and never as ``invalid``.
     """
-    return await _get_resolver().resolve(domain, rdtype, raise_on_no_answer=True)
+    try:
+        return await _get_resolver().resolve(domain, rdtype, raise_on_no_answer=True)
+    except _ANSWERS:
+        raise
+    except Exception as first:
+        for resolver in _get_fallback_resolvers():
+            try:
+                answer = await resolver.resolve(domain, rdtype, raise_on_no_answer=True)
+                logger.debug(f"DNS {rdtype} for {domain} answered by a fallback resolver "
+                             f"after {type(first).__name__}")
+                return answer
+            except _ANSWERS:
+                raise
+            except Exception:
+                continue
+        raise first
 
 
 def _get_sem() -> asyncio.Semaphore:

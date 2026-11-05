@@ -1,4 +1,7 @@
+import ipaddress
+import logging
 import os
+import re
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -24,6 +27,33 @@ def _env_int(name: str, default: int, minimum: int) -> int:
     except ValueError:
         return default
     return value if value >= minimum else default
+
+
+def _env_ip_list(name: str, default: str) -> tuple[str, ...]:
+    """Read a comma/space separated list of IP addresses from an env var.
+
+    Unset -> ``default``. Set but empty -> no addresses (the feature is off).
+    Entries that are not IP addresses are dropped with a warning: a typo in
+    .env must not crash the app at import time, and it must not quietly turn
+    into the default either, because this list decides which third-party
+    servers receive the domains of your subscribers' addresses.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        raw = default
+    found: list[str] = []
+    for part in re.split(r"[,\s]+", raw.strip()):
+        if not part:
+            continue
+        try:
+            address = str(ipaddress.ip_address(part))
+        except ValueError:
+            logging.getLogger(__name__).warning(
+                "%s: ignoring %r (not an IP address)", name, part)
+            continue
+        if address not in found:
+            found.append(address)
+    return tuple(found)
 
 
 class Settings:
@@ -67,6 +97,11 @@ class Settings:
         "EMAIL_VALIDATION_DNS_TIMEOUT", default=5, minimum=1)
     email_validation_concurrency: int = _env_int(
         "EMAIL_VALIDATION_CONCURRENCY", default=50, minimum=1)
+    # Public resolvers asked only for domains the system resolver could not
+    # answer (SERVFAIL / timeout). Empty (``EMAIL_VALIDATION_FALLBACK_DNS=``)
+    # disables the fallback.
+    email_validation_fallback_dns: tuple[str, ...] = _env_ip_list(
+        "EMAIL_VALIDATION_FALLBACK_DNS", "1.1.1.1,8.8.8.8")
 
     @property
     def imap_configured(self) -> bool:

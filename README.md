@@ -158,6 +158,7 @@ BOUNCE_IMAP_USE_SSL=true
 # Email Validation (Optional)
 # EMAIL_VALIDATION_DNS_TIMEOUT=5    # seconds per DNS lookup before an address is reported "unknown"
 # EMAIL_VALIDATION_CONCURRENCY=50   # addresses checked in parallel during a scan
+# EMAIL_VALIDATION_FALLBACK_DNS=1.1.1.1,8.8.8.8  # public DNS tried only for domains your resolver can't answer; empty = off
 
 # Persistent Data Storage Directory (Optional: defaults to /data in Docker, repo root in local dev)
 # DATA_DIR=/data

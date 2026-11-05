@@ -21,6 +21,10 @@ from tests.conftest import CSRFTestClient
 
 UTC = ZoneInfo("UTC")
 
+# The real DNS seam, captured before the autouse fixture swaps it for a fake:
+# the fallback-resolver tests exercise it against scripted resolver objects.
+REAL_RESOLVE = ev._resolve
+
 
 # ── Doubles ──────────────────────────────────────────────────────────────────
 
@@ -332,6 +336,186 @@ async def test_resolver_health_probe(monkeypatch):
     assert await ev.resolver_healthy() is True
     install_dns(monkeypatch, {"gmail.com": "timeout", "outlook.com": "servfail"})
     assert await ev.resolver_healthy() is False
+
+
+# ── Fallback resolvers ───────────────────────────────────────────────────────
+
+class FakeResolver:
+    """Stands in for ``dns.asyncresolver.Resolver``: one scripted behaviour.
+
+    ``mode`` is a string (as in ``install_dns``) or a ``{rdtype: mode}`` dict.
+    """
+
+    def __init__(self, mode):
+        self.mode = mode
+        self.calls = []
+
+    async def resolve(self, domain, rdtype, raise_on_no_answer=True):
+        self.calls.append((domain, rdtype))
+        mode = self.mode.get(rdtype, "nomx") if isinstance(self.mode, dict) else self.mode
+        if mode == "ok":
+            return [MX("mx.test.")]
+        if mode == "a_ok":
+            return [object()]
+        if mode == "nxdomain":
+            raise dns.resolver.NXDOMAIN()
+        if mode == "nomx":
+            raise dns.resolver.NoAnswer()
+        if mode == "timeout":
+            raise dns.exception.Timeout()
+        if mode == "servfail":
+            raise dns.resolver.NoNameservers()
+        if mode == "oserror":
+            raise OSError("network is unreachable")
+        raise AssertionError(f"unknown mode {mode}")
+
+
+def wire(monkeypatch, primary, *fallbacks):
+    """Run the REAL ``_resolve`` over scripted system + fallback resolvers."""
+    monkeypatch.setattr(ev, "_resolve", REAL_RESOLVE)
+    monkeypatch.setattr(ev, "_get_resolver", lambda: primary)
+    monkeypatch.setattr(ev, "_get_fallback_resolvers", lambda: list(fallbacks))
+
+
+@pytest.mark.parametrize("failure", ["timeout", "servfail", "oserror"])
+async def test_fallback_answers_when_the_system_resolver_cannot(monkeypatch, failure):
+    """The motivating case: SERVFAIL / timeout locally, fine on public DNS."""
+    primary, fb = FakeResolver(failure), FakeResolver("ok")
+    wire(monkeypatch, primary, fb)
+    result = await ev.validate_email("someone@flaky.test")
+    assert result["verdict"] == "valid"
+    assert primary.calls == [("flaky.test", "MX")]
+    assert fb.calls == [("flaky.test", "MX")]
+
+
+async def test_fallback_is_not_consulted_when_the_system_resolver_answers(monkeypatch):
+    primary, fb = FakeResolver("ok"), FakeResolver("nxdomain")
+    wire(monkeypatch, primary, fb)
+    assert (await ev.validate_email("a@fine.test"))["verdict"] == "valid"
+    assert fb.calls == []
+
+
+@pytest.mark.parametrize("mode,verdict,reason", [
+    ("nxdomain", "invalid", "no_domain"),
+    ("nomx", "invalid", "no_mx"),
+])
+async def test_a_definitive_local_answer_is_final_not_second_guessed(
+        monkeypatch, mode, verdict, reason):
+    """NXDOMAIN / NoAnswer are answers: the fallback is only for 'no answer'."""
+    primary = FakeResolver({"MX": mode, "A": "nxdomain" if mode == "nxdomain" else "nomx",
+                            "AAAA": "nomx"})
+    fb = FakeResolver("ok")
+    wire(monkeypatch, primary, fb)
+    result = await ev.validate_email("a@gone.test")
+    assert (result["verdict"], result["reasons"][0]) == (verdict, reason)
+    assert fb.calls == []
+
+
+async def test_a_definitive_answer_from_the_fallback_counts(monkeypatch):
+    """Local SERVFAIL, public resolver says the name does not exist: invalid."""
+    wire(monkeypatch, FakeResolver("servfail"), FakeResolver("nxdomain"))
+    result = await ev.validate_email("a@gone.test")
+    assert (result["verdict"], result["reasons"]) == ("invalid", ["no_domain"])
+
+
+async def test_every_resolver_failing_is_unknown_never_invalid(monkeypatch):
+    primary, fb1, fb2 = FakeResolver("servfail"), FakeResolver("timeout"), FakeResolver("oserror")
+    wire(monkeypatch, primary, fb1, fb2)
+    result = await ev.validate_email("a@dark.test")
+    assert (result["verdict"], result["reasons"]) == ("unknown", ["dns_unavailable"])
+    # ...and each fallback really was tried.
+    assert len(fb1.calls) == len(fb2.calls) == 1
+
+
+async def test_fallbacks_are_tried_in_order_until_one_answers(monkeypatch):
+    primary, fb1, fb2, fb3 = (FakeResolver("servfail"), FakeResolver("timeout"),
+                              FakeResolver("ok"), FakeResolver("ok"))
+    wire(monkeypatch, primary, fb1, fb2, fb3)
+    assert (await ev.validate_email("a@slow.test"))["verdict"] == "valid"
+    assert (len(fb1.calls), len(fb2.calls), len(fb3.calls)) == (1, 1, 0)
+
+
+async def test_without_fallbacks_behaviour_is_unchanged(monkeypatch):
+    wire(monkeypatch, FakeResolver("servfail"))
+    assert (await ev.validate_email("a@dark.test"))["verdict"] == "unknown"
+
+
+async def test_fallback_also_covers_the_address_record_probe(monkeypatch):
+    """No MX locally, then the A lookup SERVFAILs: public DNS settles it."""
+    primary = FakeResolver({"MX": "nomx", "A": "servfail", "AAAA": "nomx"})
+    fb = FakeResolver({"MX": "nomx", "A": "a_ok", "AAAA": "nomx"})
+    wire(monkeypatch, primary, fb)
+    assert (await ev.validate_email("a@implicit.test"))["verdict"] == "valid"
+    assert fb.calls == [("implicit.test", "A")]
+
+
+async def test_health_probe_passes_when_only_the_fallback_works(monkeypatch):
+    """DNS 'works' if any configured resolver answers: results are trustworthy."""
+    wire(monkeypatch, FakeResolver("servfail"), FakeResolver("ok"))
+    assert await ev.resolver_healthy() is True
+    wire(monkeypatch, FakeResolver("servfail"), FakeResolver("timeout"))
+    assert await ev.resolver_healthy() is False
+
+
+async def test_cancellation_is_not_swallowed_by_the_fallback(monkeypatch):
+    class Hang(FakeResolver):
+        async def resolve(self, *a, **k):
+            await asyncio.sleep(3600)
+    fb = FakeResolver("ok")
+    wire(monkeypatch, Hang("x"), fb)
+    task = asyncio.ensure_future(ev._resolve("a.test", "MX"))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert fb.calls == []
+
+
+def test_fallback_resolvers_are_built_from_the_setting_in_order(monkeypatch):
+    monkeypatch.setattr(ev.settings, "email_validation_fallback_dns", ("1.1.1.1", "9.9.9.9"))
+    monkeypatch.setattr(ev.settings, "email_validation_dns_timeout", 3)
+    ev.invalidate()
+    built = ev._get_fallback_resolvers()
+    assert [r.nameservers for r in built] == [["1.1.1.1"], ["9.9.9.9"]]
+    assert all(r.timeout == 3 and r.lifetime == 3 for r in built)
+    assert ev._get_fallback_resolvers() is built          # built once...
+    ev.invalidate()
+    assert ev._get_fallback_resolvers() is not built      # ...and reset by invalidate()
+
+
+def test_empty_setting_means_no_fallback(monkeypatch):
+    monkeypatch.setattr(ev.settings, "email_validation_fallback_dns", ())
+    ev.invalidate()
+    assert ev._get_fallback_resolvers() == []
+
+
+def test_default_fallback_is_cloudflare_then_google():
+    from app.config import Settings
+    assert Settings.email_validation_fallback_dns == ("1.1.1.1", "8.8.8.8")
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (None, ("1.1.1.1", "8.8.8.8")),                      # unset -> default
+    ("", ()),                                            # set but empty -> off
+    ("   ", ()),
+    ("9.9.9.9", ("9.9.9.9",)),
+    ("9.9.9.9, 149.112.112.112", ("9.9.9.9", "149.112.112.112")),
+    ("9.9.9.9 149.112.112.112", ("9.9.9.9", "149.112.112.112")),   # spaces work too
+    ("2606:4700:4700::1111", ("2606:4700:4700::1111",)),            # IPv6
+    ("9.9.9.9,9.9.9.9", ("9.9.9.9",)),                   # de-duplicated
+    ("dns.google, 9.9.9.9", ("9.9.9.9",)),               # hostnames dropped
+    ("9.9.9.999", ()),                                   # typo: off, NOT the default
+    ("none", ()),
+])
+def test_fallback_setting_parsing(monkeypatch, raw, expected):
+    """A typo must never fall back to the default: the list decides which
+    third parties see your subscribers' domains."""
+    from app.config import _env_ip_list
+    if raw is None:
+        monkeypatch.delenv("X_TEST_DNS", raising=False)
+    else:
+        monkeypatch.setenv("X_TEST_DNS", raw)
+    assert _env_ip_list("X_TEST_DNS", "1.1.1.1,8.8.8.8") == expected
 
 
 # ── Scan ─────────────────────────────────────────────────────────────────────
