@@ -10,7 +10,7 @@ Verdicts
 ``invalid``  the address can never receive mail (malformed, the domain does not
              exist, or the domain has no mail server / publishes a Null MX).
 ``risky``    deliverable in principle but a poor target: a throwaway
-             (disposable) domain, a role account (``info@``) or a probable
+             (disposable) domain, a role account (``support@``) or a probable
              typo of a well-known provider (``gmial.com``).
 ``unknown``  the DNS lookup failed for a *transient* reason (timeout,
              SERVFAIL, resolver unreachable). Says nothing about the address.
@@ -385,7 +385,10 @@ def is_disposable(domain: str) -> bool:
 
 
 def is_role_account(local: str) -> bool:
-    """True for ``info@``-style addresses (``info+tag@`` counts as ``info``)."""
+    """True for ``support@``-style addresses (``support+tag@`` counts as ``support``).
+
+    ``info@`` and ``hello@`` are not role accounts here: see ``ROLE_LOCAL_PARTS``.
+    """
     return local.split("+", 1)[0] in ROLE_LOCAL_PARTS
 
 

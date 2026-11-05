@@ -95,7 +95,7 @@ const Validation = {
                 <p style="font-size:0.85rem;color:var(--text-muted);margin:0 0 12px">
                     Paste one address or many (one per line, or separated by commas). Nothing is sent:
                     each address is checked for a valid format, a domain that exists with a mail server,
-                    throwaway providers, shared inboxes like <code>info@</code> and likely typos.
+                    throwaway providers, shared inboxes like <code>support@</code> and likely typos.
                 </p>
                 <textarea id="valInput" rows="3" aria-label="Email addresses to check"
                     placeholder="jane@example.com&#10;sales@acme.io"></textarea>

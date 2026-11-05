@@ -808,7 +808,7 @@ const Settings = {
                     <p style="font-size:0.8rem;color:var(--text-muted);margin-top:8px">
                         <strong>Invalid</strong> = malformed, domain does not exist, or no mail server.
                         <strong>Hard-bounced</strong> = a permanent bounce on record (people who opened that campaign are never counted).
-                        Disposable domains, shared inboxes like <code>info@</code> and typos are only reported on the Email Validation page, never blocklisted automatically.
+                        Disposable domains, shared inboxes like <code>support@</code> and typos are only reported on the Email Validation page, never blocklisted automatically.
                     </p>
                 </div>
 

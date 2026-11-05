@@ -226,7 +226,7 @@ async def test_mx_with_a_real_target_beats_a_null_mx_neighbour(monkeypatch):
 @pytest.mark.parametrize("email, reason", [
     ("someone@mailinator.com", "disposable"),
     ("someone@deep.sub.mailinator.com", "disposable"),
-    ("info@acme.test", "role"),
+    ("sales@acme.test", "role"),
     ("Support+tag@acme.test", "role"),
     ("jane@gmial.com", "typo"),
     ("jane@gmaail.com", "typo"),           # doubled letter
@@ -238,6 +238,19 @@ async def test_risk_flags_give_the_risky_verdict(email, reason):
     result = await ev.validate_email(email)
     assert result["verdict"] == "risky"
     assert reason in result["reasons"]
+
+
+@pytest.mark.parametrize("email", [
+    "info@acme.test", "Info@acme.test", "info+offers@acme.test",
+    "hello@acme.test", "HELLO@acme.test", "hello+hi@acme.test",
+])
+async def test_info_and_hello_are_ordinary_inboxes_not_role_accounts(email):
+    # For the small businesses a cold list targets these are the owner's real
+    # inbox, so they must never be reported as risky.
+    result = await ev.validate_email(email)
+    assert result["verdict"] == "valid", result
+    assert "role" not in result["reasons"]
+    assert not ev.is_role_account(email.split("@")[0].lower())
 
 
 async def test_typo_offers_the_corrected_address():
@@ -526,7 +539,7 @@ def mixed_book(monkeypatch):
         sub(1, "ok@good.test", "Ok"),
         sub(2, "gone@dead.test", "Gone"),
         sub(3, "who@slow.test", "Who"),
-        sub(4, "info@good.test", "Info"),
+        sub(4, "sales@good.test", "Sales"),
         sub(5, "bad@@x", "Syntax"),
         sub(6, "temp@mailinator.com", "Temp"),
     ]
@@ -540,7 +553,7 @@ async def test_scan_counts_and_stores_only_the_problems(monkeypatch):
     assert (summary["checked"], summary["valid"], summary["invalid"],
             summary["risky"], summary["unknown"]) == (6, 1, 2, 2, 1)
     stored = ec.load_results()
-    assert set(stored) == {"gone@dead.test", "who@slow.test", "info@good.test",
+    assert set(stored) == {"gone@dead.test", "who@slow.test", "sales@good.test",
                            "bad@@x", "temp@mailinator.com"}
     assert "ok@good.test" not in stored                      # valid: counted, not stored
     assert stored["gone@dead.test"]["subscriber_id"] == 2
@@ -689,7 +702,7 @@ async def test_cleanup_blocklists_dead_addresses_only(monkeypatch):
     # 2 = dead domain, 5 = bad syntax. Role (4), disposable (6), unknown (3) stay.
     assert lm.all_blocklisted() == [2, 5]
     assert summary["status"] == "ok" and summary["blocklisted"] == 2
-    assert set(ec.load_results()) == {"who@slow.test", "info@good.test", "temp@mailinator.com"}
+    assert set(ec.load_results()) == {"who@slow.test", "sales@good.test", "temp@mailinator.com"}
     cleaned = ec.load_state()["recent_cleaned"]
     assert {c["email"] for c in cleaned} == {"gone@dead.test", "bad@@x"}
     assert ec.load_state()["last_run"]["blocklisted"] == 2
@@ -714,7 +727,7 @@ async def test_cleanup_honours_the_criteria_toggles(monkeypatch):
 
 async def test_cleanup_never_acts_on_unknown_or_risky(monkeypatch):
     install_dns(monkeypatch, {"slow.test": "timeout"})
-    lm = FakeListMonk([sub(1, "a@slow.test"), sub(2, "info@good.test"),
+    lm = FakeListMonk([sub(1, "a@slow.test"), sub(2, "sales@good.test"),
                        sub(3, "x@mailinator.com"), sub(4, "x@gmial.com")])
     summary = await ec.run_job(lm, "cleanup")
     assert lm.blocklisted == []
@@ -1063,7 +1076,7 @@ def item(sid, email, verdict="invalid", reasons=("no_domain",), name=""):
 
 def test_results_filter_search_and_paginate(client):
     stored(item(1, "a@dead.test"), item(2, "b@dead.test"),
-           item(3, "info@x.test", "risky", ["role"], name="Zed"),
+           item(3, "sales@x.test", "risky", ["role"], name="Zed"),
            item(4, "t@slow.test", "unknown", ["dns_unavailable"]))
     get = lambda **p: client.get("/api/email-validation/results", params=p).json()
 
@@ -1071,7 +1084,7 @@ def test_results_filter_search_and_paginate(client):
     assert everything["total"] == 4 and everything["counts"]["invalid"] == 2
     assert [r["verdict"] for r in everything["results"]] == ["invalid", "invalid", "risky", "unknown"]
     assert get(verdict="risky")["total"] == 1
-    assert [r["email"] for r in get(search="ZED")["results"]] == ["info@x.test"]
+    assert [r["email"] for r in get(search="ZED")["results"]] == ["sales@x.test"]
     page = get(per_page=2, page=2)
     assert [r["subscriber_id"] for r in page["results"]] == [3, 4]
     assert get(page=9)["results"] == []

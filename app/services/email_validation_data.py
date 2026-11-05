@@ -14,12 +14,16 @@ which the scheduled cleanup never acts on (see ``email_cleanup``).
 # Local parts (the text before the @) that normally belong to a team or a
 # system rather than a person. Taken from the repo's cleanup_generic_emails.py
 # script (which cannot be imported: it loads .env and talks to ListMonk at
-# import) plus the most common greeting-style aliases.
+# import).
+#
+# ``info`` and ``hello`` are deliberately NOT here. For the small businesses a
+# cold-email list targets they are the owner's real, monitored inbox, so
+# flagging them buried the genuine problems under thousands of good contacts.
 ROLE_LOCAL_PARTS: frozenset[str] = frozenset({
     "abuse", "accounts", "admin", "administrator", "billing", "careers",
     "ceo", "cfo", "coo", "cto", "compliance", "complaints", "contact",
     "data", "director", "enquiries", "enquiry", "feedback", "finance",
-    "general", "hello", "help", "helpdesk", "hostmaster", "hr", "info",
+    "general", "help", "helpdesk", "hostmaster", "hr",
     "inquiries", "inquiry", "jobs", "legal", "mail", "mailer-daemon",
     "management", "manager", "marketing", "media", "news", "newsletter",
     "no-reply", "noreply", "do-not-reply", "donotreply", "office",
