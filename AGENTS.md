@@ -111,7 +111,7 @@ ListMonk-Pro/
 │   └── test_regressions.py        # Route order, IMAP seen-marking, prune, timestamp regressions
 ├── .github/
 │   └── workflows/
-│       └── deploy.yml             # Pytest-gated SSH automated deploy for VPS
+│       └── deploy.yml             # Pytest-gated SSH deploy: every dir in repo var DEPLOY_PATHS (default /root/ListMonk-Pro) → reset + deploy.sh
 ├── docs/
 │   └── superpowers/               # Design specs and execution plans
 ├── .dockerignore
@@ -123,6 +123,7 @@ ListMonk-Pro/
 ├── pytest.ini                     # Pytest configuration
 ├── requirements.txt               # Production Python dependencies
 ├── requirements-dev.txt           # Development and testing dependencies
+├── deploy.sh                      # Rebuild + health-check the instance in this checkout (port/name from its .env; --pull to update)
 ├── start.sh                       # Local development startup script
 └── README.md                      # Public documentation
 ```

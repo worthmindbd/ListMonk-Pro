@@ -184,8 +184,34 @@ nano .env  # Set your credentials and secure passwords
 
 ### 2. Start with Docker Compose
 ```bash
-docker compose up -d --build
+./deploy.sh            # docker compose up -d --build + waits for /health
 ```
+
+To update later: `./deploy.sh --pull`.
+
+### Several instances on one VPS
+
+Each instance is its own checkout with its own `.env`; nothing in the repo is
+tied to a server or domain. For a second domain on the same machine:
+
+```bash
+git clone https://github.com/worthmindbd/ListMonk-Pro.git /opt/ListMonk-Pro-client2
+cd /opt/ListMonk-Pro-client2
+cp .env.example .env
+# in .env: point LISTMONK_URL / IMAP_* at that domain, and set
+#   HOST_PORT=8001
+#   CONTAINER_NAME=listmonk-pro-client2
+./deploy.sh
+```
+
+The data volume is named after the directory, so instances never share state.
+Point that domain's reverse proxy at `127.0.0.1:<HOST_PORT>`.
+
+**Automatic deploys (GitHub Actions):** on every push to `main` the workflow
+runs the tests, then connects to `VPS_HOST` and, for every directory in the
+repository variable `DEPLOY_PATHS` (space-separated; default
+`/root/ListMonk-Pro`), resets it to `origin/main` and runs `./deploy.sh`.
+Add a new checkout to `DEPLOY_PATHS` to have it updated too.
 
 ### 3. Nginx Reverse Proxy Configuration
 ```nginx
@@ -194,7 +220,7 @@ server {
     server_name dash.yourdomain.com;
 
     location / {
-        proxy_pass http://127.0.0.1:8000;
+        proxy_pass http://127.0.0.1:8000;   # your HOST_PORT
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

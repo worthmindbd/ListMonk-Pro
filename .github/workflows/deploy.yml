@@ -32,23 +32,34 @@ jobs:
     steps:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1
+        env:
+          # Space-separated ListMonk Pro checkout directories on the VPS, set
+          # as the repository variable DEPLOY_PATHS (Settings → Secrets and
+          # variables → Actions → Variables). Unset = the single default install.
+          DEPLOY_PATHS: ${{ vars.DEPLOY_PATHS || '/root/ListMonk-Pro' }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          envs: DEPLOY_PATHS
+          # Each checkout carries its own .env (port, container name,
+          # credentials); deploy.sh reads it, so this step knows nothing about
+          # the server beyond the list of directories. One failing instance
+          # does not stop the others, but fails the job.
           script: |
             set -euo pipefail
-            cd /root/ListMonk-Pro
-            git fetch origin main
-            git reset --hard origin/main
-            docker compose up -d --build
-            for i in $(seq 1 15); do
-              if curl -fs http://localhost:8000/health > /dev/null; then
-                echo "ListMonk Pro is healthy!"
-                break
+            failed=0
+            for dir in $DEPLOY_PATHS; do
+              echo "== $dir"
+              if ( cd "$dir" \
+                   && git fetch origin main \
+                   && git reset --hard origin/main \
+                   && bash ./deploy.sh ); then
+                :
+              else
+                echo "Deploy failed for $dir"
+                failed=1
               fi
-              echo "Waiting for ListMonk Pro to respond ($i/15)..."
-              sleep 2
             done
-            curl -fs http://localhost:8000/health > /dev/null || (echo "Deploy health check failed!" && exit 1)
+            exit "$failed"
 

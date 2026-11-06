@@ -1,10 +1,13 @@
 services:
   dashboard:
     build: .
-    container_name: listmonk-pro
+    # Both values are read from .env so a second instance (another domain,
+    # its own checkout directory) can run beside the first on the same host.
+    # The defaults are the original single-instance values.
+    container_name: ${CONTAINER_NAME:-listmonk-pro}
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${HOST_PORT:-8000}:8000"
     env_file:
       - .env
     environment:
