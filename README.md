@@ -208,10 +208,30 @@ The data volume is named after the directory, so instances never share state.
 Point that domain's reverse proxy at `127.0.0.1:<HOST_PORT>`.
 
 **Automatic deploys (GitHub Actions):** on every push to `main` the workflow
-runs the tests, then connects to `VPS_HOST` and, for every directory in the
-repository variable `DEPLOY_PATHS` (space-separated; default
-`/root/ListMonk-Pro`), resets it to `origin/main` and runs `./deploy.sh`.
-Add a new checkout to `DEPLOY_PATHS` to have it updated too.
+runs the tests, then SSHes into every configured VPS and, for each listed
+checkout, resets it to `origin/main` and runs `./deploy.sh`. Servers are
+configured in the repository settings (Settings → Secrets and variables →
+Actions), never in the code:
+
+| Name | Kind | Value |
+|------|------|-------|
+| `DEPLOY_TARGETS` | secret | One VPS per line: `user@host [dir ...]`. Dirs default to `/root/ListMonk-Pro`; `#` starts a comment. |
+| `VPS_SSH_KEY` | secret | Private key whose public half is in `~/.ssh/authorized_keys` on every target. |
+| `DEPLOY_KNOWN_HOSTS` | secret (optional) | `known_hosts` lines for the targets (`ssh-keyscan <host>`, checked by you). Without it, host keys are trusted on first use. |
+
+```
+# DEPLOY_TARGETS example
+root@203.0.113.10 /root/ListMonk-Pro /root/ListMonk-Pro-client2
+root@198.51.100.7 /root/ListMonk-Pro-client3
+```
+
+To add a client VPS: authorize the deploy key there, clone and configure the
+checkout(s), then add a line to `DEPLOY_TARGETS` (and its host key to
+`DEPLOY_KNOWN_HOSTS`). One failing VPS or instance does not stop the others,
+but fails the run. Because the repository is public, hosts and paths are
+masked in the logs and build output is only printed for an instance that
+failed. Without `DEPLOY_TARGETS`, the older single-server setup still works:
+`VPS_USER@VPS_HOST` with the dirs in the variable `DEPLOY_PATHS`.
 
 ### 3. Nginx Reverse Proxy Configuration
 ```nginx

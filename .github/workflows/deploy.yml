@@ -30,36 +30,97 @@ jobs:
     # the full test suite before committing — the gate makes that enforceable).
     needs: test
     steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1
+      # Which servers to update lives entirely in repository settings, never
+      # in this file (the same repo is installed on many client VPSes):
+      #
+      #   secret DEPLOY_TARGETS      one VPS per line: "user@host [dir ...]"
+      #                              (dirs = ListMonk Pro checkouts, default
+      #                              /root/ListMonk-Pro; '#' starts a comment)
+      #   secret VPS_SSH_KEY         private key authorized on every target
+      #   secret DEPLOY_KNOWN_HOSTS  optional known_hosts lines; when set, host
+      #                              keys are verified instead of trusted on
+      #                              first use
+      #
+      # Without DEPLOY_TARGETS the single legacy target is used:
+      # VPS_USER@VPS_HOST with the dirs in variable DEPLOY_PATHS.
+      #
+      # The repository is public, so its Actions logs are too: hosts and dirs
+      # are masked, and an instance's build output is only shown when it fails.
+      # Each checkout carries its own .env (port, container name, credentials)
+      # read by deploy.sh. A failing instance or VPS does not stop the others,
+      # but fails the job.
+      - name: Deploy to every VPS over SSH
         env:
-          # Space-separated ListMonk Pro checkout directories on the VPS, set
-          # as the repository variable DEPLOY_PATHS (Settings → Secrets and
-          # variables → Actions → Variables). Unset = the single default install.
+          DEPLOY_TARGETS: ${{ secrets.DEPLOY_TARGETS }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
           DEPLOY_PATHS: ${{ vars.DEPLOY_PATHS || '/root/ListMonk-Pro' }}
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          envs: DEPLOY_PATHS
-          # Each checkout carries its own .env (port, container name,
-          # credentials); deploy.sh reads it, so this step knows nothing about
-          # the server beyond the list of directories. One failing instance
-          # does not stop the others, but fails the job.
-          script: |
-            set -euo pipefail
-            failed=0
-            for dir in $DEPLOY_PATHS; do
-              echo "== $dir"
-              if ( cd "$dir" \
-                   && git fetch origin main \
-                   && git reset --hard origin/main \
-                   && bash ./deploy.sh ); then
-                :
-              else
-                echo "Deploy failed for $dir"
-                failed=1
-              fi
-            done
-            exit "$failed"
+        run: |
+          set -euo pipefail
+
+          targets=$DEPLOY_TARGETS
+          if [ -z "$(printf '%s' "$targets" | tr -d '[:space:]')" ] && [ -n "$VPS_HOST" ]; then
+            targets="${VPS_USER:-root}@${VPS_HOST} ${DEPLOY_PATHS}"
+          fi
+
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if [ -n "$DEPLOY_KNOWN_HOSTS" ]; then
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+            hostcheck=yes
+          else
+            hostcheck=accept-new
+          fi
+
+          # Runs on the VPS with the checkout dirs as arguments.
+          cat > "$RUNNER_TEMP/remote.sh" <<'REMOTE'
+          set -uo pipefail
+          failed=0
+          i=0
+          for dir in "$@"; do
+            i=$((i + 1))
+            log=$(mktemp)
+            if ( cd "$dir" \
+                 && git fetch -q origin main \
+                 && git reset -q --hard origin/main \
+                 && bash ./deploy.sh ) > "$log" 2>&1; then
+              echo "  instance $i: deployed, healthy"
+            else
+              echo "  instance $i: FAILED"
+              tail -n 40 "$log"
+              failed=1
+            fi
+            rm -f "$log"
+          done
+          exit "$failed"
+          REMOTE
+
+          n=0
+          failed=0
+          while read -r dest paths; do
+            case "$dest" in ''|'#'*) continue ;; esac
+            n=$((n + 1))
+            paths=${paths:-/root/ListMonk-Pro}
+            echo "::add-mask::${dest#*@}"
+            for p in $paths; do echo "::add-mask::$p"; done
+            echo "Target $n ($(wc -w <<< "$paths") instance(s))"
+            # shellcheck disable=SC2086  # paths are word-split on purpose
+            if ! ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o BatchMode=yes \
+                   -o StrictHostKeyChecking="$hostcheck" -o ConnectTimeout=20 \
+                   -o ServerAliveInterval=30 \
+                   "$dest" bash -s -- $paths < "$RUNNER_TEMP/remote.sh"; then
+              echo "::error::Target $n failed"
+              failed=1
+            fi
+          done <<< "$targets"
+
+          rm -f ~/.ssh/deploy_key
+          if [ "$n" -eq 0 ]; then
+            echo "::error::No deploy target configured (set DEPLOY_TARGETS or VPS_HOST)"
+            exit 1
+          fi
+          exit "$failed"
 

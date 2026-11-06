@@ -111,7 +111,8 @@ ListMonk-Pro/
 │   └── test_regressions.py        # Route order, IMAP seen-marking, prune, timestamp regressions
 ├── .github/
 │   └── workflows/
-│       └── deploy.yml             # Pytest-gated SSH deploy: every dir in repo var DEPLOY_PATHS (default /root/ListMonk-Pro) → reset + deploy.sh
+│       └── deploy.yml             # Pytest-gated SSH deploy to every VPS in secret DEPLOY_TARGETS ("user@host dir…" per line) → reset + deploy.sh per dir;
+│                                  #   no server is ever named in the repo (it is public: hosts/paths are masked in logs)
 ├── docs/
 │   └── superpowers/               # Design specs and execution plans
 ├── .dockerignore
