@@ -202,11 +202,16 @@ def test_html_only_reply_classifies_from_recovered_text():
 # ── Repair pass for already-stored empty replies ─────────────────────────────
 
 def _reply_log(tmp_path, monkeypatch, records):
+    import app.config
     import app.services.reply_log as rl
 
     monkeypatch.setattr(rl, "LOG_FILE", tmp_path / "reply_log.json")
     monkeypatch.setattr(rl, "PROCESSED_FILE", tmp_path / "reply_processed.json")
     monkeypatch.setattr(rl, "SETTINGS_FILE", tmp_path / "reply_settings.json")
+    # Records carry the mailbox stamp the scan writes (per-record override
+    # lets a test seed a reply from another mailbox).
+    for r in records:
+        r.setdefault("mailbox", app.config.settings.imap_user)
     rl.save_log(records)
     return rl
 
@@ -415,7 +420,9 @@ async def test_scan_repairs_stored_empty_reply(tmp_path, monkeypatch):
     _reply_log(tmp_path, monkeypatch, [
         {"id": "rep_old", "message_id": "<apple-mail@example.com>",
          "from_email": "prospect@example.com", "full_body": "",
-         "body_preview": "", "sentiment": "question", "status": "unread"},
+         "body_preview": "", "sentiment": "question", "status": "unread",
+         "campaign_id": 7, "campaign_name": "Cold Outreach Campaign",
+         "mailbox": "me@example.com"},
     ])
     await rl.mark_processed_message_ids(["<apple-mail@example.com>"])
 
@@ -651,12 +658,13 @@ _HI_TEST_MAIL_RAW = (
 )
 
 
-async def test_scan_leaves_an_unattributed_reply_unlabelled(tmp_path, monkeypatch):
-    """A test mail that matches no campaign is stored honestly.
+async def test_unattributable_test_mail_is_not_stored(tmp_path, monkeypatch):
+    """A test mail that matches no campaign is not stored at all.
 
-    It used to be tagged with the fabricated campaign name "Cold Outreach
-    Campaign" and, before the neutral default, hot-flagged as an interested
-    lead simply because "hi" matched no keyword.
+    It used to be stored unattributed -- first tagged with the fabricated
+    campaign name "Cold Outreach Campaign", later kept honestly
+    campaign-less. Replies without a campaign are never shown or counted,
+    so the scan drops it instead.
     """
     stats, _, rl = await _run_inbox_scan(
         tmp_path, monkeypatch, [_HI_TEST_MAIL_RAW],
@@ -665,13 +673,9 @@ async def test_scan_leaves_an_unattributed_reply_unlabelled(tmp_path, monkeypatc
         campaign_lists=[{"id": 99}],
     )
 
-    assert stats["new_replies"] == 1
-    record = rl.load_log()[0]
-    assert record["campaign_id"] is None
-    assert record["campaign_name"] is None      # no invented campaign label
-    assert record["sentiment"] == "neutral"     # "hi" carries no interest signal
-    assert record["status"] == "unread"         # so it is not a lead
-    assert record["status_source"] == "auto"
+    assert stats["new_replies"] == 0
+    assert stats["not_reply"] == 1
+    assert rl.load_log() == []
 
 
 # ── Automated responses must not receive campaign attribution ────────────────

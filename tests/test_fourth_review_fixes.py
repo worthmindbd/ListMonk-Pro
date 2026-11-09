@@ -380,11 +380,13 @@ def test_reply_settings_reject_non_boolean_switches(client):
 
 
 def test_reply_search_tolerates_null_fields(client):
+    import app.config
     from app.services import reply_log
 
     reply_log.save_log([{
         "id": "rep_1", "from_email": "a@x.com", "from_name": None,
         "subject": None, "full_body": None, "sentiment": "neutral", "status": "unread",
+        "campaign_id": 3, "mailbox": app.config.settings.imap_user,
     }])
     r = client.get("/api/replies?q=a@x")
     assert r.status_code == 200
@@ -404,7 +406,10 @@ async def test_reply_stats_cache_entries_expire_independently(monkeypatch):
     clock["now"] += rr._STATS_CACHE_TTL - 1
     await rr.get_reply_stats(campaign_id=5)          # fresh entry for another key
     clock["now"] += 2                                 # key 0 is now past its TTL
-    monkeypatch.setattr(rr, "load_log", lambda: [{"sentiment": "positive"}])
+    import app.config
+
+    monkeypatch.setattr(rr, "load_log", lambda: [{"sentiment": "positive", "campaign_id": 1,
+                                                  "mailbox": app.config.settings.imap_user}])
     again = await rr.get_reply_stats(campaign_id=0)
     assert first["total_replies"] == 0
     assert again["total_replies"] == 1
@@ -442,7 +447,9 @@ async def test_reply_scan_does_not_redownload_processed_messages(monkeypatch):
     monkeypatch.setattr(rt.settings, "imap_user", "me@x.com")
     monkeypatch.setattr(rt.settings, "imap_pass", "pw")
     monkeypatch.setattr(rt, "_fetch_campaigns_covering", AsyncMock(return_value=([], True)))
-    monkeypatch.setattr(rt, "match_campaign_for_reply", AsyncMock(return_value=(None, None)))
+    # Attributed, so the message is stored: the test is about download
+    # accounting, not about the campaign gate.
+    monkeypatch.setattr(rt, "match_campaign_for_reply", AsyncMock(return_value=(7, "C")))
     await reply_log.mark_processed_message_ids(["<r1@x>"])
 
     inbox.select = lambda *a, **k: ("OK", [b"1"])

@@ -1176,61 +1176,41 @@ async def reattribute_replies(
     return updated
 
 
-async def prune_non_campaign_replies(
-    listmonk: ListMonkClient, cache: Optional[dict] = None,
-) -> int:
-    """Remove stored replies that do not belong to any campaign.
+async def prune_non_campaign_replies() -> int:
+    """Remove stored replies that are not part of any campaign.
 
-    Older versions kept every threaded answer from an unknown address. Those
-    are now filtered at ingestion (see the gate in the scan); this applies the
-    same rule to what is already stored, once per record: a record that passes
-    is marked ``campaign_checked`` and never looked up again.
+    Older versions kept replies that could not be attributed (subscriber
+    answers to deleted or renamed campaigns, threaded positives from unknown
+    addresses); the scan no longer stores those, and this applies the same
+    rule to what is already on disk. Replies without a campaign are never
+    shown or counted, so they are deleted.
 
-    Kept, always: a reply with a campaign, a reply from a ListMonk subscriber,
-    a positive reply (an interested prospect who answers from another address
-    is a lead, however they reached us), and anything a human already acted on
-    (any status other than ``unread``). A failed ListMonk lookup leaves the
-    record undecided for the next scan -- not knowing is not "stranger".
+    Also removed: records from a mailbox other than the connected one --
+    including the unstamped records written before the mailbox field existed.
+    reply_log.json is the connected inbox's feed; a .env switch to another
+    domain starts a clean slate.
+
+    Kept, always: a reply from the connected mailbox that has a campaign, is
+    an automated reply (never campaign-attributed by design, shown in the
+    Automated tab), or was acted on by a human -- a status set manually, or
+    replied/archived, is triage work that must not be destroyed; the read
+    filter simply hides it. Needs no ListMonk lookups: the attribution on the
+    record is the only evidence that counts.
     """
-    cache = cache if cache is not None else {}
-    verdicts: dict[str, bool] = {}
-    for r in load_log():
-        if r.get("campaign_checked") or not r.get("id"):
-            continue
-        if r.get("campaign_id"):
-            # Attributed to a campaign: the evidence is on the record. Marked
-            # now because an automated reply loses its attribution when it is
-            # re-classified, and must not then look like a stranger.
-            verdicts[str(r["id"])] = True
-            continue
-        sender = (r.get("from_email") or "").strip().lower()
-        if r.get("sentiment") == "positive" or r.get("status") != "unread" or not sender:
-            # Needs no lookup and is never removed. Not marked as checked:
-            # a later re-classification may change what applies to it.
-            continue
-        subscriber, ok = await _lookup_subscriber(listmonk, sender, cache)
-        if not ok:
-            continue
-        verdicts[str(r["id"])] = subscriber is not None
-
-    if not verdicts:
-        return 0
     async with _log_lock:
         records = load_log()
         kept: list[dict] = []
-        removed = marked = 0
+        removed = 0
         for r in records:
-            keep = verdicts.get(str(r.get("id")))
-            # Re-check the conditions under the lock: the record may have been
-            # actioned or re-tagged since the lookup.
-            if keep is False and r.get("status") == "unread" and r.get("sentiment") != "positive":
+            if (r.get("mailbox") == settings.imap_user
+                    and (r.get("campaign_id")
+                         or r.get("sentiment") == "auto_reply"
+                         or r.get("status_source") == "manual"
+                         or r.get("status") in ("replied", "archived"))):
+                kept.append(r)
+            else:
                 removed += 1
-                continue
-            if keep is True and not r.get("campaign_checked"):
-                r["campaign_checked"] = True
-                marked += 1
-            kept.append(r)
-        if removed or marked:
+        if removed:
             save_log(kept)
     return removed
 
@@ -1413,7 +1393,8 @@ async def _scan_and_track_replies_impl(
         # stored — it used to land in the feed and inflate the reply rate.
         "not_reply": 0,
         # Messages left for the next scan because ListMonk could not be asked
-        # whether the sender is a subscriber.
+        # whether the sender is a subscriber, or the campaign history was not
+        # fully available to attribute them.
         "deferred": 0,
         # Stored records removed because they are not part of any campaign.
         "pruned": 0,
@@ -1524,10 +1505,11 @@ async def _scan_and_track_replies_impl(
         logger.warning(f"[ReplyTracker] Body repair pass failed (non-fatal): {e}")
 
     # Apply the campaign-only rule to what is already stored. Runs before the
-    # re-classification: an automated reply is stripped of its campaign there,
-    # and attribution is the evidence that the record belonged to one.
+    # re-classification: an automated reply is stripped of its campaign there
+    # and stays (automated replies never carry one), while a record that stops
+    # being automated is re-attributed afterwards.
     try:
-        stats["pruned"] = await prune_non_campaign_replies(listmonk, sub_cache)
+        stats["pruned"] = await prune_non_campaign_replies()
         if stats["pruned"]:
             logger.info(
                 f"[ReplyTracker] Removed {stats['pruned']} stored reply record(s) "
@@ -1660,9 +1642,8 @@ async def _scan_and_track_replies_impl(
         # Only answers to our outreach belong in the feed. Every other message
         # in the inbox (newsletters, receipts, LinkedIn/Google notifications)
         # used to be stored as a "reply": notifications were hot-flagged as
-        # leads and every newsletter inflated the reply rate. Kept: mail whose
-        # subject matches one of our campaigns, or whose sender is a ListMonk
-        # subscriber. Newsletter / list traffic is dropped up front.
+        # leads and every newsletter inflated the reply rate. Newsletter /
+        # list traffic is dropped up front.
         if is_bulk_mail(msg):
             stats["not_reply"] += 1
             if state_id:
@@ -1670,16 +1651,11 @@ async def _scan_and_track_replies_impl(
             continue
         clean_subj = _clean_subject_for_matching(subject)
         subscriber = None
-        # Only mail that is part of a campaign is kept: the subject matches one
-        # of our campaigns, or the sender is one of our ListMonk subscribers.
-        # Anything else (a ticket desk answering from its own address, a
-        # stranger's "Re: Hi") is not shown. One exception: a *positive* answer
-        # to one of our messages (In-Reply-To / References) is an interested
-        # prospect replying from another address (a colleague, a personal
-        # mailbox) -- the campaign subject is usually a personalised template
-        # that never equals the text we sent, so the subject test cannot vouch
-        # for it. Dropping those lost a genuine "Yes. Please share." lead.
-        answers_a_message = bool(msg.get("In-Reply-To") or msg.get("References"))
+        # Only mail that can be tied to a campaign is kept: the subject matches
+        # one of our campaigns, or the sender is one of our ListMonk
+        # subscribers (whose lists then pick the campaign). A reply that ends
+        # up with no campaign is never shown or counted, so it is not stored
+        # at all -- answers to deleted or renamed campaigns included.
         subject_hit = any(_subject_matches(clean_subj, c) for c in campaigns)
         if not subject_hit:
             subscriber, lookup_ok = await _lookup_subscriber(listmonk, from_email, sub_cache)
@@ -1688,7 +1664,7 @@ async def _scan_and_track_replies_impl(
                 # Leave the message unprocessed so the next scan decides.
                 stats["deferred"] += 1
                 continue
-            if subscriber is None and not (answers_a_message and sentiment == "positive"):
+            if subscriber is None:
                 stats["not_reply"] += 1
                 if state_id:
                     new_msg_ids.append(state_id)
@@ -1699,6 +1675,21 @@ async def _scan_and_track_replies_impl(
             listmonk, subject, from_email, reply_date, campaigns=campaigns,
             subscriber=subscriber,
         )
+
+        if camp_id is None and sentiment != "auto_reply":
+            # A human reply that cannot be attributed is not part of any
+            # campaign and is dropped. Only when the campaign history was not
+            # fully available (fetch failed or hit the page cap) is the
+            # message left unprocessed instead: dropping it then could lose
+            # every reply to the campaigns beyond what was fetched, so the
+            # next scan decides with complete data.
+            if campaigns_complete:
+                stats["not_reply"] += 1
+                if state_id:
+                    new_msg_ids.append(state_id)
+            else:
+                stats["deferred"] += 1
+            continue
 
         # Drop any of our own campaign copy the quote stripper missed (an
         # unrecognised client's quote header), then classify what is left.
@@ -1727,22 +1718,22 @@ async def _scan_and_track_replies_impl(
             camp_id, camp_name = None, None
             auto_kind = _auto_reply_kind(subject, reply_only, from_email, header_kind)
 
-        # Note: Replies without campaign attribution are still stored with
-        # campaign_id=null. While ideally we'd skip non-campaign emails, doing
-        # so risks losing valid replies when matching fails due to incomplete
-        # data (deleted campaigns, changed subjects, etc.). The neutral sentiment
-        # default ensures these aren't falsely flagged as hot leads, and
-        # campaign_name stays null so the feed labels them "Unattributed"
-        # instead of inventing a campaign they never belonged to.
-        # The gate above only drops mail from senders who are not subscribers
-        # *and* whose subject matches no campaign, so a subscriber's reply to a
-        # deleted or renamed campaign is still kept (unattributed).
+        # Every stored human reply is part of a campaign: the gate above
+        # dropped anything that could not be attributed, so there is no
+        # "Unattributed" label in the feed. Automated replies are the one
+        # deliberate exception: attribution is skipped for them so they never
+        # inflate per-campaign charts, and the feed shows them under the
+        # Automated tab instead.
         record = {
             "id": f"rep_{uuid.uuid4().hex[:10]}",
             "message_id": msg_id,
             "from_email": from_email,
             "from_name": realname or from_email.split("@")[0],
             "to_email": to_email or my_email,
+            # Which inbox produced this record. The feed, stats and prune are
+            # scoped to the connected mailbox, so replies left over from a
+            # previous .env (another domain) never surface here.
+            "mailbox": settings.imap_user,
             "subject": subject,
             "date": date_str,
             "body_preview": reply_only[:200] + ("..." if len(reply_only) > 200 else ""),
@@ -1759,9 +1750,8 @@ async def _scan_and_track_replies_impl(
             # Judged with its automation headers already; the header backfill
             # (collect_header_backfills) skips these.
             "headers_checked": True,
-            # Passed the campaign gate on evidence (subject or subscriber), so
-            # prune_non_campaign_replies has nothing left to look up. A
-            # positive reply kept by the exception is not marked: it has none.
+            # Passed the campaign gate on evidence (subject match, or the
+            # sender's subscriber record picked the campaign).
             "campaign_checked": bool(subject_hit or subscriber is not None),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }

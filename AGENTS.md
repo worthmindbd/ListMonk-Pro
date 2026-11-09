@@ -265,23 +265,33 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 - Frontend: `Validation` (`validation.js`) paints its shell once and repaints `#valScan` / `#valResults` in place, so the quick-check box and search field keep their input while a scan reports progress; the status poll stops when leaving the page (`App.route`). Settings → *Email Cleanup* (`Settings.renderCleanup`) syncs its live parts in place (`_syncCleanupStatus`), so unsaved form edits survive; turning the switch on saves the on-screen schedule with it.
 
 ### 5a. Reply Classification (`app/services/imap_reply_tracker.py`)
-- **Only mail that is part of a campaign is stored.** Newsletter/list mail (`List-Unsubscribe`,
-  `List-Id`, `Precedence: bulk|list|junk` without `In-Reply-To`/`References`) is skipped, and
-  so is anything whose subject matches no campaign *and* whose sender is not a ListMonk
-  subscriber — a ticket desk answering from its own address, a stranger's "Re: Hi". The
-  subject test cannot vouch for a personalised subject template (`{{ .Subscriber.Attribs… }}`
-  never equals the sent subject), so in practice the sender decides. **One exception:** a
-  *positive* answer to one of our messages (`In-Reply-To`/`References`) from an unknown
-  address is kept, unattributed (`campaign_id=null`) — an interested prospect replying from
-  a colleague's or personal mailbox is a lead, and dropping it lost a genuine "Yes. Please
-  share." Skips are terminal (`not_reply` in scan stats, recorded in `reply_processed.json`);
-  a failed subscriber lookup is **deferred** (`deferred`), never treated as "unknown sender".
-  The same rule is applied once to already-stored records (`prune_non_campaign_replies`,
+- **Only replies that are part of a campaign are stored, shown, or counted.** Newsletter/list
+  mail (`List-Unsubscribe`, `List-Id`, `Precedence: bulk|list|junk` without
+  `In-Reply-To`/`References`) is skipped, and so is anything that cannot be attributed to a
+  campaign — a ticket desk answering from its own address, a stranger's "Re: Hi", a
+  subscriber's answer to a deleted or renamed campaign, a threaded "Yes. Please share." from
+  an address no campaign claims. Attribution = the subject matches a campaign, or the sender
+  is a ListMonk subscriber whose lists pick one (`match_campaign_for_reply`). A human reply
+  that ends up with no campaign is dropped (`not_reply`, recorded in `reply_processed.json`);
+  **when the campaign history was not fully available** (fetch failed or hit
+  `MAX_CAMPAIGN_PAGES`) the message is **deferred** instead — left unprocessed so the next
+  scan decides with complete data, the same rule as bounce attribution. A failed subscriber
+  lookup is deferred too, never treated as "unknown sender". **Automated replies are the one
+  campaign-less record in the feed:** attribution is skipped for them so they never inflate
+  per-campaign charts; they are shown under the Automated tab and excluded from the reply
+  rate.
+- **Every record carries the mailbox that produced it** (`mailbox`: the `IMAP_USER` of the
+  scan). The feed, the stats and the prune are scoped to the connected mailbox, so a `.env`
+  switch to another domain's inbox starts a clean feed: the previous inbox's replies are
+  neither shown nor counted, and the prune deletes them (unstamped records written before
+  the field existed included).
+  The same campaign rule is applied to already-stored records (`prune_non_campaign_replies`,
   `pruned` in scan stats, before re-classification so an automated reply that loses its
-  attribution there is not mistaken for a stranger): a record passes if it has a campaign,
-  its sender is a subscriber, it is positive, or a human already acted on it (any status but
-  `unread`); passing records are marked `campaign_checked` and never looked up again, and a
-  failed lookup leaves the record undecided.
+  attribution there is not mistaken for a stray): a record is deleted unless it belongs to
+  the connected mailbox **and** has a campaign, is `auto_reply`, or was acted on by a human
+  (a `manual` status_source, or replied/archived — triage work is never destroyed, the read
+  filter simply hides it). The prune needs no ListMonk lookups: the attribution on the
+  record is the only evidence that counts.
 - **Quote stripping** (`imap_unsubscribe._extract_reply_only`, shared with the unsubscribe
   scanner) recognises Outlook `From:`/`Sent:` blocks without an address or leading digit, in
   common locales (`Von:/Gesendet:`, `De :/Envoyé :` …), localised attribution lines
@@ -457,8 +467,8 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/unsubscribes/imap-status` | GET | Check IMAP connection health |
 | | `/api/unsubscribes/clear` | DELETE | Clear all unsubscribe log records |
 | | `/api/unsubscribes/reset` | POST | Undo all unsubscribes & restore list memberships |
-| **Replies** | `/api/replies` | GET | Paginated prospect replies with sentiment/status filtering |
-| | `/api/replies/stats` | GET | Aggregate reply counts, reply rate %, and sentiment breakdown (optional `campaign_id` scopes counts and rate to one campaign; a `by_campaign` breakdown is always returned for the analytics chart) |
+| **Replies** | `/api/replies` | GET | Paginated prospect replies with sentiment/status filtering (campaign-attributed replies plus automated ones only — an unattributed reply is never shown) |
+| | `/api/replies/stats` | GET | Aggregate reply counts, reply rate %, and sentiment breakdown over the same visible set (optional `campaign_id` scopes counts and rate to one campaign; a `by_campaign` breakdown is always returned for the analytics chart; the reply rate counts only campaign-bound human replies) |
 | | `/api/replies/scan` | POST | Manually trigger IMAP prospect reply scan (502 when the mailbox scan fails — never a 200 "ok" with a buried error) |
 | | `/api/replies/status` | GET | Check IMAP connection status |
 | | `/api/replies/settings` | GET / PUT | Get / update reply tracker settings: `auto_tag_leads` (positive → Hot Lead), `scan_interval_minutes` (1–1440), `auto_blocklist_machine`, `auto_blocklist_ooo` |

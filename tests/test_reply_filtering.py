@@ -310,7 +310,9 @@ class _LM:
         return {"data": {"body": ""}}
 
 
-async def _scan(tmp_path, monkeypatch, messages, lm, campaigns=None, settings_patch=None):
+def _patch_files(tmp_path, monkeypatch):
+    """Point every reply/bounce state file at tmp_path and fake the IMAP
+    settings, so a scan never touches the developer's real inbox or state."""
     import app.services.bounce_ingest as bi
     import app.services.imap_reply_tracker as T
     import app.services.reply_log as rl
@@ -319,11 +321,19 @@ async def _scan(tmp_path, monkeypatch, messages, lm, campaigns=None, settings_pa
     monkeypatch.setattr(rl, "PROCESSED_FILE", tmp_path / "reply_processed.json")
     monkeypatch.setattr(rl, "SETTINGS_FILE", tmp_path / "reply_settings.json")
     monkeypatch.setattr(bi, "PROCESSED_FILE", tmp_path / "bounce_processed.json")
-    if settings_patch:
-        rl.save_settings(settings_patch)
     monkeypatch.setattr(T.settings, "imap_host", "imap.example.com")
     monkeypatch.setattr(T.settings, "imap_user", "me@example.com")
     monkeypatch.setattr(T.settings, "imap_pass", "secret")
+    return T, rl
+
+
+async def _scan(tmp_path, monkeypatch, messages, lm, campaigns=None, settings_patch=None):
+    import app.services.imap_reply_tracker as T
+
+    _patch_files(tmp_path, monkeypatch)
+    import app.services.reply_log as rl
+    if settings_patch:
+        rl.save_settings(settings_patch)
 
     async def _campaigns(listmonk, cutoff):
         return list(campaigns or []), True
@@ -336,15 +346,21 @@ async def _scan(tmp_path, monkeypatch, messages, lm, campaigns=None, settings_pa
 
 @pytest.mark.asyncio
 async def test_scan_skips_mail_that_is_not_a_reply(tmp_path, monkeypatch):
+    campaigns = [{"id": 3, "name": "Hello", "subject": "Hello",
+                  "created_at": "2026-01-01T00:00:00+00:00", "lists": [{"id": 1}], "body": ""}]
     msgs = [
         _raw("prospect@example.com", "Re: Hello", "Interested, tell me more.", "<a@x>"),
         _raw("invoice+statements@stripe.com", "Your receipt", "Thanks — interested in more? Yes!", "<b@x>"),
         _raw("digest@news.example", "Weekly digest", "Interested in what's new?", "<c@x>",
              "List-Unsubscribe: <mailto:u@news.example>\r\n"),
     ]
-    stats, rl = await _scan(tmp_path, monkeypatch, msgs, _LM())
+    stats, rl = await _scan(tmp_path, monkeypatch, msgs, _LM(), campaigns)
     records = rl.load_log()
     assert [r["from_email"] for r in records] == ["prospect@example.com"]
+    assert records[0]["campaign_id"] == 3
+    # The record is stamped with the connected mailbox, so the feed stays
+    # scoped to the inbox .env points at.
+    assert records[0]["mailbox"] == "me@example.com"
     assert stats["not_reply"] == 2
     # Terminal outcome: skipped mail is not re-examined every scan.
     processed = json.loads((tmp_path / "reply_processed.json").read_text())
@@ -397,11 +413,50 @@ async def test_scan_strips_campaign_echo_before_classifying(tmp_path, monkeypatc
 
 @pytest.mark.asyncio
 async def test_auto_tag_leads_off_keeps_positive_unread(tmp_path, monkeypatch):
+    campaigns = [{"id": 3, "name": "Hello", "subject": "Hello",
+                  "created_at": "2026-01-01T00:00:00+00:00", "lists": [{"id": 1}], "body": ""}]
     msgs = [_raw("prospect@example.com", "Re: Hello", "Interested, send pricing.", "<h@x>")]
-    stats, rl = await _scan(tmp_path, monkeypatch, msgs, _LM(),
+    stats, rl = await _scan(tmp_path, monkeypatch, msgs, _LM(), campaigns,
                             settings_patch={"auto_tag_leads": False})
     [record] = rl.load_log()
     assert record["sentiment"] == "positive" and record["status"] == "unread"
+
+
+@pytest.mark.asyncio
+async def test_unattributed_human_reply_is_not_stored(tmp_path, monkeypatch):
+    """A reply that cannot be tied to a campaign is never shown or counted,
+    so it is not stored: the sender is a subscriber, but their lists match no
+    campaign (deleted or renamed campaigns included). The message is recorded
+    as handled so it is not re-examined every scan."""
+    msgs = [_raw("prospect@example.com", "Re: Hello", "Not interested, sorry.", "<i@x>")]
+    stats, rl = await _scan(tmp_path, monkeypatch, msgs, _LM())
+    assert rl.load_log() == []
+    assert stats["not_reply"] == 1
+    assert "<i@x>" in rl.load_processed_message_ids()
+
+
+@pytest.mark.asyncio
+async def test_reply_is_deferred_while_campaign_history_is_truncated(tmp_path, monkeypatch):
+    """Dropping an unattributable reply is only safe when the campaign
+    history was complete: with a truncated (or failed) fetch the message
+    stays unprocessed and the next scan decides with full data."""
+    import app.services.imap_reply_tracker as T
+    import app.services.reply_log as rl
+
+    _patch_files(tmp_path, monkeypatch)
+
+    async def _truncated(listmonk, cutoff):
+        return [], False
+
+    monkeypatch.setattr(T, "_fetch_campaigns_covering", _truncated)
+    monkeypatch.setattr(T, "_connect_imap",
+                        lambda: _InboxIMAP([_raw("prospect@example.com", "Re: Hello",
+                                                 "Interested.", "<j@x>")]))
+    stats = await T._scan_and_track_replies_impl(_LM(), days_back=14)
+
+    assert stats["deferred"] == 1 and stats["not_reply"] == 0
+    assert rl.load_log() == []
+    assert not (tmp_path / "reply_processed.json").exists()
 
 
 # ── Stored records ───────────────────────────────────────────────────────────

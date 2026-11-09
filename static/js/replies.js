@@ -218,17 +218,13 @@ const Replies = {
     /** Attribution is defined by campaign_id, never by campaign_name alone:
         records written by older versions carry a fabricated
         "Cold Outreach Campaign" label for a reply that matched nothing, and
-        a test mail must not look like it belonged to a campaign. */
+        a test mail must not look like it belonged to a campaign. The feed
+        only contains campaign replies; automated replies carry no campaign
+        by design and get no badge at all. */
     _campaign(r) {
-        if (r.campaign_id) {
-            const label = r.campaign_name || `Campaign #${r.campaign_id}`;
-            return { label, title: `Campaign: ${label}`, attributed: true };
-        }
-        return {
-            label: 'Unattributed',
-            title: 'No campaign matched this reply — it was not sent from a tracked campaign.',
-            attributed: false,
-        };
+        if (!r.campaign_id) return null;
+        const label = r.campaign_name || `Campaign #${r.campaign_id}`;
+        return { label, title: `Campaign: ${label}`, attributed: true };
     },
 
     _displayName(r) { return r.from_name || r.from_email || 'Unknown sender'; },
@@ -610,7 +606,7 @@ const Replies = {
                             <span class="reply-tag reply-tag-sent">${this._esc(sent.label)}</span>
                             ${r.status === 'lead' ? `<span class="reply-tag reply-tag-lead">${this.icon('star', 10, true)} Hot lead</span>` : ''}
                             ${r.auto_blocklisted ? '<span class="reply-tag reply-tag-blocked" title="Sender was automatically blocklisted in ListMonk when this automated reply was detected">Auto-blocklisted</span>' : ''}
-                            <span class="reply-tag reply-tag-camp ${camp.attributed ? '' : 'is-unattributed'}" title="${this._esc(camp.title)}">${this._esc(camp.label)}</span>
+                            ${camp ? `<span class="reply-tag reply-tag-camp" title="${this._esc(camp.title)}">${this._esc(camp.label)}</span>` : ''}
                         </span>
                     </span>
                 </button>
@@ -671,7 +667,7 @@ const Replies = {
 
                 <dl class="reply-facts">
                     <div><dt>Received</dt><dd>${this._esc(App.formatDateTime(r.date))}</dd></div>
-                    <div><dt>Campaign</dt><dd class="${camp.attributed ? '' : 'is-muted'}" title="${this._esc(camp.title)}">${this._esc(camp.label)}</dd></div>
+                    ${camp ? `<div><dt>Campaign</dt><dd title="${this._esc(camp.title)}">${this._esc(camp.label)}</dd></div>` : ''}
                     ${r.to_email ? `<div><dt>Sent to</dt><dd>${this._esc(r.to_email)}</dd></div>` : ''}
                 </dl>
 

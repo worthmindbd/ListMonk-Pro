@@ -501,11 +501,16 @@ def test_clean_reply_strips_wrapped_on_wrote_tail():
 # ── 12. Blocklisting a reply resolves the email server-side ──────────────────
 
 def _reply_log(tmp_path, monkeypatch, records):
+    import app.config
     import app.services.reply_log as rl
 
     monkeypatch.setattr(rl, "LOG_FILE", tmp_path / "reply_log.json")
     monkeypatch.setattr(rl, "PROCESSED_FILE", tmp_path / "reply_processed.json")
     monkeypatch.setattr(rl, "SETTINGS_FILE", tmp_path / "reply_settings.json")
+    # Records carry the mailbox stamp the scan writes (per-record override
+    # lets a test seed a reply from another mailbox).
+    for r in records:
+        r.setdefault("mailbox", app.config.settings.imap_user)
     rl.save_log(records)
 
 
@@ -547,7 +552,7 @@ def test_blocklist_reply_unknown_id_is_404(client, tmp_path, monkeypatch):
 
 def test_reply_stats_use_full_sent_total(client, tmp_path, monkeypatch):
     _reply_log(tmp_path, monkeypatch, [
-        {"id": f"rep_{i}", "sentiment": "positive"} for i in range(5)
+        {"id": f"rep_{i}", "sentiment": "positive", "campaign_id": 7} for i in range(5)
     ])
 
     with patch(
@@ -643,13 +648,14 @@ def test_reply_stats_hide_leftover_bounce_records(client, tmp_path, monkeypatch)
 
 def test_reply_stats_exclude_auto_replies_from_rate(client, tmp_path, monkeypatch):
     """Automated responses (OOO, ticket confirmations) must not inflate the
-    reply rate — only genuine human replies count toward the metric."""
+    reply rate — only genuine human replies count toward the metric. The
+    humans here carry a campaign; the automated ones never do."""
     _reply_log(tmp_path, monkeypatch, [
-        {"id": "rep_1", "sentiment": "positive"},
+        {"id": "rep_1", "sentiment": "positive", "campaign_id": 7},
         {"id": "rep_2", "sentiment": "auto_reply"},
         {"id": "rep_3", "sentiment": "auto_reply"},
-        {"id": "rep_4", "sentiment": "neutral"},
-        {"id": "rep_5", "sentiment": "negative"},
+        {"id": "rep_4", "sentiment": "neutral", "campaign_id": 7},
+        {"id": "rep_5", "sentiment": "negative", "campaign_id": 7},
     ])
 
     with patch(
@@ -687,6 +693,59 @@ def test_reply_stats_campaign_options_for_filter(client, tmp_path, monkeypatch):
     # Sorted by count descending: campaign 7 has 2 replies, campaign 9 has 1.
     assert opts[0] == {"id": 7, "name": "Mixed Leads 12K", "count": 2}
     assert opts[1] == {"id": 9, "name": "1st Campaign", "count": 1}
+
+
+def test_unattributed_replies_are_never_shown_or_counted(client, tmp_path, monkeypatch):
+    """Replies that belong to no campaign are hidden from the feed and every
+    count: legacy records left in an old log never surface, and only the
+    campaign replies (plus the campaign-less automated ones) reach the page."""
+    _reply_log(tmp_path, monkeypatch, [
+        {"id": "rep_1", "sentiment": "positive", "campaign_id": 7, "campaign_name": "C"},
+        # Stored by an older version: a positive lead without any campaign.
+        {"id": "rep_2", "sentiment": "positive", "status": "lead"},
+        {"id": "rep_3", "sentiment": "auto_reply"},
+    ])
+
+    with patch(
+        "app.routers.campaigns.get_campaigns_summary",
+        new=AsyncMock(return_value={"sent": 1000}),
+    ):
+        stats = client.get("/api/replies/stats").json()
+    feed = client.get("/api/replies").json()
+
+    assert stats["total_replies"] == 2          # attributed + automated
+    assert stats["positive"] == 1
+    assert stats["auto_reply"] == 1
+    assert stats["human_replies"] == 1          # only the campaign reply
+    assert stats["reply_rate"] == 0.1
+    assert [r["id"] for r in feed["results"]] == ["rep_1", "rep_3"]
+    assert feed["total"] == 2
+
+
+def test_replies_from_another_mailbox_are_never_shown_or_counted(client, tmp_path, monkeypatch):
+    """Records carry the mailbox that produced them. A .env switch to another
+    domain's inbox starts a clean feed: the old inbox's replies -- campaign
+    replies included -- are neither shown nor counted, and neither are the
+    unstamped records written before the mailbox field existed."""
+    _reply_log(tmp_path, monkeypatch, [
+        {"id": "rep_now", "sentiment": "positive", "campaign_id": 7},
+        {"id": "rep_old", "sentiment": "positive", "campaign_id": 9,
+         "mailbox": "old@getaevoramedia.example"},
+        {"id": "rep_unstamped", "sentiment": "auto_reply", "mailbox": None},
+    ])
+
+    with patch(
+        "app.routers.campaigns.get_campaigns_summary",
+        new=AsyncMock(return_value={"sent": 1000}),
+    ):
+        stats = client.get("/api/replies/stats").json()
+    feed = client.get("/api/replies").json()
+
+    assert stats["total_replies"] == 1
+    assert stats["human_replies"] == 1
+    assert stats["by_campaign"] == {"7": 1}
+    assert [r["id"] for r in feed["results"]] == ["rep_now"]
+    assert feed["total"] == 1
 
 
 # ── 14. Auto-unblock runs concurrently and preserves list memberships ────────

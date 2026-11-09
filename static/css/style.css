@@ -3868,14 +3868,6 @@ td .tag {
     text-overflow: ellipsis;
 }
 
-/* A reply no campaign claimed (e.g. an ad-hoc test mail). Dashed + muted so
-   it never reads as a real campaign name. */
-.reply-tag-camp.is-unattributed {
-    border-style: dashed;
-    background: transparent;
-    color: var(--text-muted);
-}
-
 /* ── Reading pane ──────────────────────────────────────────── */
 .reply-detail {
     position: sticky;
@@ -4062,10 +4054,6 @@ td .tag {
     font-size: 0.86rem;
     color: var(--text-primary);
     overflow-wrap: anywhere;
-}
-
-.reply-facts dd.is-muted {
-    color: var(--text-muted);
 }
 
 .reply-message {

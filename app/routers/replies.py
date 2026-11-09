@@ -152,7 +152,18 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
     # Delivery-failure DSNs are never stored as replies anymore (they are
     # ingested as bounces); the sentiment filter is a defensive guard for
     # logs written by older versions, so a leftover DSN can never surface.
-    all_records = [r for r in load_log() if r.get("sentiment") != "bounce"]
+    # Replies that belong to no campaign are neither shown nor counted;
+    # automated replies are the one exception (they are never
+    # campaign-attributed by design and are shown in the Automated tab).
+    # Records carry the mailbox that produced them: anything scanned from a
+    # previous .env (another domain's inbox) stays invisible.
+    mailbox = settings.imap_user
+    all_records = [
+        r for r in load_log()
+        if r.get("sentiment") != "bounce"
+        and (r.get("campaign_id") or r.get("sentiment") == "auto_reply")
+        and r.get("mailbox") == mailbox
+    ]
     records = all_records
     if campaign_id:
         records = [r for r in all_records
@@ -219,10 +230,23 @@ async def get_replies(
     campaign_id: int = Query(0, description="Optional campaign ID filter"),
     q: str = Query("", description="Search term for email, name, subject, or body"),
 ):
-    """Return paginated prospect replies with filtering."""
+    """Return paginated prospect replies with filtering.
+
+    Only replies that are part of a campaign are shown (plus automated
+    replies, which never carry a campaign), and only those scanned from the
+    connected mailbox: unattributed or foreign-mailbox records left in a log
+    written by an older version stay invisible.
+    """
     # Delivery-failure DSNs are ingested as bounces, never shown here; the
     # sentiment filter drops leftovers from logs written by older versions.
-    records = [r for r in load_log() if r.get("sentiment") != "bounce"]
+    # Replies that belong to no campaign are neither shown nor counted, and
+    # records from a previous .env mailbox are not this inbox's feed.
+    records = [
+        r for r in load_log()
+        if r.get("sentiment") != "bounce"
+        and (r.get("campaign_id") or r.get("sentiment") == "auto_reply")
+        and r.get("mailbox") == settings.imap_user
+    ]
 
     # Filter
     filtered = records

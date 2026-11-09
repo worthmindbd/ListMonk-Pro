@@ -137,10 +137,14 @@ def _reply(from_addr, subject, body, *, message_id=None, to="me@mycompany.com"):
 
 def _fake_listmonk():
     lm = AsyncMock()
-    lm.get_campaigns = AsyncMock(return_value={"data": {"results": [], "total": 0}})
-    # Every sender is a known subscriber: the scan only stores answers from
-    # subscribers (or to a matching campaign subject).
-    lm.get_subscribers = AsyncMock(return_value={"data": {"results": [{"id": 1, "lists": []}]}})
+    # One campaign the (single) list belongs to, so a subscriber's answer is
+    # attributable: the scan only stores replies it can tie to a campaign.
+    lm.get_campaigns = AsyncMock(return_value={"data": {"results": [{
+        "id": 5, "name": "Quick question", "created_at": "2026-01-01T00:00:00+00:00",
+        "lists": [{"id": 1}],
+    }], "total": 1}})
+    # Every sender is a known subscriber of that list.
+    lm.get_subscribers = AsyncMock(return_value={"data": {"results": [{"id": 1, "lists": [{"id": 1}]}]}})
     return lm
 
 
