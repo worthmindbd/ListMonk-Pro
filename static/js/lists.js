@@ -103,6 +103,19 @@ const Lists = {
         return App.selection.values('lists').map(Number).filter(Boolean);
     },
 
+    /** Drop cached list dropdowns on other pages after a list mutation. */
+    _invalidateListCaches(deletedIds = []) {
+        if (typeof Subscribers !== 'undefined') {
+            Subscribers._listsCache = null;
+            if (deletedIds.includes(Subscribers.listFilter)) {
+                Subscribers.listFilter = 0;
+            }
+        }
+        if (typeof Validation !== 'undefined') {
+            Validation.lists = null;
+        }
+    },
+
     search() {
         this.query = document.getElementById('listSearch')?.value || '';
         this.page = 1;
@@ -174,6 +187,7 @@ const Lists = {
 
         try {
             await API.post('/api/lists', { name, type, optin, description, tags });
+            this._invalidateListCaches();
             App.toast('List created', 'success');
             this.render();
         } catch {
@@ -234,6 +248,7 @@ const Lists = {
 
         try {
             await API.put(`/api/lists/${id}`, { name, type, optin, description, tags });
+            this._invalidateListCaches();
             App.toast('List updated', 'success');
             this.render();
         } catch {
@@ -242,9 +257,10 @@ const Lists = {
     },
 
     async remove(id) {
-        if (await App.confirm('Delete List', 'Are you sure you want to delete this list? All subscriber associations will be removed.')) {
+        if (await App.confirm('Delete List', 'Are you sure you want to delete this list? All subscribers in this list (except blocklisted ones) will also be deleted.')) {
             try {
                 await API.del(`/api/lists/${id}`);
+                this._invalidateListCaches([id]);
                 App.toast('List deleted', 'success');
                 App.selection.clear('lists');
                 this.render();
@@ -259,11 +275,12 @@ const Lists = {
         const ids = this._selectedIds();
         if (!ids.length) return;
         if (!await App.confirm('Delete Lists',
-                `Permanently delete ${ids.length} selected list(s)? Subscriber associations to those lists are removed too.`)) return;
+                `Permanently delete ${ids.length} selected list(s)? All subscribers in those lists (except blocklisted ones) will also be deleted.`)) return;
         try {
             const params = ids.map(id => `ids=${id}`).join('&');
             const result = await API.del(`/api/lists?${params}`, API.LONG_TIMEOUT);
             const errors = result?.errors || 0;
+            this._invalidateListCaches(ids);
             App.toast(`Deleted ${result?.deleted ?? ids.length} list(s)${errors ? `, ${errors} failed` : ''}`,
                 errors ? 'info' : 'success');
             App.selection.clear('lists');

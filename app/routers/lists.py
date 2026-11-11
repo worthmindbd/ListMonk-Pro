@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Query, HTTPException
+from app.services import blocklist_registry, email_cleanup
 from app.services.listmonk_client import listmonk
 from app.services.search_query import plain_search_term
 from app.services.bulk_ops import parse_ids, run_bulk
@@ -8,6 +9,87 @@ router = APIRouter()
 # Pagination bounds (the UI requests at most 100).
 MAX_PAGE = 100
 MAX_PER_PAGE = 200
+
+SUBSCRIBER_PAGE_SIZE = 500
+DELETE_CHUNK_SIZE = 100
+MAX_SUBSCRIBER_PAGES = 1000
+
+
+async def _collect_list_subscribers(list_id: int) -> tuple[list[int], list[int]]:
+    """Return ``(delete_ids, dismiss_ids)`` for ``list_id``.
+
+    All pages are read before any deletion because ListMonk paginates
+    ``/api/subscribers`` by SQL OFFSET. Blocklisted subscribers (by ListMonk
+    status or ``blocklist_registry``) are excluded from ``delete_ids`` so they
+    stay on the blacklist after the list is removed.
+    """
+    manual_blocked = blocklist_registry.load()
+    delete_ids: list[int] = []
+    dismiss_ids: list[int] = []
+    seen: set[int] = set()
+
+    page = 1
+    while page <= MAX_SUBSCRIBER_PAGES:
+        res = await listmonk.get_subscribers(
+            page=page, per_page=SUBSCRIBER_PAGE_SIZE, list_id=list_id,
+        )
+        data = res.get("data") if isinstance(res, dict) else None
+        data = data if isinstance(data, dict) else {}
+        rows = data.get("results") if isinstance(data.get("results"), list) else []
+        if not rows:
+            break
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            sid = row.get("id")
+            if not isinstance(sid, int) or isinstance(sid, bool) or sid < 1 or sid in seen:
+                continue
+            seen.add(sid)
+            dismiss_ids.append(sid)
+            status = str(row.get("status") or "").strip().lower()
+            if status != "blocklisted" and sid not in manual_blocked:
+                delete_ids.append(sid)
+
+        total = data.get("total")
+        if (isinstance(total, (int, float))
+                and not isinstance(total, bool)
+                and page * SUBSCRIBER_PAGE_SIZE >= total):
+            break
+        if len(rows) < SUBSCRIBER_PAGE_SIZE and total is None:
+            break
+        page += 1
+
+    return delete_ids, dismiss_ids
+
+
+async def _delete_list_and_subscribers(list_id: int) -> dict:
+    """Delete ``list_id`` and all of its non-blocklisted subscribers.
+
+    Subscribers are collected before the list is deleted (once the list is
+    gone, ListMonk drops its ``subscriber_lists`` rows). Blocklisted
+    subscribers are never deleted so they remain on ListMonk's blocklist, only
+    unlinked from the deleted list. Any stored Email Validation findings for
+    the list's subscribers are dismissed.
+    """
+    delete_ids, dismiss_ids = await _collect_list_subscribers(list_id)
+    result = await listmonk.delete_list(list_id)
+
+    deleted_ids: list[int] = []
+    try:
+        for i in range(0, len(delete_ids), DELETE_CHUNK_SIZE):
+            chunk = delete_ids[i:i + DELETE_CHUNK_SIZE]
+            await listmonk.delete_subscribers(chunk)
+            deleted_ids.extend(chunk)
+    finally:
+        delete_set = set(delete_ids)
+        to_dismiss = list(
+            dict.fromkeys([*deleted_ids, *(sid for sid in dismiss_ids if sid not in delete_set)])
+        )
+        if to_dismiss:
+            await email_cleanup.dismiss_results(to_dismiss)
+
+    return result
 
 
 @router.get("")
@@ -61,7 +143,10 @@ async def delete_lists(ids: list[int] = Query(...)):
         raise HTTPException(status_code=400, detail=str(e))
     if not parsed:
         raise HTTPException(status_code=400, detail="No list ids provided")
-    result = await run_bulk(parsed, listmonk.delete_list)
+    # concurrency=1: two lists in the same batch may share subscribers, so
+    # deleting one list's subscribers while another list is still paginating by
+    # SQL OFFSET would shift its pages.
+    result = await run_bulk(parsed, _delete_list_and_subscribers, concurrency=1)
     return {
         "deleted": result["ok"],
         "errors": result["errors"],
@@ -71,4 +156,4 @@ async def delete_lists(ids: list[int] = Query(...)):
 
 @router.delete("/{list_id}")
 async def delete_list(list_id: int):
-    return await listmonk.delete_list(list_id)
+    return await _delete_list_and_subscribers(list_id)

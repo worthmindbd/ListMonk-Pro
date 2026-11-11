@@ -416,8 +416,8 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/subscribers/lists` | PUT | Bulk modify list memberships (add/remove/unsub) |
 | | `/api/subscribers` | POST / DELETE | Create subscriber / bulk delete subscribers by ID array |
 | **Lists** | `/api/lists` | GET / POST | List all mailing lists / create new list |
-| | `/api/lists` | DELETE | Bulk delete lists by ID array (bounded loop, partial failures reported) |
-| | `/api/lists/{id}` | GET / PUT / DELETE | Get / update / delete list |
+| | `/api/lists` | DELETE | Bulk delete lists by ID array + delete their non-blocklisted subscribers and dismiss their Email Validation results (blocklisted subscribers stay on the blocklist) |
+| | `/api/lists/{id}` | GET / PUT / DELETE | Get / update / delete list (DELETE also removes non-blocklisted subscribers of the list and dismisses their Email Validation results, keeping blocklisted subscribers on the blocklist) |
 | **Campaigns** | `/api/campaigns` | GET / POST | List campaigns (with hard bounce cache) / create |
 | | `/api/campaigns/running/stats` | GET | Real-time running campaign stats |
 | | `/api/campaigns/summary` | GET | Aggregate totals across all campaigns (cached 60s) |

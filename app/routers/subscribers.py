@@ -5,7 +5,7 @@ from app.services.listmonk_client import listmonk
 from app.services.export_service import aiter_dicts_to_csv
 from app.services.bulk_ops import parse_ids
 from app.services.search_query import build_ilike_search
-from app.services import blocklist_registry
+from app.services import blocklist_registry, email_cleanup
 
 router = APIRouter()
 
@@ -235,7 +235,9 @@ async def blocklist_subscriber(subscriber_id: int):
 
 @router.delete("/{subscriber_id}")
 async def delete_subscriber(subscriber_id: int):
-    return await listmonk.delete_subscriber(subscriber_id)
+    result = await listmonk.delete_subscriber(subscriber_id)
+    await email_cleanup.dismiss_results([subscriber_id])
+    return result
 
 
 @router.delete("")
@@ -246,4 +248,6 @@ async def delete_subscribers(ids: list[int] = Query(...)):
         raise HTTPException(status_code=400, detail=str(e))
     if not parsed:
         raise HTTPException(status_code=400, detail="ids must be a non-empty list of subscriber ids")
-    return await listmonk.delete_subscribers(parsed)
+    result = await listmonk.delete_subscribers(parsed)
+    await email_cleanup.dismiss_results(parsed)
+    return result

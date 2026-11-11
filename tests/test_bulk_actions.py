@@ -239,6 +239,90 @@ def test_list_bulk_delete_reports_partial_failure(client):
     assert body["failed"] == [{"id": 2, "error": "listmonk said no"}]
 
 
+def test_list_delete_removes_non_blocklisted_subscribers_and_validation_results(client):
+    from app.services import blocklist_registry, email_cleanup
+
+    # Subscriber 12 is marked in the deliberate blocklist registry; 11 is
+    # blocklisted in ListMonk; 10 and 13 are enabled and should be deleted.
+    blocklist_registry.mark([12])
+    email_cleanup._atomic_write_json(email_cleanup.RESULTS_FILE, {
+        "updated_at": "2026-11-12T00:00:00+00:00",
+        "items": {
+            "a@x.com": {"subscriber_id": 10, "email": "a@x.com", "verdict": "risky"},
+            "b@x.com": {"subscriber_id": 11, "email": "b@x.com", "verdict": "invalid"},
+            "d@x.com": {"subscriber_id": 99, "email": "d@x.com", "verdict": "risky"},
+        },
+    })
+
+    lm = AsyncMock()
+    lm.get_subscribers = AsyncMock(return_value={
+        "data": {
+            "results": [
+                {"id": 10, "email": "a@x.com", "status": "enabled"},
+                {"id": 11, "email": "b@x.com", "status": "blocklisted"},
+                {"id": 12, "email": "c@x.com", "status": "enabled"},
+                {"id": 13, "email": "e@x.com", "status": "enabled"},
+            ],
+            "total": 4,
+        },
+    })
+    lm.delete_list = AsyncMock(return_value={"data": True})
+    lm.delete_subscribers = AsyncMock(return_value={"data": True})
+
+    with patch("app.routers.lists.listmonk", lm):
+        resp = client.delete("/api/lists/7")
+
+    assert resp.status_code == 200
+    lm.get_subscribers.assert_awaited_once_with(page=1, per_page=500, list_id=7)
+    lm.delete_list.assert_awaited_once_with(7)
+    # Only non-blocklisted subscribers (10, 13) are deleted; 11 and 12 stay on
+    # the blacklist.
+    lm.delete_subscribers.assert_awaited_once_with([10, 13])
+    # Validation results for the list's subscribers (10, 11) are dismissed,
+    # while subscriber 99 on another list stays intact.
+    assert set(email_cleanup.load_results()) == {"d@x.com"}
+
+
+def test_list_delete_failure_leaves_subscribers_untouched(client):
+    lm = AsyncMock()
+    lm.get_subscribers = AsyncMock(return_value={
+        "data": {
+            "results": [{"id": 10, "email": "a@x.com", "status": "enabled"}],
+            "total": 1,
+        },
+    })
+    lm.delete_list = AsyncMock(side_effect=RuntimeError("db locked"))
+    lm.delete_subscribers = AsyncMock()
+
+    with patch("app.routers.lists.listmonk", lm):
+        resp = client.delete("/api/lists/7")
+
+    assert resp.status_code == 500
+    lm.delete_subscribers.assert_not_awaited()
+
+
+def test_subscriber_delete_dismisses_validation_results(client):
+    from app.services import email_cleanup
+
+    email_cleanup._atomic_write_json(email_cleanup.RESULTS_FILE, {
+        "updated_at": "2026-11-12T00:00:00+00:00",
+        "items": {
+            "a@x.com": {"subscriber_id": 10, "email": "a@x.com", "verdict": "risky"},
+            "b@x.com": {"subscriber_id": 11, "email": "b@x.com", "verdict": "risky"},
+        },
+    })
+
+    lm = AsyncMock()
+    lm.delete_subscriber = AsyncMock(return_value={"data": True})
+    lm.delete_subscribers = AsyncMock(return_value={"data": True})
+
+    with patch("app.routers.subscribers.listmonk", lm):
+        assert client.delete("/api/subscribers/10").status_code == 200
+        assert set(email_cleanup.load_results()) == {"b@x.com"}
+        assert client.delete("/api/subscribers?ids=11").status_code == 200
+        assert email_cleanup.load_results() == {}
+
+
 def test_template_bulk_delete(client):
     lm = AsyncMock()
     lm.delete_template = AsyncMock(return_value={"data": True})
