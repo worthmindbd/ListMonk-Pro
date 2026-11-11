@@ -7,13 +7,13 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from typing import Optional
 from app.services.listmonk_client import listmonk
 from app.services.campaign_scheduler import nudge_warmup
+from app.services.search_query import plain_search_term
 from app.services.bulk_ops import parse_ids, run_bulk
 from app.services.export_service import dict_list_to_csv, aiter_dicts_to_csv
 from app.services.bounce_list import fetch_filtered_bounces_page, iter_filtered_bounces
 from app.services.hard_bounce_cache import (
     get_all_hard_bounce_counts, get_last_updated,
 )
-from app.services.search_query import build_ilike_search
 
 router = APIRouter()
 
@@ -120,14 +120,11 @@ async def get_campaigns(page: int = Query(1, ge=1, le=MAX_PAGE),
     if order.upper() not in ("ASC", "DESC"):
         raise HTTPException(status_code=400, detail=f"Invalid order: {order}")
     order = order.upper()
-    # `query` stays a raw-SQL passthrough for power users; the UI's free-text
-    # box sends `search`, which is folded into a literal ILIKE clause so plain
-    # words never reach Postgres unparsed.
-    clauses = [c for c in (
-        query.strip(),
-        build_ilike_search(search, ("campaigns.name", "campaigns.subject")),
-    ) if c]
-    combined = " AND ".join(f"({c})" for c in clauses) if clauses else ""
+    # ListMonk's `query` on /api/campaigns is a plain name/subject search, NOT
+    # SQL (only /api/subscribers takes a SQL expression). Wrapping the term in
+    # an ILIKE clause made ListMonk answer 500 for every search, so the text
+    # is passed through as typed; ListMonk binds it as a query parameter.
+    combined = plain_search_term(search or query)
     result = await listmonk.get_campaigns(page, per_page, combined, status,
                                            order_by, order)
 

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Query, HTTPException
 from app.services.listmonk_client import listmonk
+from app.services.search_query import plain_search_term
 from app.services.bulk_ops import parse_ids, run_bulk
-from app.services.search_query import build_ilike_search
 
 router = APIRouter()
 
@@ -23,14 +23,11 @@ async def get_lists(page: int = Query(1, ge=1, le=MAX_PAGE),
     if order.upper() not in ("ASC", "DESC"):
         raise HTTPException(status_code=400, detail=f"Invalid order: {order}")
     order = order.upper()
-    # `query` stays a raw-SQL passthrough for power users; the UI's free-text
-    # box sends `search`, which is folded into a literal ILIKE clause so plain
-    # words never reach Postgres unparsed.
-    clauses = [c for c in (
-        query.strip(),
-        build_ilike_search(search, ("lists.name",)),
-    ) if c]
-    combined = " AND ".join(f"({c})" for c in clauses) if clauses else ""
+    # ListMonk's `query` on /api/lists is a plain name search, NOT SQL (only
+    # /api/subscribers takes a SQL expression). Wrapping the term in an ILIKE
+    # clause made ListMonk answer 500 for every search, so the text is passed
+    # through as typed; ListMonk binds it as a query parameter itself.
+    combined = plain_search_term(search or query)
     return await listmonk.get_lists(page, per_page, combined, status,
                                     order_by, order, minimal)
 

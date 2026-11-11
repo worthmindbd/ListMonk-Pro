@@ -16,6 +16,8 @@ _hard_bounce_counts: dict[int, int] = {}
 _last_updated: str = ""
 
 BATCH_SIZE = 500
+# Pseudo campaign id for hard bounces that carry no campaign.
+UNATTRIBUTED = 0
 UPDATE_INTERVAL = 5 * 60  # 5 minutes
 
 # Serialises refreshes so two overlapping runs cannot interleave their
@@ -33,9 +35,11 @@ async def _count_chunk(chunk: list[dict], counts: dict[int, int]) -> None:
     """Fold one batch of hard bounces into ``counts`` after opener exclusion."""
     filtered = await filter_bounces_excluding_openers(listmonk, chunk)
     for b in filtered:
-        cid = bounce_campaign_id(b)
-        if cid:
-            counts[cid] = counts.get(cid, 0) + 1
+        # Key 0 holds hard bounces with no campaign (subscriber-level ones).
+        # Leaving them out made the Bounces page's total too small, so its
+        # last pages could not be reached.
+        cid = bounce_campaign_id(b) or UNATTRIBUTED
+        counts[cid] = counts.get(cid, 0) + 1
 
 
 async def update_hard_bounce_counts():

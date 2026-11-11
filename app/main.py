@@ -432,14 +432,34 @@ async def login_page(request: Request):
     return render_template("login.html", {"request": request})
 
 
+def _reject_cross_site(request: Request) -> None:
+    """Refuse an auth POST that another site made the browser send.
+
+    /auth/* sits outside the /api CSRF check (the logout button is a plain
+    form), so a third-party page could log the user out with an auto-submitted
+    form, or log them in to an account of its choosing. Browsers label such
+    requests ``Sec-Fetch-Site: cross-site``; clients that send no such header
+    (curl, older browsers) are unaffected.
+    """
+    if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
+        raise HTTPException(status_code=403, detail="Cross-site request refused")
+
+
 @app.post("/auth/login")
 async def login(request: Request):
+    _reject_cross_site(request)
     client_ip = client_ip_from_request(request)
     if is_login_rate_limited(client_ip):
         raise HTTPException(
             status_code=429,
             detail="Too many failed login attempts. Please try again later.",
         )
+
+    # A JSON content type cannot be sent cross-origin without a preflight; a
+    # text/plain form post carrying a JSON-shaped body can.
+    content_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if content_type != "application/json":
+        raise HTTPException(status_code=415, detail="Content-Type must be application/json")
 
     try:
         data = await request.json()
@@ -474,6 +494,7 @@ async def login(request: Request):
 # top-level navigations, so a GET logout is a trivial forced-logout vector.
 @app.post("/auth/logout")
 async def logout(request: Request):
+    _reject_cross_site(request)
     # Revoke server-side, not just in this browser: a copied cookie must stop
     # working once its owner logs out. The revocation write fsyncs, so it
     # runs off the event loop.

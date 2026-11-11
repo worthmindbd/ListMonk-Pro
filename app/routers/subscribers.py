@@ -5,6 +5,7 @@ from app.services.listmonk_client import listmonk
 from app.services.export_service import aiter_dicts_to_csv
 from app.services.bulk_ops import parse_ids
 from app.services.search_query import build_ilike_search
+from app.services import blocklist_registry
 
 router = APIRouter()
 
@@ -207,17 +208,29 @@ async def blocklist_subscribers(data: dict):
         raise HTTPException(status_code=400, detail=str(e))
     if not ids:
         raise HTTPException(status_code=400, detail="ids must be a non-empty list of subscriber ids")
-    return await listmonk.blocklist_subscribers(ids)
+    result = await listmonk.blocklist_subscribers(ids)
+    # A deliberate blocklisting: auto-unblock must never reverse it.
+    blocklist_registry.mark(ids)
+    return result
 
 
 @router.put("/{subscriber_id}")
 async def update_subscriber(subscriber_id: int, data: dict):
-    return await listmonk.update_subscriber(subscriber_id, data)
+    result = await listmonk.update_subscriber(subscriber_id, data)
+    status = data.get("status") if isinstance(data, dict) else None
+    if status == "blocklisted":
+        blocklist_registry.mark([subscriber_id])
+    elif status == "enabled":
+        # Re-enabled by hand: the earlier deliberate blocklisting is over.
+        blocklist_registry.unmark([subscriber_id])
+    return result
 
 
 @router.put("/{subscriber_id}/blocklist")
 async def blocklist_subscriber(subscriber_id: int):
-    return await listmonk.blocklist_subscriber(subscriber_id)
+    result = await listmonk.blocklist_subscriber(subscriber_id)
+    blocklist_registry.mark([subscriber_id])
+    return result
 
 
 @router.delete("/{subscriber_id}")

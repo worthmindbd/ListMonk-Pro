@@ -12,6 +12,7 @@ from app.services.unsubscribe_log import (
     unmark_processed, _log_lock,
 )
 from app.services.link_unsubscribe import scan_link_unsubscribes
+from app.services import blocklist_registry
 from app.services.listmonk_client import listmonk
 from app.services.export_service import dict_list_to_csv
 
@@ -380,8 +381,30 @@ async def reset_all_unsubscribes():
                     }
                     return
 
+                # A blocklisting this engine did not cause is not ours to
+                # undo. New records say whether the scanner blocklisted
+                # (`blocklisted`); for older ones a bounce record is the tell:
+                # before the link scanner skipped blocklisted subscribers it
+                # logged bounce-blocklisted addresses as "link unsubscribes",
+                # and undoing those re-enabled dead addresses.
+                if subscriber.get("status") == "blocklisted" and r.get("blocklisted") is not True:
+                    foreign = r.get("blocklisted") is False
+                    if not foreign:
+                        bounces = await listmonk.get_subscriber_bounces(sub_id)
+                        foreign = bool(bounces.get("data"))
+                    if foreign:
+                        results[idx] = {
+                            "ok": False,
+                            "detail": (
+                                f"SKIP {email_addr}: blocklisted for another reason "
+                                "(bounce or manual blocklist), left as it is"
+                            ),
+                        }
+                        return
+
                 # Step 2: Re-enable subscriber (remove blocklist)
                 current_lists = [lst["id"] for lst in subscriber.get("lists", [])]
+                blocklist_registry.unmark([sub_id])
                 await listmonk.update_subscriber(sub_id, {
                     "email": subscriber["email"],
                     "name": subscriber.get("name", ""),

@@ -393,21 +393,24 @@ async def test_prune_removes_stored_replies_outside_any_campaign(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_prune_removes_replies_from_another_mailbox(tmp_path, monkeypatch):
-    """reply_log.json is the connected inbox's feed: records scanned from a
-    previous .env (another domain) go, stamped or not, campaign or not."""
+async def test_prune_keeps_replies_from_another_mailbox(tmp_path, monkeypatch):
+    """Records stamped with another mailbox (a previous .env) are hidden by
+    the feed but never deleted: an IMAP_USER change must not destroy triage
+    work. Unstamped legacy records still go."""
     T, rl = _patch_state(tmp_path, monkeypatch)
     rl.save_log([
         _stored("foreign-camp", "old@other.example", "negative",
                 campaign_id=6, campaign_name="C", mailbox="old@other.example"),
+        _stored("foreign-stray", "old@other.example", "neutral",
+                mailbox="old@other.example"),
         # Unstamped = written before the mailbox field existed.
         _stored("legacy", "old@other.example", "auto_reply", mailbox=None),
         _stored("mine", "prospect@example.com", "auto_reply"),
     ])
     removed = await T.prune_non_campaign_replies()
 
-    assert removed == 2
-    assert [r["id"] for r in rl.load_log()] == ["mine"]
+    assert removed == 1
+    assert [r["id"] for r in rl.load_log()] == ["foreign-camp", "foreign-stray", "mine"]
 
 
 @pytest.mark.asyncio

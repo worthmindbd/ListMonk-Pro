@@ -105,6 +105,7 @@ def load_schedule() -> dict:
 
 def save_schedule(schedule: dict):
     """Save schedule to JSON file atomically."""
+    temp_path = None
     try:
         SCHEDULE_FILE.parent.mkdir(parents=True, exist_ok=True)
         temp_fd, temp_path = tempfile.mkstemp(
@@ -117,9 +118,17 @@ def save_schedule(schedule: dict):
             f.flush()
             os.fsync(f.fileno())
         os.replace(temp_path, SCHEDULE_FILE)
+        temp_path = None
     except OSError as e:
         logger.error(f"Failed to save schedule to {SCHEDULE_FILE}: {e}")
         raise
+    finally:
+        # Never leave the temp file behind when the write failed.
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
 
 async def update_schedule_settings(patch: dict) -> dict:

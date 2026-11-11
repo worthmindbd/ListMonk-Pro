@@ -45,7 +45,8 @@ jobs:
       # VPS_USER@VPS_HOST with the dirs in variable DEPLOY_PATHS.
       #
       # The repository is public, so its Actions logs are too: hosts and dirs
-      # are masked, and an instance's build output is only shown when it fails.
+      # are masked, and an instance's build output is never shown here (a
+      # failed one is kept on the server as .deploy-last.log in its checkout).
       # Each checkout carries its own .env (port, container name, credentials)
       # read by deploy.sh. A failing instance or VPS does not stop the others,
       # but fails the job.
@@ -88,12 +89,21 @@ jobs:
                  && git reset -q --hard origin/main \
                  && bash ./deploy.sh ) > "$log" 2>&1; then
               echo "  instance $i: deployed, healthy"
+              rm -f "$log"
             else
-              echo "  instance $i: FAILED"
-              tail -n 40 "$log"
+              # The output is NOT printed: on a failed health check it holds
+              # the container's log, where the scanners write prospect
+              # addresses and subjects, and this repository's Actions logs are
+              # public. It stays on the server instead.
+              if mv -f "$log" "$dir/.deploy-last.log" 2>/dev/null; then
+                chmod 600 "$dir/.deploy-last.log" 2>/dev/null || true
+                echo "  instance $i: FAILED (see .deploy-last.log in that checkout on the server)"
+              else
+                rm -f "$log"
+                echo "  instance $i: FAILED (the checkout directory is missing or not writable)"
+              fi
               failed=1
             fi
-            rm -f "$log"
           done
           exit "$failed"
           REMOTE

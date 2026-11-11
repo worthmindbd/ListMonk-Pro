@@ -30,9 +30,13 @@ reply_processed.json
 bounce_processed.json
 app_settings.json
 bounce_processed.json*.tmp
+# Temp files of the atomic state writes (left behind only by a killed process)
+*.tmp
+.deploy-last.log
 blocklist_restore_backup.json
 session_secret.key
 session_revocations.json
+manual_blocklist.json
 *.bak
 uvicorn.log
 .claude/settings.json

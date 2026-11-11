@@ -57,6 +57,8 @@ def _isolate_state_files(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(email_cleanup, "RESULTS_FILE", state / "email_validation_results.json")
     from app import auth
     monkeypatch.setattr(auth, "REVOCATIONS_FILE", state / "session_revocations.json")
+    from app.services import blocklist_registry
+    monkeypatch.setattr(blocklist_registry, "REGISTRY_FILE", state / "manual_blocklist.json")
 
 
 @pytest.fixture(autouse=True)
@@ -68,6 +70,8 @@ def _reset_module_caches():
     def _reset():
         link_unsubscribe.invalidate_campaign_history()
         opener_cache.invalidate()
+        from app.services import bounce_filters
+        bounce_filters.invalidate_bounced_openers()
         hard_bounce_cache._hard_bounce_counts = {}
         hard_bounce_cache._last_updated = ""
         hard_bounce_cache._pending_update = None

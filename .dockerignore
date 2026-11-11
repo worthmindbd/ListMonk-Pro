@@ -34,6 +34,8 @@ reply_processed.json
 bounce_processed.json*
 app_settings.json
 blocklist_restore_backup.json
+manual_blocklist.json
+.deploy-last.log
 *.tmp
 *.bak
 uvicorn.log

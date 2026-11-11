@@ -15,15 +15,25 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from app.services.listmonk_client import ListMonkClient, listmonk as listmonk_singleton
+from app.services import blocklist_registry
 from app.services.unsubscribe_log import load_log, _load_processed_list
 
 logger = logging.getLogger("auto_unblock")
 
+# Blocklisted, has a bounce record, and opened or clicked AFTER the latest
+# bounce. "Ever engaged" was not evidence of a false bounce: a contact who
+# opened in January and hard-bounced in June (mailbox deleted) was re-enabled
+# every six hours, its bounce record deleted, and the dead address mailed
+# again by the next campaign. Engagement that follows the bounce is the only
+# sign that the address still works.
 QUERY_BLOCKLISTED_ENGAGED = (
-    "subscribers.status = 'blocklisted' "
-    "AND subscribers.id IN (SELECT DISTINCT subscriber_id FROM bounces) "
-    "AND (subscribers.id IN (SELECT DISTINCT subscriber_id FROM link_clicks) "
-    "OR subscribers.id IN (SELECT DISTINCT subscriber_id FROM campaign_views))"
+    "subscribers.status = 'blocklisted' AND subscribers.id IN ("
+    "SELECT lb.subscriber_id FROM (SELECT subscriber_id, MAX(created_at) AS last_bounce "
+    "FROM bounces GROUP BY subscriber_id) lb WHERE "
+    "EXISTS (SELECT 1 FROM link_clicks lc WHERE lc.subscriber_id = lb.subscriber_id "
+    "AND lc.created_at > lb.last_bounce) "
+    "OR EXISTS (SELECT 1 FROM campaign_views cv WHERE cv.subscriber_id = lb.subscriber_id "
+    "AND cv.created_at > lb.last_bounce))"
 )
 
 # Backward-compatible alias
@@ -65,12 +75,21 @@ async def find_blocklisted_engaged(client: ListMonkClient) -> list[dict]:
         client.get_subscribers, per_page=500, query=QUERY_BLOCKLISTED_ENGAGED,
     )
     suppressed = _suppressed_emails()
-    if not suppressed:
+    # Blocklisted on purpose through this app (Leads / Replies / Email
+    # Validation actions, auto-blocklist, cleanup): a decision, not a bounce
+    # side effect, whatever bounce records the contact also carries.
+    deliberate = blocklist_registry.load()
+    if not suppressed and not deliberate:
         return subs
-    kept = [s for s in subs if (s.get("email") or "").strip().lower() not in suppressed]
+    kept = [
+        s for s in subs
+        if (s.get("email") or "").strip().lower() not in suppressed
+        and s.get("id") not in deliberate
+    ]
     if len(kept) != len(subs):
         logger.info(
-            f"Auto-unblock: kept {len(subs) - len(kept)} unsubscribed subscriber(s) blocklisted"
+            f"Auto-unblock: kept {len(subs) - len(kept)} unsubscribed or deliberately "
+            "blocklisted subscriber(s) blocklisted"
         )
     return kept
 

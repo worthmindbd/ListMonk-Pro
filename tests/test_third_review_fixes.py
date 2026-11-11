@@ -87,11 +87,10 @@ def test_campaigns_search_becomes_escaped_ilike(client):
                       side_effect=fake_get_campaigns):
         resp = client.get("/api/campaigns?search=o'brien%20%25x")
     assert resp.status_code == 200
-    q = captured["query"]
-    assert "ILIKE" in q and "campaigns.name" in q and "campaigns.subject" in q
-    assert "o''brien" in q             # quote doubled
-    assert "\\%x" in q                 # % is escaped, not stripped
-    assert "%o'brien" not in q         # never the raw unescaped term
+    # ListMonk's campaign `query` is a plain text search bound as a parameter
+    # (verified against v6.2.0: a SQL fragment there answers 500), so the
+    # term must arrive exactly as typed.
+    assert captured["query"] == "o'brien %x"
 
 
 def test_lists_search_becomes_escaped_ilike(client):
@@ -108,7 +107,8 @@ def test_lists_search_becomes_escaped_ilike(client):
                       side_effect=fake_get_lists):
         resp = client.get("/api/lists?search=black%20friday")
     assert resp.status_code == 200
-    assert captured["query"] == "(lists.name ILIKE '%black friday%')"
+    # Plain name search, not SQL (a SQL fragment makes ListMonk answer 500).
+    assert captured["query"] == "black friday"
 
 
 # ── B3: reclassified auto-replies lose campaign attribution ─────────────

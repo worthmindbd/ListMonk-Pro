@@ -41,3 +41,20 @@ def build_ilike_search(search: str, columns: tuple[str, ...] | list[str]) -> str
     parts = [f"{col} ILIKE '%{term}%'" for col in columns]
     clause = " OR ".join(parts)
     return f"({clause})" if len(parts) > 1 else clause
+
+
+# Characters Postgres' to_tsquery treats as operators. ListMonk feeds the list
+# and campaign search text to a full-text query, and a stray one ("a & b",
+# "(draft)") makes it answer 500 instead of matching nothing.
+_TSQUERY_OPERATORS = str.maketrans({c: " " for c in "&|!():*<>\\"})
+
+
+def plain_search_term(search: str) -> str:
+    """Free text for ListMonk's *plain-text* searches (lists, campaigns).
+
+    Unlike ``/api/subscribers``, the ``query`` parameter of ``/api/lists`` and
+    ``/api/campaigns`` is not SQL: ListMonk binds it as a parameter of a name
+    (and subject) search. So nothing is escaped here; only full-text operator
+    characters are turned into spaces and whitespace is collapsed.
+    """
+    return " ".join((search or "").translate(_TSQUERY_OPERATORS).split())

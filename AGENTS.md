@@ -30,7 +30,8 @@ ListMonk-Pro/
 │   └── services/                  # Core business logic & integrations
 │       ├── __init__.py
 │       ├── app_settings.py        # Installation-wide app settings (chosen mode persisted to DATA_DIR)
-│       ├── auto_unblock.py        # Auto-unblock bounce-blocklisted engaged contacts (never opt-outs)
+│       ├── auto_unblock.py        # Auto-unblock bounce-blocklisted contacts that engaged AFTER the bounce (never opt-outs or deliberate blocklistings)
+│       ├── blocklist_registry.py  # Subscriber ids blocklisted on purpose through this app (manual_blocklist.json); auto-unblock never reverses them
 │       ├── bounce_filters.py      # Smart bounce filtering (excludes campaign openers as false positives)
 │       ├── bounce_ingest.py       # RFC 3463 DSN classifier, IMAP scanner & processed-ID state
 │       ├── bounce_list.py         # Paginated bounce listing with opener exclusion & cache integration
@@ -53,7 +54,7 @@ ListMonk-Pro/
 │       ├── link_unsubscribe.py    # ListMonk direct link unsubscribe scanner & campaign attributor
 │       ├── listmonk_client.py     # Async HTTP client for ListMonk REST API (with paginate_all helper)
 │       ├── opener_cache.py        # In-memory campaign opener email cache with TTL & inflight deduplication
-│       ├── search_query.py        # Safe free-text → ListMonk ILIKE query builder (never raw `query`)
+│       ├── search_query.py        # Free-text search builders: escaped ILIKE for subscribers (SQL), plain_search_term for lists/campaigns (plain text)
 │       ├── reply_i18n.py          # Non-English reply vocabulary (ack / refusal / interest / dead-address) merged into the classifier, plus opt-out phrases merged into the unsubscribe scanner
 │       ├── reply_log.py           # Persistent JSON storage for prospect replies and sentiments
 │       ├── task_utils.py          # Strong references for fire-and-forget tasks & shutdown drain
@@ -107,6 +108,7 @@ ListMonk-Pro/
 │   ├── test_warmup.py             # Warm-up: ramp maths, delta counting, day roll-over/advance rule, quota enforcement, scheduler interplay, API
 │   ├── test_email_format.py       # HTML ↔ plain switch: twin/text conversion, remembered setups, compile rollback, attribs kept on edit
 │   ├── test_email_validation.py   # Validator (syntax, DNS verdicts, flags, cache), scan, cleanup safety rails, schedule maths, API
+│   ├── test_fifth_review_fixes.py # Regressions for the fifth review (plain-text search, IP octets vs status codes, DSN gate, keyword boundaries, blocklist registry, subject matching, mode-aware audit, auth cross-site)
 │   ├── conftest.py                # Resets module-level caches between tests
 │   └── test_regressions.py        # Route order, IMAP seen-marking, prune, timestamp regressions
 ├── .github/
@@ -163,6 +165,7 @@ ListMonk-Pro/
   reset the limiter on every attempt. Credential comparison encodes to UTF-8 first
   so non-ASCII input is a normal `401` rather than a `500`.
 - `SecurityHeadersMiddleware` sets `X-Content-Type-Options`, `Referrer-Policy`, and `X-Frame-Options` on every response.
+- `POST /auth/login` and `POST /auth/logout` sit outside `/api`, so they carry their own check: a request labelled `Sec-Fetch-Site: cross-site` is refused (403), and login requires a JSON content type (415).
 - `CSRFMiddleware` rejects state-changing `/api/*` requests unless they carry `X-Requested-With: XMLHttpRequest` or a `Content-Type` whose MIME essence is exactly `application/json`. `multipart/form-data` is **not** exempt (a plain HTML form can send it without a preflight); the SPA's uploads pass because `API.request` always sends `X-Requested-With`.
 
 ### 3. Bounce Ingestion & Smart Filtering
@@ -190,7 +193,8 @@ ListMonk-Pro/
     actually available**. If `_fetch_campaigns_covering` failed or was truncated, those
     DSNs stay unprocessed for the next scan — otherwise a transient ListMonk hiccup at
     container start would silently lose every bounce in the window forever.
-  - Classifies into **hard** vs **soft** bounces using RFC 3463 enhanced status codes (e.g. `5.1.1`, `5.1.2`, `5.2.1`) and failure patterns.
+  - **Only delivery-status notices are ingested** (`looks_like_dsn`: `multipart/report` / `message/delivery-status`, `X-Failed-Recipients`, a mailer-daemon sender, RFC 3464 fields or the MTAs' failure wording). The bounce address is the envelope sender, so it also receives out-of-office notices, ticket acknowledgements and ordinary mail; without the gate those were parsed as bounces against whatever address sat in angle brackets in the body. Anything else is recorded as handled (`not_a_dsn`).
+  - Classifies into **hard** vs **soft** bounces using RFC 3463 enhanced status codes (e.g. `5.1.1`, `5.1.2`, `5.2.1`) and failure patterns. Status-code patterns must start at a boundary (`(?<![\d.])`): the octets of an IP address in the DSN (`185.1.1.20`) are not a `5.1.1`.
   - Skips `Action: delayed` notices entirely — the message is still in flight and a real
     failure arrives as its own DSN.
   - Attributes bounces to campaigns via message headers (`X-Listmonk-Campaign`, `List-ID`) or list membership and dates.
@@ -217,22 +221,23 @@ ListMonk-Pro/
 ### 4. Dual-Source Unsubscribe Engine
 - **IMAP Unsubscribe Monitor** (`app/services/imap_unsubscribe.py`):
   - Scans primary inbox (`IMAP_*`) every hour for reply keywords (`"remove me"`, `"unsubscribe me"`, `"exclude me"` and their plural-subject forms `"remove us"`, `"unsubscribe us"`, `"exclude us"` — B2B prospects answer for their company) plus other plain instructions to stop the mail — `"please unsubscribe"`, `"stop emailing me"`, `"take us off your list"`, `"do not contact us"`, `"no further contact"`, a reply that is just `"STOP"`/`"Unsubscribe"` — and their equivalents in DE/FR/ES/IT/PT/NL/PL/DA/NO/SV (`reply_i18n.OPT_OUT_PATTERNS`). Only an *instruction aimed at the sender's own address* counts; a refusal ("not interested", `"nie jestem zainteresowany"`) does not unsubscribe, and neither do bare footer words (`"unsubscribe"`, `"désinscrire"`). Mail carrying RFC 3834 automation headers (`Auto-Submitted`, `X-Autoreply`, `Precedence: auto_reply`) is never acted on: a responder's footer is boilerplate, and acting on it would unenrol a real prospect who is merely away. The scan covers **every** message of the lookback window, read or unread — a request the human already opened in webmail must still be honoured (rule 13). A batched identity-header peek (`imap_helpers.fetch_state_ids`) skips messages already recorded in `unsubscribe_examined.json` (Message-ID / `From|Date|Subject` fingerprint, capped at 50,000) without downloading them; bodies are fetched with `BODY.PEEK[]` so examining never flips a message to read. On the first scan of a version with the examined set (file absent) the set is seeded once from messages already `\Seen` — the old scanner flagged everything it looked at, and "Undo All" relied on that, so upgrading never re-processes history. Blocking IMAP calls run via `asyncio.to_thread`.
+  - The literal keywords are word-bounded ("remove mention", "exclude media", "remove users" are not opt-outs). A sender already in `unsubscribe_processed.json` is skipped only while they still have no active subscription (`_has_active_subscription`): someone re-subscribed since (a re-import) who asks again is honoured. A request from an address that is not a subscriber cannot be acted on; it is logged as a warning and counted (`unmatched` in the scan result).
   - Quote stripping (`_extract_reply_only`): ignores quoted history/template footers to eliminate false positives.
   - List-aware campaign matching: attributes replies to the latest campaign that targeted the subscriber's actual lists.
   - Actions: unenrolls subscriber from all lists, conditionally blocklists (if enabled in settings), logs to `unsubscribe_log.json`.
   - Only messages that were acted on are marked `\Seen`, after their records are persisted — every other message keeps the read state the human left it in. A transient failure (ListMonk down) records nothing, so the next scan retries it. Handled emails are also stored in `unsubscribe_processed.json` (capped at 50,000 entries — the link scanner re-polls ListMonk, where an unsubscribed subscriber stays unsubscribed forever, so an evicted email would be re-processed every hour), so clearing/deleting log records does not cause re-processing.
 - **Link Unsubscribe Scanner** (`app/services/link_unsubscribe.py`):
-  - Polls ListMonk lists for subscribers with `unsubscribed` status.
+  - Polls ListMonk lists for subscribers with `unsubscribed` status. Subscribers whose own status is `blocklisted` are skipped: ListMonk marks every subscription of a blocklisted subscriber `unsubscribed`, so a bounce / manual / cleanup blocklisting would otherwise be logged as a link unsubscribe (and re-enabled by "Undo All").
   - Cascades unsubscription across all lists and applies optional blocklist.
   - Logs records with `source: "link"`; serialized with a module lock so manual and background scans cannot double-process.
 - **Undo / Reset** (`POST /api/unsubscribes/reset`):
-  - Re-subscribes users to their original removed lists, resets status to `enabled`, removes restored records from log, and unmarks their emails so future unsubscribes are detected again.
+  - Re-subscribes users to their original removed lists, resets status to `enabled`, removes restored records from log, and unmarks their emails so future unsubscribes are detected again. A blocklisting the engine did not cause is never lifted: records carry `blocklisted` (did the scanner blocklist?), and for older records a still-blocklisted subscriber with a bounce record is skipped and stays in the log.
 
 ### 5. Automation Workers (FastAPI Lifespan)
 All background tasks run as managed `asyncio.create_task` loops in `app/main.py`:
 | Task Loop | Interval | Purpose |
 |-----------|----------|---------|
-| `auto_unblock_loop` | 6 hours | Finds blocklisted clickers/openers **that have a bounce record** (the blocklisting came from a bounce), re-enables them, deletes the false bounce records. Addresses in the unsubscribe log / processed set are never re-enabled, and blocklistings without a bounce (manual, reply, import) are left alone |
+| `auto_unblock_loop` | 6 hours | Finds blocklisted subscribers with a bounce record **who opened or clicked after their latest bounce** (`QUERY_BLOCKLISTED_ENGAGED`; engagement *before* a bounce proves nothing: the mailbox may have died since), re-enables them, deletes the false bounce records. Never re-enabled: addresses in the unsubscribe log / processed set, and ids in `blocklist_registry` (`manual_blocklist.json`): every blocklisting done through this app (Leads / Replies / Email Validation actions, reply auto-blocklist, cleanup) is recorded there, because ListMonk does not store *why* a subscriber is blocklisted. A new code path that blocklists on purpose must call `blocklist_registry.mark(ids)` |
 | `scheduler_loop` | 60 seconds | Enforces daily send windows, auto-pauses/resumes campaigns. While **disabled** it resumes the campaigns it auto-paused itself (still-paused ones only; a failed resume stays tracked and is retried), and `PUT /api/scheduler` ticks immediately in both directions. The whole load → mutate → save cycle of a tick runs under `_SCHED_LOCK`, shared with `update_schedule_settings()` (the API's PUT path), so overlapping ticks or a settings write during a tick can never clobber `schedule.json` |
 | `imap_scan_loop` | 1 hour | Scans IMAP inbox for replies + polls ListMonk for link unsubscribes |
 | `bounce_ingest_loop` | 1 hour | Scans the bounce mailbox for new DSNs in the 30-day window, classifies & records bounces; skips delay notices and anything already in `bounce_processed.json` |
@@ -257,8 +262,8 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 - **Typo detection is conservative:** an explicit misspelling table, TLD slips (`.con`), and edit-distance matching limited to dropped / doubled / swapped letters against long-named providers. **Substitutions are excluded on purpose** (`email.com` vs `gmail.com` are two real providers).
 - **Not covered, deliberately:** whether a specific *mailbox* exists (needs an SMTP `RCPT TO` probe: unreliable, often blocked, can hurt the sending IP). Do not add one without an opt-in.
 - **Jobs:** `scan` (report only, optionally one list) and `cleanup` (scan + **blocklist**, never delete). One job at a time (`email_cleanup._job`, claimed synchronously in `_begin_job`; `409` when busy); started in the background via `task_utils.spawn`, progress polled from `GET /api/email-validation/status`. Only `status = 'enabled'` subscribers are read. Hard-bounced subscribers come from `get_bounces(bounce_type="hard")` with the same opener exclusion as the Bounces page (`bounce_filters.filter_bounces_excluding_openers`) and are matched by `subscriber_id` or email.
-- **What cleanup acts on:** `invalid` verdicts whose reasons are enabled in the settings (`clean_invalid` → syntax / no_domain / no_mx / null_mx, `clean_hard_bounces` → hard_bounce). `risky` and `unknown` are **never** acted on automatically.
-- **Safety rails (cleanup only):** (1) `resolver_healthy()` must pass (a well-known domain resolves) or the run fails without touching anyone; (2) if candidates exceed `HOLD_FRACTION` (20 %) of the checked subscribers (judged from `HOLD_MIN_SAMPLE` = 50) the run is **held** (`status: held`): nothing is blocklisted and the user reviews on the page; (3) candidates are collected first and blocklisted afterwards in chunks of 100, never while paginating (ListMonk paginates by offset); (4) partial failures are reported (`failed_blocklist`, `status: failed`), the unblocklisted rows stay listed for a retry.
+- **What cleanup acts on:** `invalid` verdicts whose reasons are enabled in the settings (`clean_invalid` → syntax / no_domain / no_mx / null_mx, `clean_hard_bounces` → hard_bounce). `risky` and `unknown` are **never** acted on automatically. **A DNS-only finding (no_domain / no_mx / null_mx) needs two scans** (`_is_confirmed`): it is blocklisted only when the stored results of an earlier scan already list the subscriber as DNS-dead, because one NXDOMAIN (registrar hold, a broken zone for a day) must not cause a permanent blocklisting. Syntax errors and hard bounces are acted on at once; the waiting ones are reported as `pending_confirmation`.
+- **Safety rails (cleanup only):** (1) `resolver_healthy()` must pass (a well-known domain resolves) or the run fails without touching anyone; (2) if the dead-looking addresses (confirmed or not) exceed `HOLD_FRACTION` (20 %) of the checked subscribers (judged from `HOLD_MIN_SAMPLE` = 50) the run is **held** (`status: held`): nothing is blocklisted and the user reviews on the page; (3) candidates are collected first and blocklisted afterwards in chunks of 100, never while paginating (ListMonk paginates by offset); (4) partial failures are reported (`failed_blocklist`, `status: failed`), the unblocklisted rows stay listed for a retry.
 - **Schedule:** `latest_slot(cfg, now)` / `next_slot` are pure (timezone via `zoneinfo`; monthly uses days 1–28). A run is owed when `last_slot < latest_slot`. Enabling or moving the schedule **baselines** `last_slot` to the current slot, so saving "daily at 03:00" at 10:00 never fires at once; a slot missed while the app was down runs once on startup; a held / ok / cancelled run uses its slot up, a `failed` one keeps it and is retried after `RETRY_AFTER_FAILURE` (1 h).
 - **State:** `email_cleanup.json` (settings, `last_slot`, `last_scan`, `last_run`, `recent_cleaned` audit trail ≤ 100) and `email_validation_results.json` (the problem addresses only, capped at 50,000, worst first when trimming; valid addresses are counted, never stored). A complete full scan replaces the results; a list scan or a cancelled one only replaces the entries of subscribers it re-checked. Both are written atomically; module locks `_STATE_LOCK` / `_RESULTS_LOCK` are reset in `tests/conftest.py` (rule 11).
 - **Results actions** only touch submitted ids (rule 14): `PUT /results/blocklist` additionally refuses ids that are not in the stored results (`skipped`), and *Dismiss* (`DELETE /results`) forgets rows without touching ListMonk.
@@ -270,7 +275,10 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
   `In-Reply-To`/`References`) is skipped, and so is anything that cannot be attributed to a
   campaign — a ticket desk answering from its own address, a stranger's "Re: Hi", a
   subscriber's answer to a deleted or renamed campaign, a threaded "Yes. Please share." from
-  an address no campaign claims. Attribution = the subject matches a campaign, or the sender
+  an address no campaign claims. A campaign subject matches exactly, or as a substring only
+  when it is at least `SUBJECT_SUBSTRING_MIN` (12) characters long (a campaign titled "Hi"
+  must not claim every mail containing "hi"); the most specific match wins, not the newest.
+  Attribution = the subject matches a campaign, or the sender
   is a ListMonk subscriber whose lists pick one (`match_campaign_for_reply`). A human reply
   that ends up with no campaign is dropped (`not_reply`, recorded in `reply_processed.json`);
   **when the campaign history was not fully available** (fetch failed or hit
@@ -283,12 +291,12 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 - **Every record carries the mailbox that produced it** (`mailbox`: the `IMAP_USER` of the
   scan). The feed, the stats and the prune are scoped to the connected mailbox, so a `.env`
   switch to another domain's inbox starts a clean feed: the previous inbox's replies are
-  neither shown nor counted, and the prune deletes them (unstamped records written before
-  the field existed included).
+  neither shown nor counted. They are **kept on disk** (switching back restores them); the
+  prune only deletes unstamped records written before the field existed.
   The same campaign rule is applied to already-stored records (`prune_non_campaign_replies`,
   `pruned` in scan stats, before re-classification so an automated reply that loses its
-  attribution there is not mistaken for a stray): a record is deleted unless it belongs to
-  the connected mailbox **and** has a campaign, is `auto_reply`, or was acted on by a human
+  attribution there is not mistaken for a stray): a record of the connected mailbox (or an
+  unstamped one) is deleted unless it has a campaign, is `auto_reply`, or was acted on by a human
   (a `manual` status_source, or replied/archived — triage work is never destroyed, the read
   filter simply hides it). The prune needs no ListMonk lookups: the attribution on the
   record is the only evidence that counts.
@@ -381,7 +389,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
   first rows as JSON, so the UI previews the exact output ListMonk will receive.
 
 ### 7. Persistent Runtime State (`DATA_DIR`)
-- `app/config.py` provides `settings.data_path(filename)` to store mutable JSON state files (`schedule.json`, `warmup.json`, `email_cleanup.json`, `email_validation_results.json`, `app_settings.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`, `unsubscribe_examined.json`, `reply_log.json`, `reply_processed.json`, `reply_settings.json`, `bounce_processed.json`, `session_revocations.json`).
+- `app/config.py` provides `settings.data_path(filename)` to store mutable JSON state files (`schedule.json`, `warmup.json`, `email_cleanup.json`, `email_validation_results.json`, `app_settings.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`, `unsubscribe_examined.json`, `reply_log.json`, `reply_processed.json`, `reply_settings.json`, `bounce_processed.json`, `session_revocations.json`, `manual_blocklist.json`).
 - `bounce_processed.json` is a capped list of handled DSN Message-IDs (newest first) that makes bounce ingestion idempotent independently of IMAP `\Seen`. Its cap (50,000) is much larger than the other sets because bounce ingestion re-examines the whole 30-day window on every scan: a smaller cap started evicting ids of DSNs still inside the window and re-created them as duplicate bounce records. `unsubscribe_examined.json` and `unsubscribe_processed.json` use the same 50,000 cap for the same reason (the IMAP scanner re-reads its whole window; the link scanner re-polls ListMonk). `reply_processed.json` is capped at 5000 entries (oldest evicted), which is safe there — the reply scan only re-reads the 200 most recent messages. The reply scan peeks identity headers first and downloads only unprocessed messages (plus processed ones awaiting a body repair).
 - Every JSON state read/write is explicit UTF-8; writes are atomic (tempfile + `fsync` + `os.replace`). `app_settings.load_settings` also guards against a hand-edited file holding a non-object (falls back to defaults instead of 500-ing the onboarding gate).
 - In Docker, `DATA_DIR` defaults to `/data` (backed by a named volume).
@@ -436,7 +444,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | **CSV Converter** | `/api/converter/detect-columns` | POST | Detect CSV headers & preview rows |
 | | `/api/converter/preview` | POST | Convert and return the first rows as JSON (exact ListMonk output preview) |
 | | `/api/converter/convert` | POST | Convert CSV to ListMonk schema (download) |
-| | `/api/converter/convert-and-import` | POST | Convert and import directly into ListMonk (`subscription_status` defaults to `confirmed` so double-opt-in lists are mailable; `overwrite_userinfo` / `overwrite_subscription_status` map onto ListMonk's granular upsert flags; rejects `no_attributes` mappings and empty conversions) |
+| | `/api/converter/convert-and-import` | POST | Convert and import directly into ListMonk (`subscription_status` defaults to `confirmed` so double-opt-in lists are mailable; `overwrite_userinfo` / `overwrite_subscription_status` map onto ListMonk's granular upsert flags and default to true / **false** (overwriting statuses re-subscribes opted-out contacts, so it must be asked for); rejects `no_attributes` mappings and empty conversions) |
 | **Scheduler** | `/api/scheduler` | GET / PUT | Get / update send window settings |
 | | `/api/scheduler/run` | POST | Manually trigger scheduler tick |
 | **Warm-up** | `/api/warmup` | GET / PUT | Ramp settings + today's quota, usage, forecast and recent days / change settings (strictly typed, unknown keys → 400, `target_volume < start_volume` → 400). `level` jumps the ramp to a given day. Ticks the scheduler right away |
@@ -503,6 +511,12 @@ every switch renders the campaign preview and rolls back on a compile error (`42
 The audit has 12 checks: the ten above plus `unsubscribe_link` (footer link state read from
 the campaign templates; `info` when templates are unreadable or none has a link) and
 `public_subscription_page`.
+
+**Mode-aware:** once a mode has been chosen (`app_settings.mode_selected`), Newsletter mode
+reports the cold-outreach-only checks (`COLD_ONLY_CHECKS`: tracking, individual tracking,
+batch size, concurrency) as `info`, so the app's own newsletter preset does not fail the
+app's own audit. The newsletter preset no longer switches the public archive / subscription
+page on.
 
 **Scoring rule:** only `pass`/`warn`/`fail` checks count toward the score; `info` checks
 (e.g. sending cadence, public archive) are reported for context and never drag the score
@@ -595,7 +609,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ### Coding Rules for Agents
 1. **Never make up file paths** — verify existing files before editing.
 2. **Never break existing comments and docstrings** — preserve documentation integrity.
-3. **Escaping ListMonk SQL queries** — use `safe_email_for_query` from `imap_helpers.py` when passing user input to ListMonk queries. ListMonk's subscriber `query` parameter is raw SQL: free-text search boxes must go through a builder like `subscribers._search_to_query` (strips LIKE wildcards/backslashes, doubles quotes, wraps in ILIKE), never through `query` verbatim. Any path segment interpolated into an upstream ListMonk URL (e.g. `analytics_type`) must be whitelisted first.
+3. **Escaping ListMonk SQL queries** (only `/api/subscribers` takes SQL: the `query` of `/api/lists` and `/api/campaigns` is a **plain-text** search, and a SQL fragment there makes ListMonk answer 500, so those go through `search_query.plain_search_term`) — use `safe_email_for_query` from `imap_helpers.py` when passing user input to ListMonk queries. ListMonk's subscriber `query` parameter is raw SQL: free-text search boxes must go through a builder like `subscribers._search_to_query` (strips LIKE wildcards/backslashes, doubles quotes, wraps in ILIKE), never through `query` verbatim. Any path segment interpolated into an upstream ListMonk URL (e.g. `analytics_type`) must be whitelisted first.
 4. **Memory efficiency** — for CSV exports, prefer `aiter_dicts_to_csv` from `export_service.py` fed by `listmonk.iter_pages(...)` so rows stream one page at a time. `dict_list_to_csv` still buffers its input list, so only use it when the dataset is already materialised (e.g. after in-process filtering). Both writers neutralize spreadsheet formula injection (`=`, `+`, `-`, `@`, tab, CR leading characters get a `'` prefix) — client-side "Export Selected" builders must use `App.csvCell()` for the same reason.
 5. **Bound pagination inputs** — every endpoint taking `page`/`per_page` must declare `Query(..., ge=1, le=MAX)`. Bounce listing is the expensive one: serving page N scans every preceding record, so an unbounded `per_page` multiplies into tens of thousands of ListMonk queries.
 6. **Never chain `.get(k, {}).get(...)`** on ListMonk response fields that can be explicitly null (notably `bounce["campaign"]`). Use the helpers in `bounce_filters.py` (`bounce_campaign_id` / `bounce_campaign_name`).
@@ -604,6 +618,6 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 9. **Persistent Storage** — respect `DATA_DIR` for mounted volumes and file storage (`session_secret.key`, `reply_log.json`, etc.).
 10. **Frontend error contract** — `API.request` toasts server errors once and marks the rejection `err.handled = true`. Callers must not toast again; wrap mutating handlers in `try/catch` or the promise rejection is unhandled.
 11. **Module-level caches** — any service cache in a module global needs an invalidation hook and must be reset by `tests/conftest.py`, or tests leak state into each other.
-12. **ListMonk settings are all-or-nothing** — `PUT /api/settings` validates the whole payload (a partial body fails with *"At least one SMTP block should be enabled"*), and the GET response returns every secret masked with `•`. Never PUT a partial dict and never echo a mask back: use `listmonk.apply_settings(patch)`, which merges onto the current settings and blanks masked secrets so ListMonk keeps the stored value (matched by SMTP/bounce UUID).
+12. **ListMonk settings are all-or-nothing** (masked secrets are blanked at every nesting depth, e.g. `security.captcha.hcaptcha.secret`) — `PUT /api/settings` validates the whole payload (a partial body fails with *"At least one SMTP block should be enabled"*), and the GET response returns every secret masked with `•`. Never PUT a partial dict and never echo a mask back: use `listmonk.apply_settings(patch)`, which merges onto the current settings and blanks masked secrets so ListMonk keeps the stored value (matched by SMTP/bounce UUID).
 13. **Never treat IMAP `\Seen` as "already processed"** — the scanners work on mailboxes a human reads. Bounce ingestion persists handled DSN Message-IDs to `bounce_processed.json`; the unsubscribe and reply scanners do the same. New scanners must follow that pattern (or keep an equivalent state file).
 14. **Bulk actions only touch the submitted IDs** — never widen a selection into a filter-wide sweep. Validate IDs with `bulk_ops.parse_ids`, run per-item calls through `bulk_ops.run_bulk`, report partial failures (`errors`/`failed`) in the response, and register static bulk routes (`/archive`) before parameterized ones (`/{id}`).

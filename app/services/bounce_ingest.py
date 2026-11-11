@@ -166,14 +166,18 @@ HARD_KEYWORD_PATTERNS = [
     r"no such (?:recipient|mailbox|address)",
 ]
 
+# A status code must start at a boundary: without the lookbehind the octets of
+# an IP address the DSN mentions ("[185.1.1.20]" contains "5.1.1", "95.2.1.7"
+# contains "5.2.1") turned a greylisting or mailbox-full notice into a HARD
+# bounce, and ListMonk's hard-bounce action then blocklisted a live address.
 HARD_PATTERN = re.compile(
-    "|".join(HARD_CODE_PATTERNS + HARD_KEYWORD_PATTERNS),
+    "|".join([rf"(?<![\d.]){p}" for p in HARD_CODE_PATTERNS] + HARD_KEYWORD_PATTERNS),
     re.IGNORECASE,
 )
 
 # Best-effort extraction of the enhanced status code so we can surface it in
 # bounce metadata for debugging.
-ENHANCED_CODE_RE = re.compile(r"\b([245])\.\d{1,3}\.\d{1,3}\b")
+ENHANCED_CODE_RE = re.compile(r"(?<![\d.])([245])\.\d{1,3}\.\d{1,3}\b(?!\.\d)")
 
 
 def classify_bounce(body: str, subject: str = "") -> dict:
@@ -232,6 +236,58 @@ def classify_bounce(body: str, subject: str = "") -> dict:
         "reason": reason_tag,
         "smtp_code": smtp_code,
     }
+
+
+# ─── Is this message a DSN at all? ───────────────────────────────────────────
+#
+# The bounce mailbox is the envelope sender of every campaign, so it also
+# receives what RFC 3834 responders send there: out-of-office notices, ticket
+# acknowledgements, the odd human reply. Running those through the DSN parser
+# recorded a bounce against whichever address happened to sit in angle
+# brackets in the body ("contact my colleague <bob@corp.com>"). Only a message
+# with positive delivery-failure evidence is treated as a bounce.
+_DSN_SENDER_RE = re.compile(r"^(mailer-daemon|postmaster|mdaemon|bounces?)\b", re.IGNORECASE)
+_DSN_FIELD_RE = re.compile(
+    r"^\s*(final-recipient|original-recipient|diagnostic-code|reporting-mta)\s*:"
+    r"|^\s*action\s*:\s*(failed|delayed|delivered|relayed|expanded)\b"
+    r"|^\s*status\s*:\s*[245]\.\d{1,3}\.\d{1,3}\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+_DSN_TEXT_RE = re.compile(
+    r"mail\s+delivery\s+(failed|subsystem|system)|returning\s+message\s+to\s+sender"
+    r"|delivery\s+status\s+notification|delivery\s+(has\s+)?failed|failed\s+delivery"
+    r"|undeliverable|undelivered\s+mail|could\s*(?:not|n't)\s+be\s+delivered"
+    r"|address\(es\)\s+failed|failure\s+notice|returned\s+mail|delivery\s+failure"
+    r"|non[-\s]?delivery|permanent\s+error|unzustellbar|non\s+remis|no\s+entregado",
+    re.IGNORECASE,
+)
+
+
+def looks_like_dsn(msg: email.message.Message, subject: str, body: str) -> bool:
+    """True when a message carries evidence of being a delivery-status notice.
+
+    Any one of: a ``multipart/report`` / ``message/delivery-status`` structure,
+    an ``X-Failed-Recipients`` header, a mailer-daemon style sender, RFC 3464
+    fields in the body, or the failure wording the common MTAs use. An
+    auto-reply or a person writing to the bounce address has none of these.
+    """
+    try:
+        if msg.get_content_type() == "multipart/report":
+            return True
+        if msg.is_multipart() and any(
+            part.get_content_type() == "message/delivery-status" for part in msg.walk()
+        ):
+            return True
+    except Exception:
+        pass
+    if msg.get("X-Failed-Recipients"):
+        return True
+    _, sender = email.utils.parseaddr(str(msg.get("From") or ""))
+    if _DSN_SENDER_RE.match(sender.split("@", 1)[0]):
+        return True
+    if _DSN_FIELD_RE.search(body or ""):
+        return True
+    return bool(_DSN_TEXT_RE.search(f"{subject or ''}\n{body or ''}"))
 
 
 # ─── Parsing helpers ─────────────────────────────────────────────────────────
@@ -576,10 +632,16 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
                     body = _extract_body(msg)
                     scanned += 1
 
-                    outcome, detail = await ingest_parsed_dsn(
-                        client, msg, subject, body, recent_campaigns, campaigns_ok,
-                        ingested_by="bounce_ingest",
-                    )
+                    if not looks_like_dsn(msg, subject, body):
+                        # An out-of-office notice, a ticket acknowledgement or
+                        # a person writing to the bounce address: not a
+                        # delivery failure, so never a bounce record.
+                        outcome, detail = "skipped", "not_a_dsn"
+                    else:
+                        outcome, detail = await ingest_parsed_dsn(
+                            client, msg, subject, body, recent_campaigns, campaigns_ok,
+                            ingested_by="bounce_ingest",
+                        )
 
                     if outcome == "ingested":
                         ingested += 1

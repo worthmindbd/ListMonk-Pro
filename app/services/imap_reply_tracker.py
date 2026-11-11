@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from app.config import settings
+from app.services import blocklist_registry
 from app.services.listmonk_client import ListMonkClient
 from app.services.imap_helpers import (
     safe_email_for_query, extract_email_body, imap_date, fetch_state_id,
@@ -69,6 +70,11 @@ _reply_scan_running = False
 # automated senders and _MACHINE_AUTO_PATTERNS never do. Before that split, a
 # hot lead who mentioned being away was tagged auto_reply, lost its campaign
 # attribution, and — with the OOO auto-blocklist toggle on — was blocklisted.
+_AWAY_TAIL = (
+    r"(?=\s*(?:[.,;:!)]|$|until|till|through|thru|from|and|with|this|next|for|in|"
+    r"starting|returning|back|between|w/|as\s+of|\d))"
+)
+
 _OOO_PATTERNS = [
     # ── English OOO / away ──────────────────────────────────────────────
     re.compile(r"out\s+of\s+(the\s+)?office", re.IGNORECASE),
@@ -76,9 +82,15 @@ _OOO_PATTERNS = [
     # responders add — a human is away, not a machine mailbox.
     re.compile(r"auto(matic)?\s*(-|\s)?\s*reply", re.IGNORECASE),
     re.compile(r"away\s+from\s+(my\s+)?desk", re.IGNORECASE),
-    re.compile(r"on\s+(annual\s+|parental\s+|maternity\s+|paternity\s+|sick\s+|medical\s+|"
-               r"study\s+|holiday\s+)?leave", re.IGNORECASE),
-    re.compile(r"on\s+(vacation|holiday|holidays|sabbatical)", re.IGNORECASE),
+    # Word-bounded and followed by what an away notice says next ("until",
+    # "from", a date, the end of the sentence). Unanchored, "on holiday"
+    # matched a prospect's "we focus on holiday rentals" and "on leave"
+    # matched "decision leaves": a real reply was tagged automated, lost its
+    # campaign, and with the OOO auto-blocklist on the sender was blocklisted.
+    re.compile(r"\bon\s+(annual\s+|parental\s+|maternity\s+|paternity\s+|sick\s+|medical\s+|"
+               r"study\s+|holiday\s+)?leave\b" + _AWAY_TAIL, re.IGNORECASE | re.MULTILINE),
+    re.compile(r"\bon\s+(vacation|holiday|holidays|sabbatical)\b" + _AWAY_TAIL,
+               re.IGNORECASE | re.MULTILINE),
     re.compile(r"mailbox\s+is\s+full", re.IGNORECASE),
     re.compile(r"(travel+ing|on\s+the\s+road)\s+with\s+limited\s+(access|connectivity)", re.IGNORECASE),
     re.compile(r"limited\s+(access\s+to|connectivity\s+to)\s+(my\s+)?(e-?mail|inbox)", re.IGNORECASE),
@@ -575,10 +587,25 @@ def classify_sentiment(
     return "neutral"
 
 
+_REPLY_PREFIX_RE = re.compile(r"^\s*(?:re|fwd|fw|aw|sv|vs|wg|rv|res|enc)\s*:\s*", re.IGNORECASE)
+
+# A campaign subject shorter than this only matches a reply subject exactly.
+# As a bare substring, a campaign titled "Hi" matched "Your shipping update
+# for this week" and pulled a stranger's mail into the feed as a campaign
+# reply (counted in the reply rate, possibly auto-flagged as a lead).
+SUBJECT_SUBSTRING_MIN = 12
+
+
 def _clean_subject_for_matching(subj: str) -> str:
-    """Strip 'Re:', 'Fwd:', and whitespace for campaign subject matching."""
-    cleaned = re.sub(r"^(re|fwd|fw):\s*", "", subj, flags=re.IGNORECASE).strip()
-    return cleaned.lower()
+    """Strip reply/forward prefixes ('Re:', 'Fwd:', 'AW:' …, repeated) and
+    whitespace for campaign subject matching."""
+    cleaned = subj or ""
+    while True:
+        stripped = _REPLY_PREFIX_RE.sub("", cleaned, count=1)
+        if stripped == cleaned:
+            break
+        cleaned = stripped
+    return cleaned.strip().lower()
 
 
 def _campaign_created_at(camp: dict) -> Optional[datetime]:
@@ -629,17 +656,43 @@ async def _fetch_campaigns_covering(
         page += 1
 
 
-def _subject_matches(clean_subj: str, campaign: dict) -> bool:
-    """True when a campaign's subject/name matches the cleaned reply subject."""
+def _subject_match_score(clean_subj: str, campaign: dict) -> int:
+    """How well a campaign's subject/name matches the cleaned reply subject.
+
+    0 = no match. An exact subject match outranks everything; otherwise the
+    longer the campaign subject contained in the reply subject, the better,
+    so "Re: Quick question about invoices" goes to the campaign with that
+    subject rather than to a newer one titled just "Quick question".
+    """
     if not clean_subj:
-        return False
+        return 0
     c_subj = (campaign.get("subject") or "").strip().lower()
     c_name = (campaign.get("name") or "").strip().lower()
-    if c_subj and (clean_subj == c_subj or c_subj in clean_subj):
-        return True
+    if c_subj:
+        if clean_subj == c_subj:
+            return 1_000_000
+        if len(c_subj) >= SUBJECT_SUBSTRING_MIN and c_subj in clean_subj:
+            return 1000 + len(c_subj)
     # Campaign names often mirror the subject; require a meaningful overlap so
     # a short reply subject cannot match an unrelated campaign by substring.
-    return bool(c_name) and len(clean_subj) >= 8 and clean_subj in c_name
+    if c_name and len(clean_subj) >= 8 and clean_subj in c_name:
+        return 1
+    return 0
+
+
+def _subject_matches(clean_subj: str, campaign: dict) -> bool:
+    """True when a campaign's subject/name matches the cleaned reply subject."""
+    return _subject_match_score(clean_subj, campaign) > 0
+
+
+def _best_subject_match(clean_subj: str, campaigns: list[dict]) -> Optional[dict]:
+    """The campaign whose subject matches best (newest wins a tie)."""
+    best, best_score = None, 0
+    for c in campaigns:
+        score = _subject_match_score(clean_subj, c)
+        if score > best_score:
+            best, best_score = c, score
+    return best
 
 
 async def match_campaign_for_reply(
@@ -682,9 +735,9 @@ async def match_campaign_for_reply(
     if not campaigns:
         return None, None
 
-    for c in campaigns:
-        if _subject_matches(clean_subj, c):
-            return c.get("id"), c.get("name")
+    by_subject = _best_subject_match(clean_subj, campaigns)
+    if by_subject is not None:
+        return by_subject.get("id"), by_subject.get("name")
 
     # Fall back to list-aware matching against the sender's lists.
     if subscriber is None:
@@ -1185,10 +1238,11 @@ async def prune_non_campaign_replies() -> int:
     rule to what is already on disk. Replies without a campaign are never
     shown or counted, so they are deleted.
 
-    Also removed: records from a mailbox other than the connected one --
-    including the unstamped records written before the mailbox field existed.
-    reply_log.json is the connected inbox's feed; a .env switch to another
-    domain starts a clean slate.
+    Also removed: the unstamped records written before the mailbox field
+    existed. Records stamped with a *different* mailbox are kept untouched
+    (the feed and the stats hide them): a .env switch to another domain starts
+    a clean feed without destroying the previous inbox's triage work, and
+    switching back brings it back.
 
     Kept, always: a reply from the connected mailbox that has a campaign, is
     an automated reply (never campaign-attributed by design, shown in the
@@ -1202,7 +1256,15 @@ async def prune_non_campaign_replies() -> int:
         kept: list[dict] = []
         removed = 0
         for r in records:
-            if (r.get("mailbox") == settings.imap_user
+            mailbox = r.get("mailbox")
+            if mailbox and mailbox != settings.imap_user:
+                # Another inbox's feed (a previous .env): hidden by the read
+                # filter, but never deleted. Deleting it made an IMAP_USER
+                # change (or a brief test against another mailbox) destroy
+                # every triaged lead for good, with the Message-IDs still in
+                # the processed set so nothing could be re-ingested.
+                kept.append(r)
+            elif (mailbox == settings.imap_user
                     and (r.get("campaign_id")
                          or r.get("sentiment") == "auto_reply"
                          or r.get("status_source") == "manual"
@@ -1313,6 +1375,8 @@ async def blocklist_reply_sender(listmonk: ListMonkClient, email: str) -> dict:
     except Exception as e:
         logger.error(f"Blocklist failed for {email}: {e}")
         return {"error": f"Blocklist failed: {e}", "email": email}
+    # Deliberate (manual action or an opt-in toggle): auto-unblock keeps out.
+    blocklist_registry.mark([subscriber_id])
 
     return {"status": "ok", "subscriber_id": subscriber_id, "email": email}
 

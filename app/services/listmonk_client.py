@@ -26,19 +26,17 @@ def sanitize_settings_for_update(raw: dict) -> dict:
     leaving every other value — including the SMTP/bounce/messenger UUIDs used
     to match blocks — untouched.
     """
-    clean: dict = {}
-    for key, value in (raw or {}).items():
+    # Recursive: secrets also sit two levels down (``security.captcha`` →
+    # ``hcaptcha`` → ``secret``), and a one-level pass echoed that mask back,
+    # replacing the real secret with bullets on any settings change.
+    def clean(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: clean(v) for k, v in value.items()}
         if isinstance(value, list):
-            clean[key] = [
-                {k: _blank_if_masked(v) for k, v in item.items()}
-                if isinstance(item, dict) else item
-                for item in value
-            ]
-        elif isinstance(value, dict):
-            clean[key] = {k: _blank_if_masked(v) for k, v in value.items()}
-        else:
-            clean[key] = _blank_if_masked(value)
-    return clean
+            return [clean(v) for v in value]
+        return _blank_if_masked(value)
+
+    return {key: clean(value) for key, value in (raw or {}).items()}
 
 
 class ListMonkClient:

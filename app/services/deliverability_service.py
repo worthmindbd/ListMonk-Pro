@@ -7,6 +7,7 @@ between Newsletter Mode and Cold Email Mode.
 
 import logging
 import re
+from app.services import app_settings
 from app.services.listmonk_client import ListMonkClient
 from app.services.template_unsubscribe import get_unsubscribe_link_status
 
@@ -37,6 +38,10 @@ CHECK_GROUPS = [
         "blurb": "What your instance publishes beyond the inbox.",
     },
 ]
+
+
+# Checks that only apply to cold outreach (see get_deliverability_checklist).
+COLD_ONLY_CHECKS = {"disable_tracking", "individual_tracking", "batch_size", "concurrency"}
 
 
 def _duration_seconds(value) -> float:
@@ -307,6 +312,19 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
         "impact": "Medium",
     })
 
+    # The tracking and drip-pacing rules are cold-outreach standards. In
+    # Newsletter mode open/click tracking and a faster engine are the point
+    # (and exactly what this app's own "newsletter" preset sets), so there
+    # they are reported for context instead of failing the audit.
+    # An installation that never chose a mode keeps the full (strict) audit.
+    app_state = app_settings.load_settings()
+    mode = app_state.get("mode") if app_state.get("mode_selected") else None
+    if mode == "newsletter":
+        for check in checks:
+            if check["id"] in COLD_ONLY_CHECKS:
+                check["status"] = "info"
+                check["impact"] = "Cold email only"
+
     # Calculate score. Informational checks are excluded so they cannot drag the
     # score down; they exist to surface context (e.g. a deliberate slow drip).
     scored = [c for c in checks if c["status"] != "info"]
@@ -319,6 +337,7 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
     return {
         "score": score,
         "overall_status": overall_status,
+        "mode": mode,
         "checks": checks,
         "groups": CHECK_GROUPS,
         "raw_settings": {
@@ -371,8 +390,9 @@ async def apply_deliverability_preset(listmonk: ListMonkClient, mode: str) -> di
             "privacy.unsubscribe_header": True,
             "app.batch_size": 1000,
             "app.concurrency": 2,
-            "app.enable_public_archive": True,
-            "app.enable_public_subscription_page": True,
+            # The public archive and sign-up page are left as they are: a
+            # one-click sending preset must not publish pages (the audit
+            # itself warns that an open sign-up form invites list bombing).
         }
     else:
         raise ValueError(f"Unknown preset mode: {mode}")

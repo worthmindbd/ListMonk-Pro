@@ -95,7 +95,7 @@ VALID_IMPORT_MODES = ("subscribe", "blocklist")
 def _parse_import_options(
     mode: str,
     subscription_status: Optional[str],
-    overwrite: bool,
+    overwrite: Optional[bool],
     overwrite_userinfo: Optional[bool],
     overwrite_subscription_status: Optional[bool],
 ) -> dict:
@@ -125,8 +125,14 @@ def _parse_import_options(
     if not status:
         status = "confirmed" if mode == "subscribe" else None
 
-    ow_user = overwrite if overwrite_userinfo is None else overwrite_userinfo
-    ow_status = overwrite if overwrite_subscription_status is None else overwrite_subscription_status
+    # Defaults when the caller says nothing: refresh names/attributes, but
+    # never touch subscription statuses. Overwriting statuses re-subscribes
+    # everyone who opted out of the target lists, so it has to be asked for
+    # (the UI always sends both switches explicitly).
+    ow_user = overwrite_userinfo if overwrite_userinfo is not None else (
+        True if overwrite is None else overwrite)
+    ow_status = overwrite_subscription_status if overwrite_subscription_status is not None else (
+        False if overwrite is None else overwrite)
 
     params = {
         "mode": mode,
@@ -242,7 +248,7 @@ async def convert_and_import(
     list_ids: str = Form(...),
     mode: str = Form("subscribe"),
     subscription_status: Optional[str] = Form(None),
-    overwrite: bool = Form(True),
+    overwrite: Optional[bool] = Form(None),
     overwrite_userinfo: Optional[bool] = Form(None),
     overwrite_subscription_status: Optional[bool] = Form(None),
 ):

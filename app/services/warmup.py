@@ -195,6 +195,7 @@ def load_state() -> dict:
 
 def save_state(state: dict) -> None:
     """Write warmup.json atomically (tempfile + fsync + replace)."""
+    temp_path = None
     try:
         WARMUP_FILE.parent.mkdir(parents=True, exist_ok=True)
         fd, temp_path = tempfile.mkstemp(
@@ -205,9 +206,18 @@ def save_state(state: dict) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(temp_path, WARMUP_FILE)
+        temp_path = None
     except OSError as e:
         logger.error(f"Failed to save warm-up state to {WARMUP_FILE}: {e}")
         raise
+    finally:
+        # A failed write must not leave its temp file behind: this runs on
+        # every poll, so a full disk used to gain one stray file per second.
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
 
 # ── Ramp maths ──────────────────────────────────────────────────────────────
@@ -545,6 +555,7 @@ async def observe(client, now: Optional[datetime] = None) -> dict:
         state = load_state()
         if not state["enabled"]:
             return {"enabled": False, "rolled": False, "running": [], "remaining": 0}
+        before = json.dumps(state, sort_keys=True)
         rolled = _roll_day(state, now)
         counted = 0
         if not state["baselined"]:
@@ -559,7 +570,10 @@ async def observe(client, now: Optional[datetime] = None) -> dict:
             state["sent_today"] += counted
         state["running"] = running_ids
         state["unsettled"] = retry
-        save_state(state)
+        # Most polls change nothing (nothing running, nothing sent): skip the
+        # rewrite + fsync instead of doing one every 1-3 seconds all day.
+        if json.dumps(state, sort_keys=True) != before:
+            save_state(state)
         current = view(state, now)
 
     return {

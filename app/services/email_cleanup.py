@@ -46,6 +46,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from app.config import settings
+from app.services import blocklist_registry
 from app.services import email_validation as ev
 from app.services.bounce_filters import filter_bounces_excluding_openers
 from app.services.task_utils import spawn
@@ -419,6 +420,9 @@ async def _blocklist_chunks(client, ids: list[int]) -> tuple[list[int], list[dic
         try:
             await client.blocklist_subscribers(chunk)
             done.extend(chunk)
+            # Deliberate (a results action or the cleanup): auto-unblock must
+            # not re-enable these six hours later.
+            blocklist_registry.mark(chunk)
         except Exception as e:
             logger.error(f"Blocklisting {len(chunk)} subscribers failed: {e}")
             failed.extend({"id": sid, "error": str(e) or type(e).__name__} for sid in chunk)
@@ -527,6 +531,27 @@ def _is_candidate(item: dict, cfg: dict) -> bool:
     return bool(cfg["clean_hard_bounces"] and ev.REASON_HARD_BOUNCE in reasons)
 
 
+# Findings that rest on one DNS answer at one moment.
+DNS_INVALID_REASONS = frozenset({ev.REASON_NO_DOMAIN, ev.REASON_NO_MX, ev.REASON_NULL_MX})
+
+
+def _is_confirmed(item: dict, cfg: dict, dns_dead_before: set[int]) -> bool:
+    """May a candidate be blocklisted in THIS run?
+
+    A malformed address and a hard bounce are facts. "The domain does not
+    exist / has no mail server" is one DNS answer: a domain in a registrar
+    hold or with a botched zone for a day answers the same, and a blocklisting
+    is permanent. So a DNS-only finding has to be seen by two scans (it is
+    already in the stored results as DNS-dead) before the cleanup acts on it.
+    """
+    reasons = set(item["reasons"])
+    if cfg["clean_invalid"] and ev.REASON_SYNTAX in reasons:
+        return True
+    if cfg["clean_hard_bounces"] and ev.REASON_HARD_BOUNCE in reasons:
+        return True
+    return item["subscriber_id"] in dns_dead_before
+
+
 def _summary(kind: str, status: str, message: str, started: datetime,
              list_id: Optional[int]) -> dict:
     finished = _now()
@@ -537,6 +562,7 @@ def _summary(kind: str, status: str, message: str, started: datetime,
         "checked": _job["checked"], "valid": _job["valid"],
         "invalid": _job["invalid"], "risky": _job["risky"], "unknown": _job["unknown"],
         "candidates": 0, "blocklisted": 0, "failed_blocklist": 0,
+        "pending_confirmation": 0,
     }
 
 
@@ -576,7 +602,13 @@ async def _run(client, kind: str, list_id: Optional[int], started: datetime,
 
     _job["phase"] = "checking"
     async with _RESULTS_LOCK:
-        known_ids = {it["subscriber_id"] for it in load_results().values()}
+        stored_before = load_results()
+    known_ids = {it["subscriber_id"] for it in stored_before.values()}
+    # Subscribers an EARLIER scan already found DNS-dead (see _is_confirmed).
+    dns_dead_before = {
+        it["subscriber_id"] for it in stored_before.values()
+        if it.get("verdict") == "invalid" and set(it.get("reasons") or []) & DNS_INVALID_REASONS
+    }
     rechecked: set[int] = set()
     flagged: dict[str, dict] = {}
     completed = False
@@ -652,19 +684,29 @@ async def _run(client, kind: str, list_id: Optional[int], started: datetime,
         return summary
 
     # ── cleanup: decide, hold or blocklist ──
-    candidates = [it for it in flagged.values() if _is_candidate(it, cfg)]
+    eligible = [it for it in flagged.values() if _is_candidate(it, cfg)]
+    candidates = [it for it in eligible if _is_confirmed(it, cfg, dns_dead_before)]
+    pending = len(eligible) - len(candidates)
     summary["candidates"] = len(candidates)
-    if not candidates:
-        summary["message"] = "Nothing to clean."
-        return summary
+    summary["pending_confirmation"] = pending
+    wait_note = (
+        f" {pending} address(es) with a dead domain were seen for the first time; "
+        "they are blocklisted if the next scan still finds them dead." if pending else "")
+    # Judged on everything that looks dead, confirmed or not: a resolver or
+    # data problem must raise the alarm on the first run, not the second.
     if (summary["checked"] >= HOLD_MIN_SAMPLE
-            and len(candidates) / summary["checked"] > HOLD_FRACTION):
+            and len(eligible) / summary["checked"] > HOLD_FRACTION):
         summary["status"] = "held"
+        summary["candidates"] = len(eligible)
         summary["message"] = (
-            f"{len(candidates)} of {summary['checked']} subscribers "
-            f"({len(candidates) * 100 // summary['checked']}%) look dead, which is more than "
+            f"{len(eligible)} of {summary['checked']} subscribers "
+            f"({len(eligible) * 100 // summary['checked']}%) look dead, which is more than "
             f"{int(HOLD_FRACTION * 100)}%. Nothing was blocklisted: review them on the "
             "Email Validation page.")
+        return summary
+
+    if not candidates:
+        summary["message"] = "Nothing to clean." + wait_note
         return summary
 
     _job["phase"] = "blocklisting"
@@ -682,7 +724,7 @@ async def _run(client, kind: str, list_id: Optional[int], started: datetime,
         summary["message"] = (f"Blocklisted {len(done)}; {len(failed)} could not be "
                               f"blocklisted ({failed[0]['error']}).")
     else:
-        summary["message"] = f"Blocklisted {len(done)} dead addresses."
+        summary["message"] = f"Blocklisted {len(done)} dead addresses." + wait_note
     return summary
 
 

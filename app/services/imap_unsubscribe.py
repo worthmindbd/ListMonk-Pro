@@ -83,7 +83,11 @@ _OPT_OUT_PATTERNS = [
 
 KEYWORD_PATTERN = re.compile(
     "|".join(
-        [re.escape(kw) for kw in UNSUBSCRIBE_KEYWORDS]
+        # Word-bounded: as bare substrings "remove me" matched "remove
+        # mention", "exclude me" matched "exclude media" and "remove us"
+        # matched "remove users" -- each one unsubscribing (and possibly
+        # blocklisting) a prospect who never asked for it.
+        [rf"\b{re.escape(kw)}\b" for kw in UNSUBSCRIBE_KEYWORDS]
         + [f"(?:{p})" for p in _OPT_OUT_PATTERNS]
         + [f"(?:{p.pattern})" for p in _i18n.OPT_OUT_PATTERNS]
     ),
@@ -396,6 +400,21 @@ _scan_lock = asyncio.Lock()
 _scan_running = False
 
 
+def _has_active_subscription(subscriber: dict) -> bool:
+    """True when the subscriber can still receive campaign mail.
+
+    Enabled, and on at least one list whose subscription is not
+    ``unsubscribed``. A list entry without a ``subscription_status`` (older
+    ListMonk payloads) counts as active: when unsure, honour the request.
+    """
+    if subscriber.get("status") == "blocklisted":
+        return False
+    return any(
+        (lst.get("subscription_status") or "") != "unsubscribed"
+        for lst in subscriber.get("lists") or [] if isinstance(lst, dict)
+    )
+
+
 def _prune_existing_records(records: list[dict], valid_cids: set) -> list[dict]:
     """Drop records attributed to campaigns that no longer exist in ListMonk.
 
@@ -574,7 +593,13 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
         matched = 0
         errors = 0
         scanned = 0
+        # Opt-out requests from addresses that are not ListMonk subscribers
+        # (an alias, a colleague answering): nothing can be unenrolled, so
+        # they are reported instead of vanishing into an info log line.
+        unmatched = 0
         new_records = []
+        # Senders handled earlier in this same scan (two requests in one run).
+        handled_this_scan: set[str] = set()
         # Idempotency keys of messages that reached a final outcome (handled,
         # or not an actionable unsubscribe request) — see EXAMINED_FILE.
         examined_now: list[str] = []
@@ -805,8 +830,7 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                         examined_now.append(state_id)
                         continue
 
-                    # Skip if this sender was already processed
-                    if sender_email in processed_emails_set:
+                    if sender_email in handled_this_scan:
                         examined_now.append(state_id)
                         continue
 
@@ -843,13 +867,29 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                         subscribers = (result.get("data") or {}).get("results") or []
 
                         if not subscribers:
-                            logger.info(f"Sender {sender_email} not found in ListMonk, skipping")
+                            unmatched += 1
+                            logger.warning(
+                                f"[IMAP] Opt-out request from {sender_email} "
+                                f"('{subject}') but that address is not a ListMonk "
+                                "subscriber: nothing was unsubscribed. If they were "
+                                "mailed at another address, remove that one by hand."
+                            )
                             examined_now.append(state_id)
                             continue
 
                         subscriber = subscribers[0]
                         sub_id = subscriber["id"]
                         sub_lists = [lst["id"] for lst in subscriber.get("lists", [])]
+
+                        # A sender the engine already handled is skipped only
+                        # while that still holds (no active subscription left).
+                        # Skipping on the processed set alone ignored a NEW
+                        # request from someone who had been re-subscribed since
+                        # (a list re-import, a manual re-add): the message was
+                        # marked examined and the opt-out silently lost.
+                        if sender_email in processed_emails_set and not _has_active_subscription(subscriber):
+                            examined_now.append(state_id)
+                            continue
 
                         # Only process if subscriber belongs to a campaign's
                         # target list — otherwise skip entirely.
@@ -894,7 +934,8 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
 
                         # Conditionally blocklist based on user setting
                         scan_settings = load_settings()
-                        if scan_settings.get("blocklist_enabled", False):
+                        blocklisted_now = bool(scan_settings.get("blocklist_enabled", False))
+                        if blocklisted_now:
                             await client.blocklist_subscriber(sub_id)
                             logger.info(f"[IMAP] Blocklisted: {sender_email}")
 
@@ -911,12 +952,15 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                             "matched_list_id": campaign.get("matched_list_id"),
                             "subscriber_id": sub_id,
                             "lists_removed": sub_lists,
+                            # Whether THIS engine blocklisted the subscriber:
+                            # "Undo All" only lifts a blocklisting it caused.
+                            "blocklisted": blocklisted_now,
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                         }
                         new_records.append(record)
                         examined_now.append(state_id)
                         seen_after_persist.append(msg_id)
-                        processed_emails_set.add(sender_email)  # Prevent duplicates in same scan
+                        handled_this_scan.add(sender_email)  # Prevent duplicates in same scan
                         processed += 1
                         action = "Unsubscribed + Blocklisted" if scan_settings.get("blocklist_enabled") else "Unsubscribed"
                         logger.info(f"{action}: {sender_email} (campaign: {campaign['campaign_name']})")
@@ -964,7 +1008,10 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
             "matched": matched,
             "processed": processed,
             "errors": errors,
-            "message": f"Scan complete: {processed} unsubscribed",
+            "unmatched": unmatched,
+            "message": f"Scan complete: {processed} unsubscribed" + (
+                f"; {unmatched} opt-out request(s) came from addresses that are "
+                "not subscribers (see the log)" if unmatched else ""),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 

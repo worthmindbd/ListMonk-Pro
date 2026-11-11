@@ -264,6 +264,14 @@ async def _scan_link_unsubscribes_impl(client: ListMonkClient) -> dict:
                 sid = sub.get("id")
                 if sid is None:
                     continue
+                # ListMonk marks every subscription of a blocklisted subscriber
+                # "unsubscribed", so a bounce / manual / cleanup blocklisting
+                # looked exactly like a link unsubscribe: it was logged as one
+                # (inflating per-campaign counts) and "Undo All" then
+                # re-enabled it. A blocklisted address gets no mail anyway, so
+                # there is nothing to cascade.
+                if sub.get("status") == "blocklisted":
+                    continue
                 entry = sub_map.setdefault(sid, {"sub": sub, "unsub_list_ids": set()})
                 entry["unsub_list_ids"].add(list_id)
 
@@ -315,9 +323,11 @@ async def _scan_link_unsubscribes_impl(client: ListMonkClient) -> dict:
             errors += 1
             continue  # Do not log — partial failure
 
+        blocklisted_now = False
         if blocklist_enabled:
             try:
                 await client.blocklist_subscriber(sid)
+                blocklisted_now = True
                 logger.info(f"[LINK] Blocklisted: {email}")
             except Exception as e:
                 logger.error(f"Failed to blocklist {email}: {e}")
@@ -338,6 +348,9 @@ async def _scan_link_unsubscribes_impl(client: ListMonkClient) -> dict:
             "campaign_key": campaign.get("campaign_key", _current_campaign_key()),
             "subscriber_id": sid,
             "lists_removed": sub_lists,
+            # Whether THIS engine blocklisted the subscriber: "Undo All" only
+            # lifts a blocklisting it caused.
+            "blocklisted": blocklisted_now,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         new_records.append(record)

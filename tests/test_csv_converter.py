@@ -512,7 +512,7 @@ def _mock_listmonk():
     return lm
 
 
-def test_import_defaults_to_confirmed_and_full_overwrite(client):
+def test_import_defaults_keep_existing_subscription_statuses(client):
     csv_data = b"Email,Company\nalice@example.com,Acme\n"
     lm = _mock_listmonk()
     with patch("app.routers.converter.listmonk", lm):
@@ -526,8 +526,10 @@ def test_import_defaults_to_confirmed_and_full_overwrite(client):
     assert params["lists"] == [1]
     assert params["subscription_status"] == "confirmed"
     assert params["overwrite_userinfo"] is True
-    assert params["overwrite_subscription_status"] is True
-    assert params["overwrite"] is True
+    # Statuses are only overwritten when asked: doing it by default
+    # re-subscribed everyone who had opted out of the target lists.
+    assert params["overwrite_subscription_status"] is False
+    assert params["overwrite"] is False
 
 
 def test_import_forwards_granular_overwrite_and_status(client):
