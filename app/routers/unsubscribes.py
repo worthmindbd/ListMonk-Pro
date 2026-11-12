@@ -118,13 +118,34 @@ async def get_campaign_groups():
     return {"data": sorted_groups}
 
 
+# Records whose campaign could not be attributed carry no ``campaign_id``;
+# the grouped view lists them under this key, and every per-campaign route
+# accepts it so those records can be opened, exported and removed too.
+UNATTRIBUTED = "unknown"
+
+
+def _campaign_ref(raw: str) -> Optional[int]:
+    """Path/query value → campaign id, or None for the unattributed group."""
+    if raw == UNATTRIBUTED:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail=f"Invalid campaign id '{raw}'")
+
+
+def _in_campaign(record: dict, ref: Optional[int]) -> bool:
+    return record.get("campaign_id") == ref
+
+
 @router.get("/campaign/{campaign_id}")
-async def get_campaign_records(campaign_id: int,
+async def get_campaign_records(campaign_id: str,
                                page: int = Query(1, ge=1, le=MAX_PAGE),
                                per_page: int = Query(50, ge=1, le=MAX_PER_PAGE)):
-    """Return paginated records for a specific campaign by its ID."""
+    """Return paginated records for a specific campaign by its ID (or ``unknown``)."""
+    ref = _campaign_ref(campaign_id)
     records = load_log()
-    campaign_records = [r for r in records if r.get("campaign_id") == campaign_id]
+    campaign_records = [r for r in records if _in_campaign(r, ref)]
     campaign_records.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
 
     total = len(campaign_records)
@@ -140,7 +161,7 @@ async def get_campaign_records(campaign_id: int,
             "email_count": email_count,
             "page": page,
             "per_page": per_page,
-            "campaign_id": campaign_id,
+            "campaign_id": ref if ref is not None else UNATTRIBUTED,
             "campaign_name": campaign_records[0].get("campaign_name", "") if campaign_records else "",
         }
     }
@@ -169,15 +190,17 @@ async def delete_campaign_groups(campaign_ids: list[int] = Query(default=[])):
 
 
 @router.delete("/campaign/{campaign_id}")
-async def delete_campaign_group(campaign_id: int):
-    """Delete all unsubscribe records for a specific campaign by its ID."""
+async def delete_campaign_group(campaign_id: str):
+    """Delete all unsubscribe records for a specific campaign by its ID (or ``unknown``)."""
+    ref = _campaign_ref(campaign_id)
     async with _log_lock:
         records = load_log()
         before_count = len(records)
-        remaining = [r for r in records if r.get("campaign_id") != campaign_id]
+        remaining = [r for r in records if not _in_campaign(r, ref)]
         removed = before_count - len(remaining)
         save_log(remaining)
-    return {"removed": removed, "message": f"Removed {removed} record(s) from campaign {campaign_id}"}
+    where = "the unattributed group" if ref is None else f"campaign {ref}"
+    return {"removed": removed, "message": f"Removed {removed} record(s) from {where}"}
 
 
 _MAX_DELETE_EMAILS = 100
@@ -185,7 +208,7 @@ _MAX_DELETE_EMAILS = 100
 
 @router.delete("/records")
 async def delete_records(emails: list[str] = Query(default=[]),
-                         campaign_id: Optional[int] = None):
+                         campaign_id: Optional[str] = None):
     """Delete specific unsubscribe records by email (capped at 100).
 
     ``campaign_id`` scopes the deletion to that campaign's records — the
@@ -202,11 +225,13 @@ async def delete_records(emails: list[str] = Query(default=[]),
     # Records store lowercased addresses; match case-insensitively so a
     # pasted/mixed-case address still finds its record.
     email_set = {e.strip().lower() for e in emails if e and e.strip()}
+    scoped = campaign_id is not None
+    ref = _campaign_ref(campaign_id) if scoped else None
 
     def _matches(record: dict) -> bool:
         if (record.get("email") or "").strip().lower() not in email_set:
             return False
-        return campaign_id is None or record.get("campaign_id") == campaign_id
+        return not scoped or _in_campaign(record, ref)
 
     async with _log_lock:
         records = load_log()
@@ -218,10 +243,11 @@ async def delete_records(emails: list[str] = Query(default=[]),
 
 
 @router.get("/campaign/{campaign_id}/export")
-async def export_campaign_csv(campaign_id: int):
+async def export_campaign_csv(campaign_id: str):
     """Export a single campaign's unsubscribe records as CSV."""
+    ref = _campaign_ref(campaign_id)
     records = load_log()
-    campaign_records = [r for r in records if r.get("campaign_id") == campaign_id]
+    campaign_records = [r for r in records if _in_campaign(r, ref)]
     if not campaign_records:
         raise HTTPException(status_code=404, detail="No records found for this campaign")
 

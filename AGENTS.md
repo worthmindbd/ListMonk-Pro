@@ -23,6 +23,7 @@ ListMonk-Pro/
 │   │   ├── email_validation.py    # Email Validation: quick check, subscriber scan, results list/export/blocklist/dismiss, scheduled-cleanup settings & run-now
 │   │   ├── lists.py               # List CRUD endpoints
 │   │   ├── replies.py             # Prospect reply monitoring, sentiment filters, status updates
+│   │   ├── sends.py               # Daily send statistics ("sent today", sends per day)
 │   │   ├── subscribers.py         # Subscriber/Lead CRUD, memberships, blocklisting, exports
 │   │   ├── templates.py           # Template CRUD & default template selection
 │   │   ├── unsubscribes.py        # Unsubscribe log, campaign groupings, scan trigger, reset/undo
@@ -30,6 +31,7 @@ ListMonk-Pro/
 │   └── services/                  # Core business logic & integrations
 │       ├── __init__.py
 │       ├── app_settings.py        # Installation-wide app settings (chosen mode persisted to DATA_DIR)
+│       ├── auto_unblock_state.py  # Auto-unblock on/off switch, last run and re-enabled history (auto_unblock.json)
 │       ├── auto_unblock.py        # Auto-unblock bounce-blocklisted contacts that engaged AFTER the bounce (never opt-outs or deliberate blocklistings)
 │       ├── blocklist_registry.py  # Subscriber ids blocklisted on purpose through this app (manual_blocklist.json); auto-unblock never reverses them
 │       ├── bounce_filters.py      # Smart bounce filtering (excludes campaign openers as false positives)
@@ -54,6 +56,7 @@ ListMonk-Pro/
 │       ├── link_unsubscribe.py    # ListMonk direct link unsubscribe scanner & campaign attributor
 │       ├── listmonk_client.py     # Async HTTP client for ListMonk REST API (with paginate_all helper)
 │       ├── opener_cache.py        # In-memory campaign opener email cache with TTL & inflight deduplication
+│       ├── send_stats.py          # Always-on per-day send counter (delta-counted from running stats, shared poll with warm-up)
 │       ├── search_query.py        # Free-text search builders: escaped ILIKE for subscribers (SQL), plain_search_term for lists/campaigns (plain text)
 │       ├── reply_i18n.py          # Non-English reply vocabulary (ack / refusal / interest / dead-address) merged into the classifier, plus opt-out phrases merged into the unsubscribe scanner
 │       ├── reply_log.py           # Persistent JSON storage for prospect replies and sentiments
@@ -108,6 +111,8 @@ ListMonk-Pro/
 │   ├── test_warmup.py             # Warm-up: ramp maths, delta counting, day roll-over/advance rule, quota enforcement, scheduler interplay, API
 │   ├── test_email_format.py       # HTML ↔ plain switch: twin/text conversion, remembered setups, compile rollback, attribs kept on edit
 │   ├── test_email_validation.py   # Validator (syntax, DNS verdicts, flags, cache), scan, cleanup safety rails, schedule maths, API
+│   ├── test_send_stats_and_ui_fixes.py # Daily send counter, unattributed unsubscribe group, unblock, template preview
+│   ├── test_ui_review_round2.py   # Unsaved campaign/template previews, reply timeline, auto-unblock switch/history, validate-before-import
 │   ├── test_fifth_review_fixes.py # Regressions for the fifth review (plain-text search, IP octets vs status codes, DSN gate, keyword boundaries, blocklist registry, subject matching, mode-aware audit, auth cross-site)
 │   ├── conftest.py                # Resets module-level caches between tests
 │   └── test_regressions.py        # Route order, IMAP seen-marking, prune, timestamp regressions
@@ -137,7 +142,7 @@ ListMonk-Pro/
 
 - **Backend**: Python 3.12+, FastAPI 0.141+, Uvicorn, httpx (async HTTP), dnspython (async MX lookups), Jinja2, Python-dotenv
 - **Frontend**: Vanilla JavaScript (ES6+), Chart.js (vendored in `static/js/vendor/`), Modern Dark CSS (no build step)
-- **State & Storage**: Writable JSON state files in `DATA_DIR` (`schedule.json`, `warmup.json`, `email_cleanup.json`, `email_validation_results.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`, `unsubscribe_examined.json`, `bounce_processed.json`), in-memory caches (`opener_cache`, `hard_bounce_cache`)
+- **State & Storage**: Writable JSON state files in `DATA_DIR` (`schedule.json`, `warmup.json`, `send_stats.json`, `auto_unblock.json`, `email_cleanup.json`, `email_validation_results.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`, `unsubscribe_examined.json`, `bounce_processed.json`), in-memory caches (`opener_cache`, `hard_bounce_cache`)
 - **Testing**: Pytest 9.1+, pytest-asyncio, AnyIO
 - **Deployment**: Docker, Docker Compose, Nginx, Certbot
 
@@ -237,11 +242,11 @@ ListMonk-Pro/
 All background tasks run as managed `asyncio.create_task` loops in `app/main.py`:
 | Task Loop | Interval | Purpose |
 |-----------|----------|---------|
-| `auto_unblock_loop` | 6 hours | Finds blocklisted subscribers with a bounce record **who opened or clicked after their latest bounce** (`QUERY_BLOCKLISTED_ENGAGED`; engagement *before* a bounce proves nothing: the mailbox may have died since), re-enables them, deletes the false bounce records. Never re-enabled: addresses in the unsubscribe log / processed set, and ids in `blocklist_registry` (`manual_blocklist.json`): every blocklisting done through this app (Leads / Replies / Email Validation actions, reply auto-blocklist, cleanup) is recorded there, because ListMonk does not store *why* a subscriber is blocklisted. A new code path that blocklists on purpose must call `blocklist_registry.mark(ids)` |
+| `auto_unblock_loop` | 6 hours (skipped while switched off in Settings → Auto-Unblock; every run's outcome and the re-enabled addresses go to `auto_unblock.json` via `auto_unblock_state.record_run`) | Finds blocklisted subscribers with a bounce record **who opened or clicked after their latest bounce** (`QUERY_BLOCKLISTED_ENGAGED`; engagement *before* a bounce proves nothing: the mailbox may have died since), re-enables them, deletes the false bounce records. Never re-enabled: addresses in the unsubscribe log / processed set, and ids in `blocklist_registry` (`manual_blocklist.json`): every blocklisting done through this app (Leads / Replies / Email Validation actions, reply auto-blocklist, cleanup) is recorded there, because ListMonk does not store *why* a subscriber is blocklisted. A new code path that blocklists on purpose must call `blocklist_registry.mark(ids)` |
 | `scheduler_loop` | 60 seconds | Enforces daily send windows, auto-pauses/resumes campaigns. While **disabled** it resumes the campaigns it auto-paused itself (still-paused ones only; a failed resume stays tracked and is retried), and `PUT /api/scheduler` ticks immediately in both directions. The whole load → mutate → save cycle of a tick runs under `_SCHED_LOCK`, shared with `update_schedule_settings()` (the API's PUT path), so overlapping ticks or a settings write during a tick can never clobber `schedule.json` |
 | `imap_scan_loop` | 1 hour | Scans IMAP inbox for replies + polls ListMonk for link unsubscribes |
 | `bounce_ingest_loop` | 1 hour | Scans the bounce mailbox for new DSNs in the 30-day window, classifies & records bounces; skips delay notices and anything already in `bounce_processed.json` |
-| `warmup_loop` | 1 s while a campaign is running, 3 s otherwise (only does work while warm-up is **enabled**; backs off to 30 s when ListMonk is unreachable) | Counts what ListMonk has sent since the last poll (`/api/campaigns/running/stats`) and pauses every running campaign the moment today's warm-up quota is used up (see *Sending warm-up* below). A new day closes the previous one and runs a scheduler tick so held-back campaigns resume at once. Starting/resuming a campaign through `PUT /api/campaigns/{id}/status` wakes it immediately (`nudge_warmup`) |
+| `warmup_loop` | 1 s while warm-up is on and a campaign is running, 3 s otherwise (backs off to 30 s when ListMonk is unreachable) | Every iteration fetches `/api/campaigns/running/stats` **once** and feeds it to the daily send statistics (`send_stats.observe`, always on, failures logged and never blocking the quota) and to warm-up. While warm-up is **enabled** it counts what ListMonk has sent since the last poll (`/api/campaigns/running/stats`) and pauses every running campaign the moment today's warm-up quota is used up (see *Sending warm-up* below). A new day closes the previous one and runs a scheduler tick so held-back campaigns resume at once. Starting/resuming a campaign through `PUT /api/campaigns/{id}/status` wakes it immediately (`nudge_warmup`) |
 | `reply_scan_loop` | `scan_interval_minutes` (15) | Scans IMAP for cold-outreach prospect replies, strips quotes, classifies sentiment (see *Reply classification* below). Delivery-failure DSNs (mailer-daemon subject/sender/body markers) are never stored as replies: they are routed through `bounce_ingest.ingest_parsed_dsn` so the failed prospect gets a real bounce record (Bounces page, Analytics bounce counts), deduped against `bounce_processed.json` so a mailbox both scanners watch yields one record. HTML-only replies (no usable `text/plain` part) are rendered to text via `imap_helpers.html_to_text` so genuine replies are never stored with an empty body; records already stored empty are repaired in place from the fetched messages, and a re-classification pass re-tags stored replies when the sentiment rules evolve (a DSN stored by an older version is removed from the feed outright). Dedup uses the Message-ID or, when absent, the same `From|Date|Subject` fingerprint as bounce ingestion, persisted to `reply_processed.json` (capped at 5000) |
 | `start_cache_updater` | 5 minutes | Refreshes in-memory hard bounce counts per campaign |
 | `email_cleanup_loop` | 60 seconds (only works when a slot is due) | Runs the scheduled dead-email cleanup (Settings → Email Cleanup, off by default) when a daily / weekly / monthly slot has passed unhandled; see *Email validation & cleanup* below. Backs off on errors like the other loops |
@@ -254,6 +259,12 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 - **Day = calendar day in the warm-up `timezone`** (`today_for`). `_roll_day()` closes the stored day when the date moves on, appends it to `history` (capped at 60) and resets the counter. **The ramp advances only after a day that sent ≥ `ADVANCE_MIN_FRACTION` (80 %) of its quota** — a weekend, an empty queue or an app outage must never push a cold domain to a bigger volume. Only one day is closed however long the app was down. Changing the timezone moves `date` without closing the day. `view()` shows the next day's quota with a zero counter between midnight and the first poll (`pending_rollover`), so `has_quota()` is never stale-false.
 - **Known limits (also stated in the UI):** the cap can be exceeded by what ListMonk sends between two polls (≈ 1 s of sending: message rate × concurrency is the upper bound, so the Insights card warns when that is large against the quota); while this app is stopped ListMonk sends without a cap; a send that failed at SMTP is not counted.
 - Frontend: Settings → *Sending Warm-up* (`Settings.renderWarmup`). The live meter is refreshed in place by `_syncWarmupStatus()` (never re-rendered, so unsaved form edits survive); the ramp chart is drawn from `/api/warmup/preview` so the maths exists only in Python.
+
+### 5d. Daily Send Statistics (`app/services/send_stats.py`, `GET /api/sends/daily`)
+- ListMonk stores only a cumulative `sent` per campaign, never *when* a message left, so "sent today" cannot be read from it later. `send_stats` counts sends as they happen, **warm-up on or off**, with the same delta function as warm-up (`warmup.count_deltas`): the first poll only baselines (`seen`), so a campaign's history is never charged to the day counting starts; campaigns that leave the running list are read once more for their final count.
+- Per-day buckets `{total, campaigns: {id: n}}` in `send_stats.json` (≤ 400 days). Day boundary = the warm-up timezone while warm-up is on (so the Analytics card and the warm-up meter agree), else the send-window timezone.
+- On first run the file is seeded from the warm-up history (`source: "warmup"`). A day is `tracked` from `counting_since` on (missing = really zero); before that only seeded days are known — the gaps are `tracked: false` (unknown, drawn without a bar), never zero.
+- Frontend: Analytics *Sent Today* card + *Daily Sends* chart (7/30/90 days, today split by campaign); Dashboard "N sent today" line.
 
 ### 5c. Email Validation & Cleanup (`app/services/email_validation.py`, `email_cleanup.py`)
 - **Verdicts:** `invalid` (can never receive mail), `risky` (disposable domain, role account such as `support@`, probable typo of a big provider), `unknown` (a DNS lookup failed transiently), `valid`. Checks: RFC 5321/5322 syntax (non-ASCII local parts and IDN domains are accepted), domain exists (NXDOMAIN → `no_domain`), mail server exists (MX; falls back to A/AAAA per RFC 5321; a Null MX per RFC 7505 → `null_mx`; nothing → `no_mx`). `hard_bounce` is added by subscriber scans only.
@@ -389,7 +400,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
   first rows as JSON, so the UI previews the exact output ListMonk will receive.
 
 ### 7. Persistent Runtime State (`DATA_DIR`)
-- `app/config.py` provides `settings.data_path(filename)` to store mutable JSON state files (`schedule.json`, `warmup.json`, `email_cleanup.json`, `email_validation_results.json`, `app_settings.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`, `unsubscribe_examined.json`, `reply_log.json`, `reply_processed.json`, `reply_settings.json`, `bounce_processed.json`, `session_revocations.json`, `manual_blocklist.json`).
+- `app/config.py` provides `settings.data_path(filename)` to store mutable JSON state files (`schedule.json`, `warmup.json`, `send_stats.json`, `auto_unblock.json`, `email_cleanup.json`, `email_validation_results.json`, `app_settings.json`, `unsubscribe_log.json`, `unsubscribe_settings.json`, `unsubscribe_processed.json`, `unsubscribe_examined.json`, `reply_log.json`, `reply_processed.json`, `reply_settings.json`, `bounce_processed.json`, `session_revocations.json`, `manual_blocklist.json`).
 - `bounce_processed.json` is a capped list of handled DSN Message-IDs (newest first) that makes bounce ingestion idempotent independently of IMAP `\Seen`. Its cap (50,000) is much larger than the other sets because bounce ingestion re-examines the whole 30-day window on every scan: a smaller cap started evicting ids of DSNs still inside the window and re-created them as duplicate bounce records. `unsubscribe_examined.json` and `unsubscribe_processed.json` use the same 50,000 cap for the same reason (the IMAP scanner re-reads its whole window; the link scanner re-polls ListMonk). `reply_processed.json` is capped at 5000 entries (oldest evicted), which is safe there — the reply scan only re-reads the 200 most recent messages. The reply scan peeks identity headers first and downloads only unprocessed messages (plus processed ones awaiting a body repair).
 - Every JSON state read/write is explicit UTF-8; writes are atomic (tempfile + `fsync` + `os.replace`). `app_settings.load_settings` also guards against a hand-edited file holding a non-object (falls back to defaults instead of 500-ing the onboarding gate).
 - In Docker, `DATA_DIR` defaults to `/data` (backed by a named volume).
@@ -412,6 +423,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/subscribers/{id}/export` | GET | Export single subscriber JSON profile |
 | | `/api/subscribers/{id}/bounces` | GET | Get bounces for subscriber |
 | | `/api/subscribers/{id}/blocklist` | PUT | Blocklist single subscriber |
+| | `/api/subscribers/{id}/unblock` | PUT | Re-enable a blocklisted subscriber (echoes email/name/attribs/lists — ListMonk's PUT is a full replace; `409` if not blocklisted) and `blocklist_registry.unmark`s it |
 | | `/api/subscribers/blocklist` | PUT | Bulk blocklist subscribers by ID array |
 | | `/api/subscribers/lists` | PUT | Bulk modify list memberships (add/remove/unsub) |
 | | `/api/subscribers` | POST / DELETE | Create subscriber / bulk delete subscribers by ID array |
@@ -426,6 +438,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/campaigns/analytics/{type}/export` | GET | Export campaign analytics as CSV |
 | | `/api/campaigns/{id}` | GET / PUT / DELETE | Get / update / delete campaign |
 | | `/api/campaigns/{id}/preview` | GET | Preview campaign HTML rendering |
+| | `/api/campaigns/{id}/preview` | POST | Render unsaved edits (`body`, `content_type`, `template_id`) with ListMonk; sandboxed HTML (the editor's Preview) |
 | | `/api/campaigns/{id}/status` | PUT | Change status (start, pause, cancel) |
 | | `/api/campaigns/{id}/archive` | PUT | Archive campaign |
 | | `/api/campaigns/archive` | PUT | Bulk archive campaigns by ID array (registered before `/{id}`) |
@@ -437,6 +450,8 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/templates` | DELETE | Bulk delete templates by ID array |
 | | `/api/templates/{id}` | GET / PUT / DELETE | Get / update / delete template |
 | | `/api/templates/{id}/default` | PUT | Set default template |
+| | `/api/templates/preview` | POST | Render an unsaved template `body` with ListMonk's sample data (the editor's live preview; registered before `/{id}`) |
+| | `/api/templates/{id}/preview` | GET | Template rendered by ListMonk with its sample campaign/subscriber (sandboxed HTML); the UI falls back to the raw body when rendering fails |
 | **Bounces** | `/api/bounces` | GET / DELETE | List bounces (filtered) / bulk delete (`ids` narrows to a selection, `campaign_id`+`bounce_type` widen to a sweep) |
 | | `/api/bounces/ingest` | POST | Trigger bounce mailbox IMAP ingestion |
 | | `/api/bounces/export` | GET | Export filtered bounce records as CSV |
@@ -444,13 +459,15 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | **CSV Converter** | `/api/converter/detect-columns` | POST | Detect CSV headers & preview rows |
 | | `/api/converter/preview` | POST | Convert and return the first rows as JSON (exact ListMonk output preview) |
 | | `/api/converter/convert` | POST | Convert CSV to ListMonk schema (download) |
-| | `/api/converter/convert-and-import` | POST | Convert and import directly into ListMonk (`subscription_status` defaults to `confirmed` so double-opt-in lists are mailable; `overwrite_userinfo` / `overwrite_subscription_status` map onto ListMonk's granular upsert flags and default to true / **false** (overwriting statuses re-subscribes opted-out contacts, so it must be asked for); rejects `no_attributes` mappings and empty conversions) |
+| | `/api/converter/convert-and-import` | POST | Convert and import directly into ListMonk (`subscription_status` defaults to `confirmed` so double-opt-in lists are mailable; `overwrite_userinfo` / `overwrite_subscription_status` map onto ListMonk's granular upsert flags and default to true / **false** (overwriting statuses re-subscribes opted-out contacts, so it must be asked for); rejects `no_attributes` mappings and empty conversions; `validate_emails=true` runs the address validator first and leaves out rows whose verdict is `invalid` only, reported as `validation`) |
 | **Scheduler** | `/api/scheduler` | GET / PUT | Get / update send window settings |
 | | `/api/scheduler/run` | POST | Manually trigger scheduler tick |
 | **Warm-up** | `/api/warmup` | GET / PUT | Ramp settings + today's quota, usage, forecast and recent days / change settings (strictly typed, unknown keys → 400, `target_volume < start_volume` → 400). `level` jumps the ramp to a given day. Ticks the scheduler right away |
 | | `/api/warmup/preview` | GET | The ramp a `start_volume` / `growth_percent` / `target_volume` triple would produce (the settings form's live chart) |
 | | `/api/warmup/insights` | GET | Queued recipients (running + paused campaigns), days to send them on this ramp, ListMonk's max messages/second and an overshoot warning. Best effort: parts that cannot be read from ListMonk are `null`, never a 5xx |
-| **Auto-Unblock** | `/api/auto-unblock/status` | GET | Get count of blocklisted engaged contacts |
+| **Send Stats** | `/api/sends/daily` | GET | `days` (1–365): emails sent per calendar day (oldest first, `tracked` flag), `sent_today`, `today_by_campaign`, `tracking_since`, `timezone` |
+| **Auto-Unblock** | `/api/auto-unblock/status` | GET | Count of blocklisted engaged contacts plus `enabled`, `last_run`, `history` (latest 50) |
+| | `/api/auto-unblock/settings` | PUT | `{"enabled": bool}` only: turns the six-hourly background run on/off ("Run now" always works) |
 | | `/api/auto-unblock/run` | POST | Manually run auto-unblock process |
 | **Email Validation** | `/api/email-validation/check` | POST | `{"emails": [...≤100]}`: verdict, reasons, detail and typo suggestion per address. Never touches ListMonk |
 | | `/api/email-validation/status` | GET | Running job progress (`running`, `kind`, `phase`, `checked`/`total`, counts) + the latest scan summary + stored-problem counts |
@@ -467,7 +484,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/unsubscribes/settings` | GET / PUT | Get / update unsubscribe settings (blocklist toggle) |
 | | `/api/unsubscribes/campaigns` | GET | Unsubscribes grouped by campaign |
 | | `/api/unsubscribes/campaigns` | DELETE | Bulk delete the records of several selected campaigns by ID array |
-| | `/api/unsubscribes/campaign/{id}` | GET / DELETE | Get / delete records for specific campaign |
+| | `/api/unsubscribes/campaign/{id}` | GET / DELETE | Get / delete records for specific campaign; `id` may be `unknown` for the records no campaign could be attributed to (also accepted by `/export` and as `campaign_id` of `DELETE /records`) |
 | | `/api/unsubscribes/campaign/{id}/export` | GET | Export campaign unsubscribes as CSV |
 | | `/api/unsubscribes/records` | DELETE | Delete specific records by email |
 | | `/api/unsubscribes/export` | GET | Export all unsubscribes as CSV |
@@ -476,6 +493,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/unsubscribes/clear` | DELETE | Clear all unsubscribe log records |
 | | `/api/unsubscribes/reset` | POST | Undo all unsubscribes & restore list memberships |
 | **Replies** | `/api/replies` | GET | Paginated prospect replies with sentiment/status filtering (campaign-attributed replies plus automated ones only — an unattributed reply is never shown) |
+| | `/api/replies/timeline` | GET | Human, campaign-attributed replies per calendar day (`campaign_id`, `from_date`/`to_date` inclusive, `tz` day boundary) for the Analytics "Replies over time" chart |
 | | `/api/replies/stats` | GET | Aggregate reply counts, reply rate %, and sentiment breakdown over the same visible set (optional `campaign_id` scopes counts and rate to one campaign; a `by_campaign` breakdown is always returned for the analytics chart; the reply rate counts only campaign-bound human replies) |
 | | `/api/replies/scan` | POST | Manually trigger IMAP prospect reply scan (502 when the mailbox scan fails — never a 200 "ok" with a buried error) |
 | | `/api/replies/status` | GET | Check IMAP connection status |
@@ -532,7 +550,7 @@ Every data page exposes row-level actions plus a multi-select bulk bar
 
 | Page | Row actions | Bulk actions (checkbox column / card checkbox) |
 |------|-------------|-----------------------------------------------|
-| Leads/Subscribers | View details, Edit (incl. list memberships), Blocklist, Delete | Add/Remove from list, Blocklist, Export Selected (CSV), Delete |
+| Leads/Subscribers | View details, Edit (incl. list memberships), Blocklist / Unblock, Delete | Add/Remove from list, Blocklist, Export Selected (CSV), Delete |
 | Lead Lists | View Subscribers (jumps to the filtered Lead table), Export, Edit, Delete | Export Subscribers, Delete |
 | Cold Outreach/Campaigns | View, Start/Pause/Resume, Test Send, Archive, Delete | Archive, Export Selected (CSV), Delete |
 | Templates | Preview, Duplicate, Edit, Set Default, Delete (search by name) | Delete |
@@ -542,6 +560,19 @@ Every data page exposes row-level actions plus a multi-select bulk bar
 | Email Validation | Blocklist, Dismiss | Blocklist Selected, Dismiss Selected, Export Selected (CSV); filter-wide Export CSV |
 
 Frontend conventions:
+
+- Shared helpers in `app.js`: `App.term('subscriber'|'list', {plural, cap})` gives the
+  mode-aware noun (Leads / Lead Lists in Cold Email mode; page titles use `coldTitle`);
+  `App.moreMenu(items)` renders the "⋯" overflow menu (secondary and destructive row /
+  page actions go there; its popover moves to `<body>` while open because glass cards'
+  `backdrop-filter` breaks `position: fixed`); `App.showForm(title, html, label, fn)` is
+  the dialog for small forms (Cancel + one primary button, never `showResult`'s extra OK);
+  `App.emptyChart()` replaces a chart that has nothing to draw; `App.autoRefresh(page, fn, ms)`
+  keeps a page live while a campaign sends (cleared by `route()`, skipped while typing,
+  a dialog or a menu is open); `App.debounce` drives search-as-you-type.
+- Automation that acts on people without a click lives in Settings (tabs: Send Window,
+  Warm-up, Automation, Email Cleanup, Auto-Unblock; deep link `#/settings?tab=…`). The
+  Unsubscribes and Replies pages link there instead of carrying their own toggles.
 
 - A page calls `App.selection.register(key, {noun, pageValues, actions})` on every
   render, places `App.selection.bar(key)` above its table and wires

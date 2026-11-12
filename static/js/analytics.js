@@ -12,6 +12,9 @@ const Analytics = {
     replyStats: null,
     campaignReplyStats: null,
     replyByCampaign: {},
+    /** Daily send statistics (/api/sends/daily) and the range shown. */
+    sends: null,
+    sendsDays: 30,
     /** Generation counter for campaign-scoped side stats, so a slow response
         for the previous campaign cannot repaint over the newer selection. */
     _sideSeq: 0,
@@ -49,10 +52,20 @@ const Analytics = {
                 API.get('/api/campaigns?per_page=100&order_by=created_at&order=DESC'),
                 API.get('/api/unsubscribes/stats'),
                 API.get('/api/campaigns/summary'),
+                API.get(`/api/sends/daily?days=${this.sendsDays}`, true),
             ];
+            // Per-campaign unsubscribe counts for the comparison table.
+            requests.push(API.get('/api/unsubscribes/campaigns', true));
             if (this.isColdMode()) requests.push(API.get('/api/replies/stats'));
 
-            const [campRes, unsubRes, summaryRes, replyRes] = await Promise.allSettled(requests);
+            const [campRes, unsubRes, summaryRes, sendsRes, unsubGroupsRes, replyRes] = await Promise.allSettled(requests);
+            this.unsubByCampaign = {};
+            if (unsubGroupsRes.status === 'fulfilled') {
+                (unsubGroupsRes.value?.data || []).forEach(g => {
+                    if (Number.isInteger(g.campaign_id)) this.unsubByCampaign[g.campaign_id] = g.count || 0;
+                });
+            }
+            this.sends = sendsRes.status === 'fulfilled' ? (sendsRes.value || null) : null;
             this.campaigns = campRes.status === 'fulfilled' ? (campRes.value?.data?.results || []) : [];
             this.unsubStats = unsubRes.status === 'fulfilled' ? unsubRes.value : { total: 0 };
             this.summary = summaryRes.status === 'fulfilled' ? (summaryRes.value || null) : null;
@@ -125,14 +138,17 @@ const Analytics = {
             <!-- Overview Stats -->
             <div class="stats-grid">
                 <div class="stat-card accent">
-                    <div class="stat-label">Total Sent (All Campaigns)</div>
+                    <div class="stat-label">Total Sent</div>
                     <div class="stat-value">${App.formatNumber(totalSent)}</div>
+                    <div style="font-size:0.8rem;color:var(--text-muted)">all time</div>
                 </div>
+                ${this._sentTodayCard()}
+                ${isCold ? '' : `
                 <div class="stat-card success">
-                    <div class="stat-label">Total Views</div>
+                    <div class="stat-label">Total Opens</div>
                     <div class="stat-value">${App.formatNumber(totalViews)}</div>
                     <div style="font-size:0.8rem;color:var(--text-muted)">${totalSent ? ((totalViews/totalSent)*100).toFixed(1) : 0}% open rate</div>
-                </div>
+                </div>`}
                 ${isCold ? '' : `
                 <div class="stat-card warning">
                     <div class="stat-label">Total Clicks</div>
@@ -157,6 +173,8 @@ const Analytics = {
                 </div>` : ''}
             </div>
 
+            ${this._dailySendsCard()}
+
             <!-- Campaign Comparison Chart -->
             <div class="card" style="margin-bottom:20px">
                 <div class="card-header">
@@ -166,6 +184,7 @@ const Analytics = {
                 <div class="chart-container" style="height:300px">
                     <canvas id="comparisonChart"></canvas>
                 </div>
+                ${this._comparisonTable()}
             </div>
 
             <!-- Campaign Selector & Date Range -->
@@ -189,31 +208,44 @@ const Analytics = {
                         <input type="date" id="analyticsTo" value="${this.toDate}" onchange="Analytics.onDateChange()">
                     </div>
                     <div class="form-group an-filter-action">
-                        <button class="btn btn-primary" onclick="Analytics.loadCampaignAnalytics()">Load</button>
+                        <span class="an-quick-label">Quick range</span>
+                        <div class="deliv-seg" role="group" aria-label="Quick date range">
+                            ${[[7, '7d'], [30, '30d'], [90, '90d'], [0, 'All']].map(([n, l]) =>
+                                `<button type="button" class="deliv-seg-btn ${this._rangeDays() === n ? 'is-active' : ''}" onclick="Analytics.quickRange(${n})">${l}</button>`).join('')}
+                        </div>
                     </div>
                 </div>
+                <p class="field-hint" style="margin:0 0 4px">The charts and the "in range" numbers follow the dates; the large numbers are the campaign's totals.</p>
                 ${selectedCamp ? `
                 <div class="stats-grid" style="margin-top:12px">
                     <div class="stat-card"><div class="stat-label">Status</div><div style="margin-top:4px">${App.statusBadge(selectedCamp.status)}</div></div>
                     <div class="stat-card accent"><div class="stat-label">Sent</div><div class="stat-value">${App.formatNumber(selectedCamp.sent || 0)}</div></div>
-                    <div class="stat-card success"><div class="stat-label">Views</div><div class="stat-value">${App.formatNumber(selectedCamp.views || 0)}</div></div>
-                    ${isCold ? '' : `<div class="stat-card warning"><div class="stat-label">Clicks</div><div class="stat-value">${App.formatNumber(selectedCamp.clicks || 0)}</div></div>`}
-                    <div class="stat-card danger"><div class="stat-label">Bounces</div><div class="stat-value">${App.formatNumber(selectedCamp.bounces || 0)}</div></div>
-                    <div class="stat-card" style="border-left-color:#14b8a6"><div class="stat-label">Unsubscribes</div><div class="stat-value" style="color:#14b8a6">${App.formatNumber(this.campaignUnsubCount)}</div></div>
+                    ${isCold ? '' : `<div class="stat-card success"><div class="stat-label">Opens</div><div class="stat-value">${App.formatNumber(selectedCamp.views || 0)}</div><div class="stat-sub" id="anRange_views"></div></div>`}
+                    ${isCold ? '' : `<div class="stat-card warning"><div class="stat-label">Clicks</div><div class="stat-value">${App.formatNumber(selectedCamp.clicks || 0)}</div><div class="stat-sub" id="anRange_clicks"></div></div>`}
                     ${isCold ? `
-                    <div class="stat-card success"><div class="stat-label">Replies</div><div class="stat-value" style="color:var(--emerald)">${App.formatNumber(campReplies)}</div><div style="font-size:0.8rem;color:var(--text-muted)"><strong style="color:var(--emerald)">${campReplyRate}%</strong> reply rate</div></div>` : ''}
+                    <div class="stat-card success"><div class="stat-label">Replies</div><div class="stat-value" style="color:var(--emerald)">${App.formatNumber(campReplies)}</div><div class="stat-sub"><strong style="color:var(--emerald)">${campReplyRate}%</strong> reply rate</div><div class="stat-sub" id="anRange_replies"></div></div>` : ''}
+                    <div class="stat-card danger"><div class="stat-label">Bounces</div><div class="stat-value">${App.formatNumber(selectedCamp.bounces || 0)}</div><div class="stat-sub" id="anRange_bounces"></div></div>
+                    <div class="stat-card" style="border-left-color:#14b8a6"><div class="stat-label">Unsubscribes</div><div class="stat-value" style="color:#14b8a6">${App.formatNumber(this.campaignUnsubCount)}</div></div>
                 </div>` : ''}
             </div>
 
             <!-- Charts Row -->
             <div class="charts-grid">
+                ${isCold ? `
                 <div class="card">
                     <div class="card-header">
-                        <h2 class="card-title">Views Over Time</h2>
+                        <h2 class="card-title">Replies Over Time</h2>
+                        <a class="btn btn-sm" href="#/replies?campaign=${this.selectedCampaignId}">Open replies</a>
+                    </div>
+                    <div class="chart-container"><canvas id="repliesChart"></canvas></div>
+                </div>` : `
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">Opens Over Time</h2>
                         <button class="btn btn-sm" onclick="Analytics.exportSubscribers('views')">Export Who Opened</button>
                     </div>
                     <div class="chart-container"><canvas id="viewsChart"></canvas></div>
-                </div>
+                </div>`}
                 ${isCold ? '' : `
                 <div class="card">
                     <div class="card-header">
@@ -258,6 +290,7 @@ const Analytics = {
 
         // Render comparison chart
         this.renderComparisonChart();
+        this.renderDailySendsChart();
 
         // Auto-load analytics for selected campaign
         if (this.selectedCampaignId) {
@@ -265,9 +298,222 @@ const Analytics = {
         }
     },
 
+    /** "Sent Today" KPI. ListMonk keeps no per-day history, so this comes
+        from the app's own counter (services/send_stats). */
+    _sentTodayCard() {
+        const s = this.sends;
+        if (!s) {
+            return `
+                <div class="stat-card">
+                    <div class="stat-label">Sent Today</div>
+                    <div class="stat-value">–</div>
+                    <div style="font-size:0.8rem;color:var(--text-muted)">Daily counts unavailable</div>
+                </div>`;
+        }
+        const days = s.days || [];
+        const yesterday = days.length > 1 ? days[days.length - 2] : null;
+        const sub = yesterday && yesterday.tracked
+            ? `${App.formatNumber(yesterday.total)} yesterday`
+            : 'counting started recently';
+        return `
+            <div class="stat-card accent">
+                <div class="stat-label">Sent Today</div>
+                <div class="stat-value">${App.formatNumber(s.sent_today || 0)}</div>
+                <div style="font-size:0.8rem;color:var(--text-muted)">${App.escapeHtml(sub)}</div>
+            </div>`;
+    },
+
+    _dailySendsCard() {
+        const s = this.sends;
+        const ranges = [7, 30, 90];
+        const seg = ranges.map(n => `<button type="button" class="deliv-seg-btn ${n === this.sendsDays ? 'is-active' : ''}" aria-pressed="${n === this.sendsDays}" onclick="Analytics.setSendsRange(${n})">${n} days</button>`).join('');
+        let body;
+        if (!s) {
+            body = '<div class="empty-state"><p>Daily send counts could not be loaded.</p></div>';
+        } else {
+            const nameOf = id => this.campaigns.find(c => c.id === id)?.name || `Campaign #${id}`;
+            const split = (s.today_by_campaign || []).map(c => `
+                <li style="display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid var(--glass-border)">
+                    <span class="cell-email" title="${App.escapeHtml(nameOf(c.id))}">${App.escapeHtml(nameOf(c.id))}</span>
+                    <strong>${App.formatNumber(c.sent)}</strong>
+                </li>`).join('');
+            const hasGaps = (s.days || []).some(d => !d.tracked);
+            const since = s.tracking_since
+                ? `Counted by this app since ${App.escapeHtml(this._dayLabel(s.tracking_since, true))}`
+                : 'Counting starts with the next send';
+            body = `
+                <div style="display:flex;flex-wrap:wrap;gap:8px 20px;font-size:0.85rem;color:var(--text-secondary);margin-bottom:12px">
+                    <span><strong style="color:var(--text-primary)">${App.formatNumber(s.period_total || 0)}</strong> sent in the last ${this.sendsDays} days</span>
+                    <span>Day boundary: ${App.escapeHtml(s.timezone || 'UTC')}</span>
+                </div>
+                <div class="chart-container" style="height:260px"><canvas id="dailySendsChart"></canvas></div>
+                <p style="font-size:0.78rem;color:var(--text-muted);margin-top:10px">
+                    ${since}. ListMonk stores only a running total per campaign, so days before that${hasGaps ? ' (shown without a bar)' : ''} are unknown, not zero.
+                </p>
+                ${split ? `<div style="margin-top:14px"><div class="stat-label" style="margin-bottom:6px">Today by campaign</div><ul style="list-style:none;margin:0;padding:0;font-size:0.85rem">${split}</ul></div>` : ''}`;
+        }
+        return `
+            <div class="card" style="margin-bottom:20px">
+                <div class="card-header">
+                    <h2 class="card-title">Daily Sends</h2>
+                    <div class="deliv-seg" role="group" aria-label="Days shown">${seg}</div>
+                </div>
+                ${body}
+            </div>`;
+    },
+
+    /** "Nov 4" (or "Nov 4, 2026") for an ISO calendar date. Parsed as local
+        parts: new Date('2026-11-04') is UTC midnight and can show Nov 3. */
+    _dayLabel(iso, withYear = false) {
+        const [y, m, d] = String(iso).split('-').map(Number);
+        const opts = withYear ? { year: 'numeric', month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric' };
+        return new Date(y, m - 1, d).toLocaleDateString(undefined, opts);
+    },
+
+    async setSendsRange(days) {
+        if (days === this.sendsDays) return;
+        this.sendsDays = days;
+        try {
+            this.sends = await API.get(`/api/sends/daily?days=${days}`);
+        } catch {
+            return; // API.request already surfaced the server message.
+        }
+        if (this._seq !== undefined && App.stale(this._seq)) return;
+        this.renderPage();
+    },
+
+    renderDailySendsChart() {
+        const ctx = document.getElementById('dailySendsChart');
+        if (!ctx || !this.sends) return;
+        const theme = this.getThemeColors();
+        const days = this.sends.days || [];
+        const labels = days.map(d => this._dayLabel(d.date));
+        // Untracked days get no bar (null), so "unknown" never reads as zero.
+        const data = days.map(d => (d.tracked ? d.total : null));
+        const today = days.length - 1;
+        if (this.charts.daily) this.charts.daily.destroy();
+        this.charts.daily = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels,
+                datasets: [{
+                    label: 'Sent',
+                    data,
+                    backgroundColor: days.map((_, i) => (i === today ? 'rgba(16, 185, 129, 0.85)' : 'rgba(83, 58, 253, 0.82)')),
+                    borderRadius: 6,
+                    maxBarThickness: 36,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        backgroundColor: theme.tooltipBg,
+                        titleColor: theme.tooltipText,
+                        bodyColor: theme.tooltipText,
+                        borderColor: theme.tooltipBorder,
+                        borderWidth: 1,
+                        padding: 12,
+                        callbacks: {
+                            label: (item) => {
+                                const d = days[item.dataIndex];
+                                if (!d.tracked) return 'Not tracked';
+                                return `${App.formatNumber(d.total)} sent${item.dataIndex === today ? ' (today so far)' : ''}`;
+                            },
+                        },
+                    },
+                },
+                scales: {
+                    x: { ticks: { color: theme.textColor, maxRotation: 0, autoSkip: true, maxTicksLimit: 12 }, grid: { display: false } },
+                    y: { beginAtZero: true, ticks: { color: theme.textColor, precision: 0 }, grid: { color: theme.gridColor } },
+                },
+            },
+        });
+    },
+
+    /** Campaigns side by side: the numbers behind the comparison chart,
+        with the rates the chart cannot show. */
+    _comparisonTable() {
+        const rows = this.campaigns.filter(c => (c.sent || 0) > 0 || ['running', 'paused'].includes(c.status));
+        if (!rows.length) return '';
+        const isCold = this.isColdMode();
+        const pct = (n, d) => d ? `${(n / d * 100).toFixed(1)}%` : '–';
+        const body = rows.map(c => {
+            const sent = c.sent || 0;
+            const replies = this.replyByCampaign?.[String(c.id)] || 0;
+            const unsubs = this.unsubByCampaign?.[c.id] || 0;
+            return `<tr>
+                <td><a class="cell-link cell-clamp cell-clamp-lg" href="javascript:void(0)" onclick="Analytics.onCampaignChange(${c.id});document.getElementById('analyticsCampaign')?.scrollIntoView({behavior:'smooth',block:'center'})" title="${App.escapeHtml(c.name)}">${App.escapeHtml(c.name)}</a></td>
+                <td>${App.statusBadge(c.status)}</td>
+                <td class="num">${App.formatNumber(sent)}</td>
+                ${isCold
+                    ? `<td class="num">${App.formatNumber(replies)}</td><td class="num">${pct(replies, sent)}</td>`
+                    : `<td class="num">${App.formatNumber(c.views || 0)}</td><td class="num">${pct(c.views || 0, sent)}</td><td class="num">${pct(c.clicks || 0, sent)}</td>`}
+                <td class="num">${App.formatNumber(c.bounces || 0)}</td><td class="num">${pct(c.bounces || 0, sent)}</td>
+                <td class="num">${App.formatNumber(unsubs)}</td>
+            </tr>`;
+        }).join('');
+        return `<div class="table-wrapper an-compare" tabindex="0" role="region" aria-label="Campaign comparison table" style="margin-top:16px"><table>
+            <thead><tr><th>Campaign</th><th>Status</th><th class="num">Sent</th>
+                ${isCold ? '<th class="num">Replies</th><th class="num">Reply %</th>' : '<th class="num">Opens</th><th class="num">Open %</th><th class="num">CTR</th>'}
+                <th class="num">Bounces</th><th class="num">Bounce %</th><th class="num">Unsubs</th></tr></thead>
+            <tbody>${body}</tbody></table></div>`;
+    },
+
+    _localDay(d) {
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    },
+
+    /** Which quick range the current dates match (7/30/90), 0 for "All"
+        (from the campaign's creation), or null for a custom range. */
+    _rangeDays() {
+        const today = this._localDay(new Date());
+        if (this.toDate !== today) return null;
+        for (const n of [7, 30, 90]) {
+            const d = new Date(); d.setDate(d.getDate() - n);
+            if (this.fromDate === this._localDay(d)) return n;
+        }
+        const camp = this.campaigns.find(c => c.id === this.selectedCampaignId);
+        if (camp?.created_at && this.fromDate === this._localDay(new Date(camp.created_at))) return 0;
+        return null;
+    },
+
+    quickRange(days) {
+        const now = new Date();
+        let from;
+        if (days) { from = new Date(now); from.setDate(from.getDate() - days); }
+        else {
+            const camp = this.campaigns.find(c => c.id === this.selectedCampaignId);
+            from = camp?.created_at ? new Date(camp.created_at) : new Date(now.getFullYear() - 1, now.getMonth(), now.getDate());
+        }
+        this.fromDate = this._localDay(from);
+        this.toDate = this._localDay(now);
+        const f = document.getElementById('analyticsFrom');
+        const t = document.getElementById('analyticsTo');
+        if (f) f.value = this.fromDate;
+        if (t) t.value = this.toDate;
+        this._syncQuickRange();
+        this.loadCampaignAnalytics();
+    },
+
+    _syncQuickRange() {
+        const active = this._rangeDays();
+        document.querySelectorAll('.an-filter-action .deliv-seg-btn').forEach((b, i) => {
+            b.classList.toggle('is-active', [7, 30, 90, 0][i] === active);
+        });
+        App.syncUrl('analytics', { campaign: this.selectedCampaignId, from: this.fromDate, to: this.toDate });
+    },
+
     renderComparisonChart() {
         const ctx = document.getElementById('comparisonChart');
-        if (!ctx || !this.campaigns.length) return;
+        if (!ctx) return;
+        if (!this.campaigns.some(c => (c.sent || 0) > 0)) {
+            if (this.charts.comparison) { this.charts.comparison.destroy(); this.charts.comparison = null; }
+            this._emptyChart('comparisonChart', 'No campaign has sent anything yet.', '#/campaigns', 'Go to campaigns');
+            return;
+        }
 
         const theme = this.getThemeColors();
         const sorted = [...this.campaigns].reverse();
@@ -387,12 +633,36 @@ const Analytics = {
         this.campaignReplyStats = replyRes?.status === 'fulfilled' ? (replyRes.value || null) : null;
     },
 
+    /** Dates apply as soon as they change (debounced while typing): a
+        separate Load button was easy to miss and left stale charts up. */
     onDateChange() {
         this.fromDate = document.getElementById('analyticsFrom').value;
         this.toDate = document.getElementById('analyticsTo').value;
-        // Don't bump seq here — the user must click "Load" to apply the new
-        // date range. Bumping seq would invalidate any in-flight analytics and
-        // leave the charts blank until Load is clicked.
+        if (!this.fromDate || !this.toDate) return;
+        if (this.fromDate > this.toDate) { App.toast('"From" must be on or before "To"', 'error'); return; }
+        clearTimeout(this._dateTimer);
+        this._dateTimer = setTimeout(() => { this._syncQuickRange(); this.loadCampaignAnalytics(); }, 400);
+    },
+
+    _emptyChart(canvasId, message, href = '', linkText = '') {
+        const canvas = document.getElementById(canvasId);
+        const box = canvas?.parentElement;
+        if (!box) return;
+        box.classList.add('has-chart-empty');
+        box.querySelector('.chart-empty')?.remove();
+        box.insertAdjacentHTML('beforeend', App.emptyChart(message, href, linkText));
+    },
+
+    _clearEmptyChart(canvasId) {
+        const box = document.getElementById(canvasId)?.parentElement;
+        if (!box) return;
+        box.classList.remove('has-chart-empty');
+        box.querySelector('.chart-empty')?.remove();
+    },
+
+    _setRange(key, n) {
+        const el = document.getElementById(`anRange_${key}`);
+        if (el) el.textContent = n === null ? '' : `${App.formatNumber(n)} in the selected range`;
     },
 
     async loadCampaignAnalytics() {
@@ -414,11 +684,13 @@ const Analytics = {
         // mode hides click/link analytics (tracking is disabled there), so
         // those queries are skipped instead of being drawn into nothing.
         const isCold = this.isColdMode();
-        const [viewsRes, clicksRes, bouncesRes, linksRes] = await Promise.allSettled([
-            API.get(`/api/campaigns/analytics/views?${baseParams}`),
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+        const [viewsRes, clicksRes, bouncesRes, linksRes, repliesRes] = await Promise.allSettled([
+            isCold ? null : API.get(`/api/campaigns/analytics/views?${baseParams}`),
             isCold ? null : API.get(`/api/campaigns/analytics/clicks?${baseParams}`),
             API.get(`/api/campaigns/analytics/bounces?${baseParams}`),
             isCold ? null : API.get(`/api/campaigns/analytics/links?${baseParams}`),
+            isCold ? API.get(`/api/replies/timeline?campaign_id=${campId}&from_date=${this.fromDate}&to_date=${this.toDate}&tz=${encodeURIComponent(tz)}`, true) : null,
         ]);
         if (campId !== this.selectedCampaignId) return;
         if (seq !== this._chartSeq) return;
@@ -426,16 +698,26 @@ const Analytics = {
         // navigated away in the meantime, don't paint on whatever page is up.
         if (App.currentPage !== 'analytics') return;
 
-        const viewsData = viewsRes.status === 'fulfilled' ? (viewsRes.value?.data || []) : [];
+        const sum = (arr) => arr.reduce((a, d) => a + (d.count || 0), 0);
         const bouncesData = bouncesRes.status === 'fulfilled' ? (bouncesRes.value?.data || []) : [];
-
-        this.renderTimeChart('viewsChart', 'views', viewsData, '#10b981', 'rgba(16,185,129,0.12)');
         this.renderTimeChart('bouncesChart', 'bounces', bouncesData, '#ea2261', 'rgba(234,34,97,0.12)');
+        this._setRange('bounces', bouncesRes.status === 'fulfilled' ? sum(bouncesData) : null);
 
-        if (!isCold) {
+        if (isCold) {
+            const ok = repliesRes.status === 'fulfilled';
+            // Reply days are calendar dates already; the chart's label code
+            // reads them as local days.
+            const repliesData = ok ? (repliesRes.value?.data || []).map(d => ({ timestamp: d.date, count: d.count })) : [];
+            this.renderTimeChart('repliesChart', 'replies', repliesData, '#14b8a6', 'rgba(20,184,166,0.14)');
+            this._setRange('replies', ok ? sum(repliesData) : null);
+        } else {
+            const viewsData = viewsRes.status === 'fulfilled' ? (viewsRes.value?.data || []) : [];
             const clicksData = clicksRes.status === 'fulfilled' ? (clicksRes.value?.data || []) : [];
             const linksData = linksRes.status === 'fulfilled' ? (linksRes.value?.data || []) : [];
+            this.renderTimeChart('viewsChart', 'views', viewsData, '#10b981', 'rgba(16,185,129,0.12)');
             this.renderTimeChart('clicksChart', 'clicks', clicksData, '#f59e0b', 'rgba(245,158,11,0.12)');
+            this._setRange('views', viewsRes.status === 'fulfilled' ? sum(viewsData) : null);
+            this._setRange('clicks', clicksRes.status === 'fulfilled' ? sum(clicksData) : null);
             this.renderLinksChart(linksData);
             this.renderLinksTable(linksData);
         }
@@ -446,30 +728,14 @@ const Analytics = {
         if (!ctx) return;
 
         const theme = this.getThemeColors();
-        if (this.charts[key]) this.charts[key].destroy();
+        if (this.charts[key]) { this.charts[key].destroy(); this.charts[key] = null; }
 
         if (!data.length) {
-            // Previously a bare { data: [0] } with no scales, so Chart.js
-            // auto-scaled the axis to -1..1 and the empty chart displayed
-            // negative tick labels (-0.6, -0.8, -1.0).
-            this.charts[key] = new Chart(ctx, {
-                type: 'line',
-                data: { labels: ['No data'], datasets: [{ label: key, data: [0] }] },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: { legend: { display: false } },
-                    scales: {
-                        x: {
-                            ticks: { color: theme.textColor, font: { family: 'Plus Jakarta Sans', size: 11 } },
-                            grid: { display: false },
-                        },
-                        y: { display: false, beginAtZero: true, max: 1 },
-                    },
-                },
-            });
+            const what = { views: 'opens', clicks: 'clicks', bounces: 'bounces', replies: 'replies' }[key] || key;
+            this._emptyChart(canvasId, `No ${what} in the selected date range.`);
             return;
         }
+        this._clearEmptyChart(canvasId);
 
         // ListMonk buckets hourly for ranges under a week and daily
         // otherwise. Day labels alone turned an hourly series into a run of
@@ -552,30 +818,13 @@ const Analytics = {
         if (!ctx) return;
 
         const theme = this.getThemeColors();
-        if (this.charts.links) this.charts.links.destroy();
+        if (this.charts.links) { this.charts.links.destroy(); this.charts.links = null; }
 
         if (!data.length) {
-            // Same negative-axis issue as renderTimeChart: with no scales the
-            // empty bar chart scaled to 0..1 and drew meaningless gridlines.
-            this.charts.links = new Chart(ctx, {
-                type: 'bar',
-                data: { labels: ['No data'], datasets: [{ label: 'Clicks', data: [0] }] },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: { legend: { display: false } },
-                    indexAxis: 'y',
-                    scales: {
-                        x: { display: false, beginAtZero: true, max: 1 },
-                        y: {
-                            ticks: { color: theme.textColor, font: { family: 'Plus Jakarta Sans', size: 11 } },
-                            grid: { display: false },
-                        },
-                    },
-                },
-            });
+            this._emptyChart('linksChart', 'No link clicks in the selected date range.');
             return;
         }
+        this._clearEmptyChart('linksChart');
 
         // Top 10 links
         const top = data.slice(0, 10);

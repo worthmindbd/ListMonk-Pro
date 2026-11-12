@@ -381,12 +381,21 @@ const Deliverability = {
 
         switch (check.id) {
             case 'bounce_feedback': {
+                // Lead with what makes the check pass: "0 of 1 mailbox
+                // enabled" under a green tick read as a contradiction when a
+                // provider webhook is what delivers the bounces.
                 const active = Number(raw.bounce_active_mailboxes) || 0;
                 const total = Number(raw.bounce_mailboxes_total) || 0;
-                return [
-                    `${active} of ${total} mailbox${total === 1 ? '' : 'es'} enabled`,
-                    raw.bounce_provider_enabled ? 'Provider webhook on' : 'No provider webhook',
-                ];
+                const provider = !!raw.bounce_provider_enabled;
+                const chips = [];
+                if (provider) chips.push('Bounces arrive via provider webhook');
+                if (active) chips.push(`${active} bounce mailbox${active === 1 ? '' : 'es'} enabled`);
+                if (!provider && !active) {
+                    chips.push(total ? `${total} bounce mailbox${total === 1 ? '' : 'es'}, none enabled` : 'No bounce mailbox or webhook');
+                } else if (total > active) {
+                    chips.push(`${total - active} more mailbox${total - active === 1 ? '' : 'es'} configured but off (not needed)`);
+                }
+                return chips;
             }
             case 'send_cadence': {
                 const perDay = Number(raw.send_cadence_per_day);

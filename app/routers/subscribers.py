@@ -233,6 +233,37 @@ async def blocklist_subscriber(subscriber_id: int):
     return result
 
 
+@router.put("/{subscriber_id}/unblock")
+async def unblock_subscriber(subscriber_id: int):
+    """Lift a blocklisting: set the subscriber back to ``enabled``.
+
+    ListMonk's PUT replaces the whole record, so the stored email, name,
+    attributes and list memberships are echoed back unchanged (omitting
+    ``lists`` would drop every membership). Subscriptions that the blocklisting
+    marked ``unsubscribed`` stay that way: re-subscribing is a separate,
+    deliberate choice made from the Edit form or the list actions.
+    """
+    current = (await listmonk.get_subscriber(subscriber_id)).get("data") or {}
+    if not current:
+        raise HTTPException(status_code=404, detail="Subscriber not found")
+    if current.get("status") != "blocklisted":
+        raise HTTPException(status_code=409, detail="Subscriber is not blocklisted")
+    payload = {
+        "email": current.get("email"),
+        "name": current.get("name") or "",
+        "status": "enabled",
+        "attribs": current.get("attribs") or {},
+        "lists": [
+            lst["id"] for lst in (current.get("lists") or [])
+            if isinstance(lst, dict) and isinstance(lst.get("id"), int)
+        ],
+    }
+    result = await listmonk.update_subscriber(subscriber_id, payload)
+    # The deliberate blocklisting is over; auto-unblock rules no longer apply.
+    blocklist_registry.unmark([subscriber_id])
+    return result
+
+
 @router.delete("/{subscriber_id}")
 async def delete_subscriber(subscriber_id: int):
     result = await listmonk.delete_subscriber(subscriber_id)

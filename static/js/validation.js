@@ -89,23 +89,28 @@ const Validation = {
             return;
         }
 
+        // Scanning the list is the main job of this page, so it comes first;
+        // the one-off address check is a collapsible tool below it.
         App.setContent(`
-            <div class="card" style="margin-bottom:20px">
-                <div class="card-header"><h2 class="card-title">Check an email</h2></div>
-                <p style="font-size:0.85rem;color:var(--text-muted);margin:0 0 12px">
-                    Paste one address or many (one per line, or separated by commas). Nothing is sent:
-                    each address is checked for a valid format, a domain that exists with a mail server,
-                    throwaway providers, shared inboxes like <code>support@</code> and likely typos.
-                </p>
-                <textarea id="valInput" rows="3" aria-label="Email addresses to check"
-                    placeholder="jane@example.com&#10;sales@acme.io"></textarea>
-                <div class="form-actions">
-                    <button class="btn btn-primary" id="valCheckBtn" onclick="Validation.check()">Check</button>
-                </div>
-                <div id="valCheckResults" aria-live="polite"></div>
-            </div>
             <div class="card" style="margin-bottom:20px" id="valScan"></div>
             <div id="valResults"></div>
+            <details class="card val-quick" style="margin-top:20px" ${this._quickOpen ? 'open' : ''} ontoggle="Validation._quickOpen=this.open">
+                <summary class="card-header" style="cursor:pointer;margin-bottom:0"><h2 class="card-title">Check individual addresses</h2>
+                    <span class="cell-sub">Paste addresses to test them without touching ListMonk</span></summary>
+                <div style="margin-top:14px">
+                    <p style="font-size:0.85rem;color:var(--text-muted);margin:0 0 12px">
+                        One address or many (one per line, or separated by commas). Nothing is sent:
+                        each address is checked for a valid format, a domain that exists with a mail server,
+                        throwaway providers, shared inboxes like <code>support@</code> and likely typos.
+                    </p>
+                    <textarea id="valInput" rows="3" aria-label="Email addresses to check"
+                        placeholder="jane@example.com&#10;sales@acme.io"></textarea>
+                    <div class="form-actions">
+                        <button class="btn btn-primary" id="valCheckBtn" onclick="Validation.check()">Check</button>
+                    </div>
+                    <div id="valCheckResults" aria-live="polite"></div>
+                </div>
+            </details>
         `);
         this._paintScan();
         await this._loadResults();

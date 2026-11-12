@@ -31,7 +31,7 @@ const Unsubscribes = {
 
     /** Strip leading date prefix from raw Listmonk campaign name */
     cleanCampaignName(name) {
-        if (!name || name === 'Unknown') return 'No matching campaign';
+        if (!name || name === 'Unknown' || name === 'No matching campaign') return 'Unattributed (no campaign matched)';
         // Strip leading YYYYMMDD or YYYY-MM-DD prefix
         let cleaned = name.replace(/^\d{4}-?\d{2}-?\d{2}\s*/, '').trim();
         return cleaned || name;
@@ -66,8 +66,9 @@ const Unsubscribes = {
 
             // Deep-linkable detail view: #/unsubscribes?campaign=6
             const rq = App.routeQuery();
-            const wanted = parseInt(rq.get('campaign') || '', 10);
-            if (!this.activeCampaign && Number.isFinite(wanted) && wanted) {
+            const rawWanted = rq.get('campaign') || '';
+            const wanted = rawWanted === 'unknown' ? 'unknown' : parseInt(rawWanted, 10);
+            if (!this.activeCampaign && (wanted === 'unknown' || (Number.isFinite(wanted) && wanted))) {
                 const group = this.campaignGroups.find(g => g.campaign_id === wanted);
                 if (group) this.activeCampaign = group;
             }
@@ -124,18 +125,15 @@ const Unsubscribes = {
                     <h2 class="card-title">IMAP Unsubscribe Monitor</h2>
                     <div class="page-actions">
                         ${imapBadge}
-                        <button class="btn" onclick="Unsubscribes.exportAllCSV()">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                            Export All
-                        </button>
-                        <button class="btn" onclick="Unsubscribes.resetAll()" title="Undo all unsubscribes and restore list memberships">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><polyline points="3 3 3 8 8 8"/></svg>
-                            Undo All
-                        </button>
                         <button class="btn btn-primary" onclick="Unsubscribes.triggerScan()">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
                             Scan Now
                         </button>
+                        ${App.moreMenu([
+                            { label: 'Export all (CSV)', onclick: 'Unsubscribes.exportAllCSV()' },
+                            { label: 'Unsubscribe settings', onclick: "location.hash='#/settings?tab=automation'" },
+                            { label: 'Undo all unsubscribes…', onclick: 'Unsubscribes.resetAll()', danger: true, hidden: !stats.total },
+                        ], 'More unsubscribe actions')}
                     </div>
                 </div>
                 <div class="unsub-monitor-info">
@@ -147,7 +145,18 @@ const Unsubscribes = {
                         <span style="color:var(--text-muted)">Keywords:</span>
                         <code style="font-size:0.8rem">"Remove me"</code>,
                         <code style="font-size:0.8rem">"Unsubscribe me"</code>,
-                        <code style="font-size:0.8rem">"Exclude me"</code>
+                        <code style="font-size:0.8rem">"Stop emailing me"</code>
+                        <details class="inline-details">
+                            <summary>and many more</summary>
+                            <div class="inline-details-body">
+                                <p>Any plain instruction to stop the mail, aimed at the sender, for example
+                                    <code>remove us</code>, <code>please unsubscribe</code>, <code>take us off your list</code>,
+                                    <code>do not contact us</code>, <code>no further contact</code>, or a reply that is just
+                                    <code>STOP</code> / <code>Unsubscribe</code>.</p>
+                                <p>The same requests in German, French, Spanish, Italian, Portuguese, Dutch, Polish, Danish, Norwegian and Swedish are recognised too.</p>
+                                <p>Not acted on: refusals such as "not interested", footer text, quoted earlier mail, and automatic replies (out-of-office, ticket systems).</p>
+                            </div>
+                        </details>
                     </div>
                     <div>
                         <span style="color:var(--text-muted)">Scans:</span>
@@ -157,10 +166,7 @@ const Unsubscribes = {
                     <div class="unsub-action-toggle">
                         <span style="color:var(--text-muted)">Action:</span>
                         <strong>${this.settings.blocklist_enabled ? 'Unsubscribe + Blocklist' : 'Unsubscribe Only'}</strong>
-                        <label class="toggle-switch" style="margin-left:4px" title="Toggle blocklist: when ON, leads are also blocklisted">
-                            <input type="checkbox" ${this.settings.blocklist_enabled ? 'checked' : ''} onchange="Unsubscribes.toggleBlocklist(this.checked)">
-                            <span class="toggle-slider"></span>
-                        </label>
+                        <a href="#/settings?tab=automation" style="margin-left:6px;font-size:0.82rem">Change</a>
                     </div>
                     <div>
                         <span style="color:var(--text-muted)">Sources:</span>
@@ -207,22 +213,25 @@ const Unsubscribes = {
             groups.forEach(g => {
                 const readableDate = this.formatCampaignDate(g.campaign_key);
                 const cleanName = App.escapeHtml(this.cleanCampaignName(g.campaign_name));
-                const isClickable = Number.isInteger(g.campaign_id);
+                // Unattributed records ("unknown") open too; only real campaigns
+                // can be multi-selected (the bulk endpoint takes campaign ids).
+                const isSelectable = Number.isInteger(g.campaign_id);
+                const ref = this._ref(g.campaign_id);
                 const isSelected = App.selection.has('unsub_campaigns', g.campaign_id);
                 html += `
-                    <div class="unsub-campaign-card ${isSelected ? 'selected' : ''}" ${isClickable ? `role="button" tabindex="0" aria-label="Open unsubscribe records for ${cleanName}" onclick="Unsubscribes.openCampaign(${g.campaign_id})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();Unsubscribes.openCampaign(${g.campaign_id})}"` : 'style="cursor:default;opacity:0.75"'}>
+                    <div class="unsub-campaign-card ${isSelected ? 'selected' : ''}" role="button" tabindex="0" aria-label="Open unsubscribe records for ${cleanName}" onclick="Unsubscribes.openCampaign(${ref})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();Unsubscribes.openCampaign(${ref})}">
                         <div class="unsub-campaign-header">
                             <div class="unsub-campaign-info">
-                                ${isClickable ? `<span onclick="event.stopPropagation()" style="margin-right:10px">${App.selection.rowbox('unsub_campaigns', g.campaign_id, `Select ${this.cleanCampaignName(g.campaign_name)}`)}</span>` : ''}
+                                ${isSelectable ? `<span onclick="event.stopPropagation()" style="margin-right:10px">${App.selection.rowbox('unsub_campaigns', g.campaign_id, `Select ${this.cleanCampaignName(g.campaign_name)}`)}</span>` : ''}
                                 <span class="badge badge-primary" style="font-size:0.8rem;padding:4px 10px;margin-right:8px">${App.escapeHtml(readableDate)}</span>
                                 <strong>${cleanName}</strong>
                             </div>
                             <div class="unsub-campaign-meta">
                                 <span class="badge badge-default" style="font-size:0.8rem;text-transform:uppercase">${g.count} unsubscribe${g.count !== 1 ? 's' : ''}</span>
-                                ${isClickable ? `
-                                    <button class="btn btn-sm btn-danger" style="margin-left:8px;padding:2px 8px;font-size:0.72rem"
-                                        onclick="event.stopPropagation();Unsubscribes.removeCampaign(${g.campaign_id})">Remove</button>
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="margin-left:8px;color:var(--text-muted)"><polyline points="9 18 15 12 9 6"/></svg>` : ''}
+                                <span onclick="event.stopPropagation()" style="margin-left:8px">${App.moreMenu([
+                                    { label: 'Remove these records…', onclick: `Unsubscribes.removeCampaign(${ref})`, danger: true },
+                                ], `More actions for ${this.cleanCampaignName(g.campaign_name)}`)}</span>
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="margin-left:8px;color:var(--text-muted)"><polyline points="9 18 15 12 9 6"/></svg>
                             </div>
                         </div>
                     </div>`;
@@ -234,9 +243,15 @@ const Unsubscribes = {
         App.setContent(html);
     },
 
+    /** A group id as a JS literal for inline handlers: campaign ids are
+        numbers, the unattributed group is the string 'unknown'. */
+    _ref(campaignId) {
+        return Number.isInteger(campaignId) ? String(campaignId) : "'unknown'";
+    },
+
     /* ── Detail View — shows records for a single campaign ── */
     async openCampaign(campaignId) {
-        this.activeCampaign = this.campaignGroups.find(g => g.campaign_id === campaignId) || { campaign_id: campaignId, campaign_key: 'unknown', campaign_name: 'No matching campaign', count: 0 };
+        this.activeCampaign = this.campaignGroups.find(g => g.campaign_id === campaignId) || { campaign_id: campaignId, campaign_key: 'unknown', campaign_name: '', count: 0 };
         this.campaignPage = 1;
         this.selectedEmails.clear();
         // The detail view is addressable so Back/reload return to it.
@@ -287,13 +302,13 @@ const Unsubscribes = {
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                                 <span id="unsubBulkDeleteLabel">Delete Selected${hasSelected ? ` (${this.selectedEmails.size})` : ''}</span>
                             </button>
-                            <button class="btn" onclick="Unsubscribes.exportCampaignCSV(${camp.campaign_id})">
+                            <button class="btn" onclick="Unsubscribes.exportCampaignCSV(${this._ref(camp.campaign_id)})">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                                 Export CSV
                             </button>
-                            <button class="btn btn-danger" onclick="Unsubscribes.removeCampaign(${camp.campaign_id})">
-                                Remove List
-                            </button>
+                            ${App.moreMenu([
+                                { label: 'Remove all records of this group…', onclick: `Unsubscribes.removeCampaign(${this._ref(camp.campaign_id)})`, danger: true },
+                            ], 'More actions')}
                         </div>
                     </div>
                 </div>
@@ -444,7 +459,8 @@ const Unsubscribes = {
         that unsubscribed from several campaigns must keep the others. */
     _campaignScope() {
         const cid = this.activeCampaign?.campaign_id;
-        return Number.isInteger(cid) ? `&campaign_id=${cid}` : '';
+        if (Number.isInteger(cid)) return `&campaign_id=${cid}`;
+        return cid === 'unknown' ? '&campaign_id=unknown' : '';
     },
 
     async deleteRecord(email) {
@@ -575,13 +591,15 @@ const Unsubscribes = {
             this.settings.blocklist_enabled = enabled;
             App.toast(`Action set to: ${enabled ? 'Unsubscribe + Blocklist' : 'Unsubscribe Only'}`, 'success');
             // Re-render to update the label
-            this.renderListView();
+            if (App.currentPage === 'unsubscribes' && !this.activeCampaign) this.renderListView();
+            return true;
         } catch {
             // API.request already surfaced the server message — toasting
             // again here showed the failure twice.
             // Revert toggle
             this.settings.blocklist_enabled = !enabled;
-            this.renderListView();
+            if (App.currentPage === 'unsubscribes' && !this.activeCampaign) this.renderListView();
+            return false;
         }
     },
 

@@ -31,6 +31,8 @@ const Dashboard = {
                 API.get('/api/campaigns?per_page=10&order_by=created_at&order=DESC'),
                 API.get('/api/subscribers?per_page=1'),
                 API.get('/api/campaigns/summary'),
+                // Silent: a failed daily count only hides the "today" line.
+                API.get('/api/sends/daily?days=1', true),
             ];
 
             if (isCold) {
@@ -38,10 +40,15 @@ const Dashboard = {
                 requests.push(API.get('/api/replies?per_page=5'));
             }
 
+            // "Needs attention" strip: fetched alongside, never blocks the page.
+            const attentionPromise = this._attention(isCold);
+
             const results = await Promise.allSettled(requests);
-            const [listsRes, campaignsRes, subscribersRes, summaryRes] = results;
-            const replyStatsRes = isCold ? results[4] : null;
-            const recentRepliesRes = isCold ? results[5] : null;
+            const [listsRes, campaignsRes, subscribersRes, summaryRes, sendsRes] = results;
+            const replyStatsRes = isCold ? results[5] : null;
+            const recentRepliesRes = isCold ? results[6] : null;
+            const sentToday = sendsRes.status === 'fulfilled' ? (sendsRes.value?.sent_today ?? null) : null;
+            const sentTodayText = sentToday === null ? '' : `${App.formatNumber(sentToday)} sent today`;
 
             this.summary = summaryRes.status === 'fulfilled' ? (summaryRes.value || null) : null;
             const totalLists = listsRes.status === 'fulfilled' ? (listsRes.value?.data?.total || 0) : 0;
@@ -75,27 +82,28 @@ const Dashboard = {
 
                 html += `
                     <!-- Cold Email KPI Cards -->
-                    <div class="stats-grid">
-                        <div class="stat-card accent">
+                    <div id="dashAttention"></div>
+                    <div class="stats-grid dash-kpis">
+                        <a class="stat-card stat-card-link accent" href="#/subscribers">
                             <div class="stat-label">Total Leads</div>
                             <div class="stat-value">${App.formatNumber(totalSubscribers)}</div>
-                            <div style="font-size:0.82rem;color:var(--text-muted)">Across ${totalLists} lead lists</div>
-                        </div>
-                        <div class="stat-card info">
+                            <div class="stat-sub">Across ${totalLists} lead list${totalLists === 1 ? '' : 's'}</div>
+                        </a>
+                        <a class="stat-card stat-card-link info" href="#/analytics">
                             <div class="stat-label">Outbound Dispatched</div>
                             <div class="stat-value">${App.formatNumber(totalSent)}</div>
-                            <div style="font-size:0.82rem;color:var(--text-muted)">${totalCampaigns} total campaigns</div>
-                        </div>
-                        <div class="stat-card success">
+                            <div class="stat-sub">${sentTodayText ? `<strong style="color:var(--primary-soft)">${sentTodayText}</strong> · ` : ''}${totalCampaigns} campaign${totalCampaigns === 1 ? '' : 's'}</div>
+                        </a>
+                        <a class="stat-card stat-card-link success" href="#/replies">
                             <div class="stat-label">Prospect Replies</div>
                             <div class="stat-value" style="color:var(--emerald)">${App.formatNumber(totalReplies)}</div>
-                            <div style="font-size:0.82rem;color:var(--text-muted)"><strong style="color:var(--emerald)">${replyRate}%</strong> reply rate</div>
-                        </div>
-                        <div class="stat-card warning">
+                            <div class="stat-sub"><strong style="color:var(--emerald)">${replyRate}%</strong> reply rate</div>
+                        </a>
+                        <a class="stat-card stat-card-link warning" href="#/replies?status=lead">
                             <div class="stat-label"><span class="badge-dot badge-dot-positive"></span> Hot Leads / Interested</div>
                             <div class="stat-value" style="color:var(--amber)">${App.formatNumber(positiveLeads)}</div>
-                            <div style="font-size:0.82rem;color:var(--text-muted)">Positive meeting & call intent</div>
-                        </div>
+                            <div class="stat-sub">Positive meeting &amp; call intent →</div>
+                        </a>
                     </div>
 
                     <!-- Charts Grid -->
@@ -195,6 +203,8 @@ const Dashboard = {
                 // Render cold charts
                 this.renderCampaignChart(campaigns);
                 this.renderColdSentimentChart(repStats);
+                this._paintAttention(seq, attentionPromise);
+                this._scheduleRefresh(campaigns, activeCampaigns);
 
             } else {                // Newsletter Mode
                 // Drop the retained cold-email stats so a later theme-toggle
@@ -202,23 +212,25 @@ const Dashboard = {
                 // mode.
                 this.lastRepStats = null;
                 html += `
-                    <div class="stats-grid">
-                        <div class="stat-card accent">
+                    <div id="dashAttention"></div>
+                    <div class="stats-grid dash-kpis">
+                        <a class="stat-card stat-card-link accent" href="#/subscribers">
                             <div class="stat-label">Total Subscribers</div>
                             <div class="stat-value">${App.formatNumber(totalSubscribers)}</div>
-                        </div>
-                        <div class="stat-card success">
+                        </a>
+                        <a class="stat-card stat-card-link success" href="#/lists">
                             <div class="stat-label">Total Lists</div>
                             <div class="stat-value">${App.formatNumber(totalLists)}</div>
-                        </div>
-                        <div class="stat-card warning">
+                        </a>
+                        <a class="stat-card stat-card-link warning" href="#/campaigns">
                             <div class="stat-label">Total Campaigns</div>
                             <div class="stat-value">${App.formatNumber(totalCampaigns)}</div>
-                        </div>
-                        <div class="stat-card info">
+                        </a>
+                        <a class="stat-card stat-card-link info" href="#/campaigns?status=running">
                             <div class="stat-label">Active Campaigns</div>
                             <div class="stat-value">${App.formatNumber(activeCampaigns ?? campaigns.filter(c => c.status === 'running').length)}</div>
-                        </div>
+                            ${sentTodayText ? `<div class="stat-sub"><strong style="color:var(--primary-soft)">${sentTodayText}</strong></div>` : ''}
+                        </a>
                     </div>
 
                     <div class="charts-grid">
@@ -272,6 +284,8 @@ const Dashboard = {
 
                 this.renderCampaignChart(campaigns);
                 this.renderStatusChart(campaigns);
+                this._paintAttention(seq, attentionPromise);
+                this._scheduleRefresh(campaigns, activeCampaigns);
             }
 
         } catch (err) {
@@ -280,9 +294,75 @@ const Dashboard = {
         }
     },
 
+    /** Things that need a look, gathered from what other pages already
+        expose: unread replies, campaigns held by the send window or the
+        warm-up quota, a cleanup run held for review. Each request is best
+        effort; nothing here may fail the dashboard. */
+    async _attention(isCold) {
+        const quiet = (p) => p.then(v => v).catch(() => null);
+        const [unread, sched, warm, cleanup, running] = await Promise.all([
+            isCold ? quiet(API.get('/api/replies?status=unread&per_page=1', true)) : null,
+            quiet(API.get('/api/scheduler', true)),
+            quiet(API.get('/api/warmup', true)),
+            quiet(API.get('/api/email-validation/cleanup', true)),
+            quiet(API.get('/api/campaigns?status=running&per_page=1', true)),
+        ]);
+        const items = [];
+        const unreadN = unread?.total || 0;
+        if (unreadN) items.push({ tone: 'success', href: '#/replies?status=unread', text: `${App.formatNumber(unreadN)} unread repl${unreadN === 1 ? 'y' : 'ies'}` });
+        const held = sched?.enabled ? (sched.auto_paused_campaigns || []).length : 0;
+        if (warm?.enabled && warm.remaining <= 0) {
+            items.push({ tone: 'warning', href: '#/settings?tab=warmup', text: `Warm-up quota reached (${App.formatNumber(warm.sent_today)} / ${App.formatNumber(warm.quota)}): sending resumes tomorrow` });
+        } else if (held) {
+            items.push({ tone: 'warning', href: '#/settings?tab=scheduler', text: `${held} campaign${held === 1 ? '' : 's'} paused until the send window opens` });
+        }
+        if (cleanup?.last_run?.status === 'held') {
+            items.push({ tone: 'danger', href: '#/validation', text: 'Email cleanup held: too many addresses looked dead, review before anything is blocklisted' });
+        } else if (cleanup?.last_run?.status === 'failed') {
+            items.push({ tone: 'danger', href: '#/settings?tab=cleanup', text: 'The last email cleanup failed' });
+        }
+        const runningN = running?.data?.total || 0;
+        if (runningN) items.push({ tone: 'info', href: '#/campaigns?status=running', text: `${runningN} campaign${runningN === 1 ? '' : 's'} sending now` });
+        return items;
+    },
+
+    async _paintAttention(seq, promise) {
+        let items = [];
+        try { items = await promise; } catch { return; }
+        if (App.stale(seq)) return;
+        const el = document.getElementById('dashAttention');
+        if (!el || !items.length) return;
+        el.innerHTML = `<div class="attention-strip" role="status" aria-label="Needs attention">
+            ${items.map(i => `<a class="attention-item tone-${i.tone}" href="${i.href}"><span class="attention-dot"></span>${App.escapeHtml(i.text)}<span aria-hidden="true">→</span></a>`).join('')}
+        </div>`;
+    },
+
+    /** Keep the numbers live while a campaign sends. */
+    _scheduleRefresh(campaigns, activeCampaigns) {
+        const running = (activeCampaigns ?? 0) > 0 || (campaigns || []).some(c => c.status === 'running');
+        if (running) App.autoRefresh('dashboard', () => { App.bumpSeq(); this.render(); }, 30000);
+        else App.stopAutoRefresh();
+    },
+
+    /** Replace a chart with an explanation when it has nothing to show. */
+    _emptyChart(canvasId, message, href, linkText) {
+        const canvas = document.getElementById(canvasId);
+        const box = canvas?.parentElement;
+        if (!box) return;
+        box.classList.add('has-chart-empty');
+        box.querySelector('.chart-empty')?.remove();
+        box.insertAdjacentHTML('beforeend', App.emptyChart(message, href, linkText));
+    },
+
     renderCampaignChart(campaigns) {
         const ctx = document.getElementById('campaignChart');
         if (!ctx) return;
+        const anySent = (campaigns || this.campaignsData || []).some(c => (c.sent || 0) > 0);
+        if (!anySent) {
+            if (this.charts.campaign) { this.charts.campaign.destroy(); this.charts.campaign = null; }
+            this._emptyChart('campaignChart', 'Nothing sent yet. Bars appear here once a campaign starts sending.', '#/campaigns', 'Go to campaigns');
+            return;
+        }
 
         const theme = this.getThemeColors();
         const recent = (campaigns || this.campaignsData).slice(0, 8).reverse();
@@ -379,9 +459,14 @@ const Dashboard = {
             scheduled: '#8b5cf6',
         };
 
-        const labels = Object.keys(statusCounts);
-        const data = Object.values(statusCounts);
+        const labels = Object.keys(statusCounts).filter(k => statusCounts[k] > 0);
+        const data = labels.map(k => statusCounts[k]);
         const bgColors = labels.map(s => colorMap[s] || '#64748b');
+        if (!data.length) {
+            if (this.charts.status) { this.charts.status.destroy(); this.charts.status = null; }
+            this._emptyChart('statusChart', 'No campaigns yet.', '#/campaigns', 'Create a campaign');
+            return;
+        }
 
         if (this.charts.status) this.charts.status.destroy();
         this.charts.status = new Chart(ctx, {
@@ -450,16 +535,24 @@ const Dashboard = {
 
         const bgColors = ['#10b981', '#3b82f6', '#64748b', '#f43f5e'];
 
+        // No replies: an explanation instead of a grey placeholder ring
+        // (which also drew as a broken dark arc in the light theme).
+        if (total === 0) {
+            if (this.charts.status) { this.charts.status.destroy(); this.charts.status = null; }
+            this._emptyChart('statusChart', 'No prospect replies yet. The mailbox is scanned on a schedule; you can also scan it now.', '#/replies', 'Open the reply inbox');
+            return;
+        }
+
         if (this.charts.status) this.charts.status.destroy();
         this.charts.status = new Chart(ctx, {
             type: 'doughnut',
             data: {
-                labels: total === 0 ? ['Awaiting Replies'] : labels,
+                labels,
                 datasets: [{
-                    data: total === 0 ? [1] : data,
-                    backgroundColor: total === 0 ? ['#334155'] : bgColors,
+                    data,
+                    backgroundColor: bgColors,
                     // No separator when the ring is a single slice (see above).
-                    borderWidth: (total === 0 ? [1] : data).filter(v => Number(v) > 0).length > 1 ? 2 : 0,
+                    borderWidth: data.filter(v => Number(v) > 0).length > 1 ? 2 : 0,
                     borderColor: theme.isDark ? '#0f172a' : '#ffffff',
                     hoverOffset: 6,
                 }],

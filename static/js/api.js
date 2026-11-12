@@ -25,6 +25,23 @@ const API = {
         navigate and toast independently. */
     _redirecting: false,
 
+    /** A server error body as one readable line. FastAPI's validation
+        errors (422) send `detail` as a list of {loc, msg} objects, which used
+        to be toasted as "[object Object]". */
+    _errorText(detail) {
+        if (typeof detail === 'string') return detail;
+        if (Array.isArray(detail)) {
+            return detail.map(d => {
+                if (typeof d === 'string') return d;
+                if (!d || typeof d !== 'object') return '';
+                const field = Array.isArray(d.loc) ? d.loc.filter(p => p !== 'body' && p !== 'query' && p !== 'path').join('.') : '';
+                return field && d.msg ? `${field}: ${d.msg}` : (d.msg || '');
+            }).filter(Boolean).join('; ');
+        }
+        if (detail && typeof detail === 'object') return detail.msg || detail.message || '';
+        return '';
+    },
+
     async request(method, path, body = null, isFormData = false, silent = false, timeoutMs = null) {
         const controller = new AbortController();
         const timeout = setTimeout(
@@ -61,7 +78,7 @@ const API = {
                 let detail = `HTTP ${resp.status}`;
                 try {
                     const err = await resp.json();
-                    detail = err.detail || err.message || detail;
+                    detail = this._errorText(err.detail ?? err.message) || detail;
                 } catch {}
                 // Surface the real message once, here.
                 if (!silent) App.toast(detail, 'error');

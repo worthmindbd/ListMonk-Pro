@@ -52,6 +52,10 @@ def _isolate_state_files(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(bounce_ingest, "PROCESSED_FILE", state / "bounce_processed.json")
     monkeypatch.setattr(campaign_scheduler, "SCHEDULE_FILE", state / "schedule.json")
     monkeypatch.setattr(warmup, "WARMUP_FILE", state / "warmup.json")
+    from app.services import send_stats
+    monkeypatch.setattr(send_stats, "SEND_STATS_FILE", state / "send_stats.json")
+    from app.services import auto_unblock_state
+    monkeypatch.setattr(auto_unblock_state, "STATE_FILE", state / "auto_unblock.json")
     monkeypatch.setattr(app_settings, "APP_SETTINGS_FILE", state / "app_settings.json")
     monkeypatch.setattr(email_cleanup, "CLEANUP_FILE", state / "email_cleanup.json")
     monkeypatch.setattr(email_cleanup, "RESULTS_FILE", state / "email_validation_results.json")
@@ -90,6 +94,10 @@ def _reset_module_caches():
         from app.services import campaign_scheduler, warmup
         campaign_scheduler.reset_warmup_nudge()
         warmup._WARMUP_LOCK = asyncio.Lock()
+        from app.services import send_stats
+        send_stats._STATS_LOCK = asyncio.Lock()
+        from app.services import auto_unblock_state
+        auto_unblock_state._STATE_LOCK = asyncio.Lock()
         # Email validation: the per-domain DNS cache, in-flight lookups and
         # semaphore, the single job slot and the state-file locks (rule 11).
         from app.services import email_cleanup, email_validation

@@ -637,6 +637,14 @@ const Converter = {
                         already unsubscribed from a selected list is set back to the status chosen above.
                     </p>
                 </div>
+                <div class="form-group">
+                    <label class="checkbox-label" style="display:inline-flex"><input type="checkbox" id="importValidate" checked><span>Check the addresses first and leave out the invalid ones</span></label>
+                    <p style="font-size:0.78rem;color:var(--text-muted);margin-top:6px">
+                        Bad format, a domain that does not exist or has no mail server: those rows are skipped and listed after the import.
+                        Risky addresses (role accounts, throwaway providers) and ones whose DNS could not be checked are imported. Adds a few seconds for large files.
+                    </p>
+                </div>
+                <div id="importValidationReport"></div>
                 <button class="btn btn-success" id="startImportBtn" onclick="Converter.executeImport()" disabled>Select a list to continue</button>
             </div>
         `;
@@ -689,19 +697,39 @@ const Converter = {
         formData.append('subscription_status', subStatus);
         formData.append('overwrite_userinfo', String(owUser));
         formData.append('overwrite_subscription_status', String(owStatus));
+        const validate = document.getElementById('importValidate')?.checked ?? false;
+        formData.append('validate_emails', String(validate));
 
         this._importing = true;
+        const btn = document.getElementById('startImportBtn');
+        if (btn) { btn.disabled = true; btn.textContent = validate ? 'Checking addresses…' : 'Importing…'; }
         try {
             const result = await API.upload('/api/converter/convert-and-import', formData);
             const stats = result?.conversion_stats || {};
-            App.toast(`Import started! ${this._statsSummary(stats)}.`, 'success');
+            const v = result?.validation;
+            App.toast(`Import started! ${this._statsSummary(stats)}${v ? ` · ${v.removed} invalid address${v.removed === 1 ? '' : 'es'} left out` : ''}.`, 'success');
+            this._validationReport = v || null;
 
             // Show import status
             this.pollImportStatus();
         } catch {
             // API.request already surfaced the server message.
             this._importing = false;
+            this.updateImportButton();
         }
+    },
+
+    /** What the pre-import check left out, shown above the progress bar. */
+    _validationHtml() {
+        const v = this._validationReport;
+        if (!v) return '';
+        const sample = (v.removed_sample || []).map(r =>
+            `<li><code>${App.escapeHtml(r.email)}</code> <span style="color:var(--text-muted)">${App.escapeHtml(r.reason || '')}</span></li>`).join('');
+        return `<div class="notice ${v.removed ? 'notice-warning' : ''}" style="margin-bottom:12px;display:block">
+            <strong>Address check:</strong> ${App.formatNumber(v.kept)} of ${App.formatNumber(v.checked)} rows imported,
+            ${App.formatNumber(v.removed)} invalid left out${v.risky ? `, ${App.formatNumber(v.risky)} risky imported` : ''}${v.unknown ? `, ${App.formatNumber(v.unknown)} could not be checked (imported)` : ''}.
+            ${sample ? `<details style="margin-top:6px"><summary style="cursor:pointer">Show the left-out addresses${v.removed > (v.removed_sample || []).length ? ` (first ${(v.removed_sample || []).length})` : ''}</summary><ul style="margin:6px 0 0;padding-left:18px;font-size:0.82rem">${sample}</ul></details>` : ''}
+        </div>`;
     },
 
     async pollImportStatus() {
@@ -716,6 +744,7 @@ const Converter = {
         dialog.innerHTML = `
             <div style="border-top:1px solid var(--glass-border);padding-top:16px" role="status" aria-live="polite">
                 <h3>Import Progress</h3>
+                ${this._validationHtml()}
                 <div class="progress-bar"><div class="progress-fill" id="importProgress" style="width:0%"></div></div>
                 <p id="importStatusText" style="font-size:0.85rem;color:var(--text-secondary);margin-top:8px">Starting import…</p>
                 <pre id="importLogs" style="max-height:200px;overflow-y:auto;font-size:0.8rem;color:var(--text-muted);margin-top:12px;background:var(--bg-input);padding:12px;border-radius:var(--radius-md);border:1px solid var(--glass-border)"></pre>

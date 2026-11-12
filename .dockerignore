@@ -9,6 +9,8 @@ __pycache__/
 .agent/
 schedule.json
 warmup.json
+send_stats.json
+auto_unblock.json
 email_cleanup.json*
 email_validation_results.json*
 session_secret.key

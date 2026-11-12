@@ -4,8 +4,11 @@ Provides API endpoints for prospect reply tracking, sentiment filtering,
 reply feed pagination, and manual IMAP scans.
 """
 
+import email.utils
 import logging
 import time
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from fastapi import APIRouter, HTTPException, Query, Request
 from app.services.reply_log import (
     load_log, save_log, update_reply_status, update_reply_statuses, delete_replies,
@@ -219,6 +222,64 @@ async def get_reply_stats(campaign_id: int = Query(0, description="Optional camp
     }
     _stats_cache[cache_key] = (now, result)
     return result
+
+
+def _reply_day(raw, tz) -> "str | None":
+    """Calendar day (ISO) of a stored reply's Date header in ``tz``."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        dt = email.utils.parsedate_to_datetime(raw)
+    except (TypeError, ValueError, IndexError):
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(tz).date().isoformat()
+
+
+@router.get("/timeline")
+async def get_reply_timeline(
+    campaign_id: int = Query(0, ge=0),
+    from_date: str = Query("", max_length=10),
+    to_date: str = Query("", max_length=10),
+    tz: str = Query("UTC", max_length=64),
+):
+    """Human replies per calendar day (oldest first), for the Analytics
+    "Replies over time" chart. Same visible set as the stats (connected
+    mailbox, campaign-attributed, never automated replies); ``tz`` picks the
+    day boundary, ``from_date`` / ``to_date`` (YYYY-MM-DD) bound it inclusively.
+    """
+    try:
+        zone = ZoneInfo(tz)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Unknown timezone")
+    bounds = []
+    for name, value in (("from_date", from_date), ("to_date", to_date)):
+        if value:
+            try:
+                bounds.append(date.fromisoformat(value).isoformat())
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"{name} must be YYYY-MM-DD")
+        else:
+            bounds.append("")
+    lo, hi = bounds
+    mailbox = settings.imap_user
+    counts: dict[str, int] = {}
+    for r in load_log():
+        if r.get("mailbox") != mailbox or not r.get("campaign_id"):
+            continue
+        if r.get("sentiment") in ("bounce", "auto_reply"):
+            continue
+        if campaign_id and str(r.get("campaign_id")) != str(campaign_id):
+            continue
+        day = _reply_day(r.get("date"), zone)
+        if not day or (lo and day < lo) or (hi and day > hi):
+            continue
+        counts[day] = counts.get(day, 0) + 1
+    return {"data": [{"date": d, "count": n} for d, n in sorted(counts.items())]}
 
 
 @router.get("")

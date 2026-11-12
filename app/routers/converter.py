@@ -3,7 +3,9 @@ from fastapi.responses import StreamingResponse
 from typing import Optional, Tuple
 from app.services.csv_converter import detect_columns, convert_csv, preview_conversion
 from app.services.listmonk_client import listmonk
+from app.services import email_validation
 import asyncio
+import csv
 import json
 import io
 
@@ -251,8 +253,14 @@ async def convert_and_import(
     overwrite: Optional[bool] = Form(None),
     overwrite_userinfo: Optional[bool] = Form(None),
     overwrite_subscription_status: Optional[bool] = Form(None),
+    validate_emails: Optional[bool] = Form(False),
 ):
     """Convert CSV to ListMonk format and immediately import to ListMonk.
+
+    With ``validate_emails`` every address is checked first (format, domain,
+    mail server) and the rows with an ``invalid`` verdict are left out of the
+    import. Only definitive answers drop a row: risky addresses and DNS
+    failures (``unknown``) are imported and merely counted.
 
     ``subscription_status`` controls how new subscriptions are created on
     double-opt-in lists (``confirmed`` by default so an imported lead list is
@@ -285,14 +293,74 @@ async def convert_and_import(
     if not import_params["lists"]:
         raise HTTPException(status_code=400, detail="Select at least one list to import into")
 
+    csv_content = result["csv_content"]
+    validation = None
+    if validate_emails:
+        csv_content, validation = await _drop_invalid_rows(csv_content)
+        if not validation["kept"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Nothing to import: all {validation['removed']} address(es) failed validation.",
+            )
+
     # Import to ListMonk
     import_result = await listmonk.import_subscribers(
-        result["csv_content"].encode("utf-8"),
+        csv_content.encode("utf-8"),
         "listmonk_import.csv",
         import_params,
     )
     return {
         "conversion_stats": stats,
+        "validation": validation,
         "import_params": import_params,
         "import_result": import_result,
     }
+
+
+# Addresses listed back to the UI when rows are dropped (the rest are counted).
+VALIDATION_SAMPLE = 50
+
+
+async def _drop_invalid_rows(csv_content: str) -> tuple[str, dict]:
+    """Validate the converted CSV's addresses and remove the invalid rows.
+
+    Returns the filtered CSV and ``{checked, kept, removed, risky, unknown,
+    removed_sample: [{email, reason}]}``. The DNS-dependent checks go through
+    the shared validator (per-domain cache, bounded concurrency).
+    """
+    rows = list(csv.reader(io.StringIO(csv_content)))
+    if not rows:
+        return csv_content, {"checked": 0, "kept": 0, "removed": 0, "risky": 0, "unknown": 0, "removed_sample": []}
+    header, body = rows[0], rows[1:]
+    try:
+        col = [h.strip().lower() for h in header].index("email")
+    except ValueError:
+        col = 0
+    emails = sorted({r[col] for r in body if len(r) > col and r[col]})
+    verdicts = {v["email"]: v for v in await email_validation.validate_many(emails)}
+    kept, removed = [], []
+    risky = unknown = 0
+    for r in body:
+        v = verdicts.get(email_validation.normalise(r[col]) if len(r) > col else "")
+        verdict = v["verdict"] if v else "valid"
+        if verdict == "invalid":
+            removed.append({"email": r[col], "reason": v.get("detail") or ", ".join(v.get("reasons") or [])})
+            continue
+        if verdict == "risky":
+            risky += 1
+        elif verdict == "unknown":
+            unknown += 1
+        kept.append(r)
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(header)
+    writer.writerows(kept)
+    return out.getvalue(), {
+        "checked": len(body),
+        "kept": len(kept),
+        "removed": len(removed),
+        "risky": risky,
+        "unknown": unknown,
+        "removed_sample": removed[:VALIDATION_SAMPLE],
+    }
+

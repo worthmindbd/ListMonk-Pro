@@ -405,6 +405,32 @@ async def preview_campaign(campaign_id: int):
     )
 
 
+_CONTENT_TYPES = {"richtext", "html", "markdown", "plain", "visual"}
+
+
+@router.post("/{campaign_id}/preview")
+async def preview_campaign_draft(campaign_id: int, data: dict):
+    """Render a campaign with unsaved body / template edits (the editor's
+    Preview), so a change can be checked before it is saved."""
+    body = data.get("body")
+    content_type = data.get("content_type") or "richtext"
+    template_id = data.get("template_id")
+    if not isinstance(body, str):
+        raise HTTPException(status_code=400, detail="body must be a string")
+    if content_type not in _CONTENT_TYPES:
+        raise HTTPException(status_code=400, detail="Unknown content_type")
+    if template_id is not None and (isinstance(template_id, bool) or not isinstance(template_id, int)):
+        raise HTTPException(status_code=400, detail="template_id must be an integer")
+    resp = await listmonk.preview_campaign_draft(campaign_id, body, content_type, template_id)
+    return HTMLResponse(
+        content=resp.text,
+        headers={
+            "Content-Security-Policy": "sandbox",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @router.post("")
 async def create_campaign(data: dict):
     if not isinstance(data, dict):

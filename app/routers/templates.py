@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Query, HTTPException
+from fastapi.responses import HTMLResponse
 from app.services.listmonk_client import listmonk
 from app.services.bulk_ops import parse_ids, run_bulk
 
@@ -10,9 +11,52 @@ async def get_templates():
     return await listmonk.get_templates()
 
 
+_SANDBOX_HEADERS = {
+    "Content-Security-Policy": "sandbox",
+    "X-Content-Type-Options": "nosniff",
+}
+_TEMPLATE_TYPES = {"campaign", "campaign_visual", "tx"}
+# A template is a page of HTML; anything far beyond this is not one.
+MAX_PREVIEW_BODY = 2_000_000
+
+
+# Static route before /{template_id} (Starlette would int-parse "preview").
+@router.post("/preview")
+async def preview_template_body(data: dict):
+    """Render an unsaved template body with ListMonk's sample data, so the
+    editor can show a live preview while typing."""
+    body = data.get("body")
+    template_type = data.get("type") or "campaign"
+    if not isinstance(body, str):
+        raise HTTPException(status_code=400, detail="body must be a string")
+    if len(body) > MAX_PREVIEW_BODY:
+        raise HTTPException(status_code=413, detail="Template body is too large to preview")
+    if template_type not in _TEMPLATE_TYPES:
+        raise HTTPException(status_code=400, detail="Unknown template type")
+    resp = await listmonk.preview_template_body(body, template_type)
+    return HTMLResponse(content=resp.text, headers=_SANDBOX_HEADERS)
+
+
 @router.get("/{template_id}")
 async def get_template(template_id: int):
     return await listmonk.get_template(template_id)
+
+
+@router.get("/{template_id}/preview")
+async def preview_template(template_id: int):
+    """Rendered template HTML (ListMonk fills in a sample campaign/subscriber).
+
+    The raw body is full of ``{{ … }}`` template actions, so showing it as-is
+    is not a preview. Untrusted HTML: sandboxed like the campaign preview.
+    """
+    resp = await listmonk.preview_template(template_id)
+    return HTMLResponse(
+        content=resp.text,
+        headers={
+            "Content-Security-Policy": "sandbox",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.post("")

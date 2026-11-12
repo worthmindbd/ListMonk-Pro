@@ -27,7 +27,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from app.config import settings
-from app.services import warmup
+from app.services import send_stats, warmup
 from app.services.listmonk_client import ListMonkClient
 
 logger = logging.getLogger("campaign_scheduler")
@@ -423,10 +423,34 @@ async def _pause_for_quota(client: ListMonkClient, campaign_ids: list[int]) -> N
             logger.info(f"Auto-PAUSED campaign #{cid} (daily warm-up quota reached)")
 
 
+def _send_stats_timezone() -> str:
+    """The day boundary for the daily send statistics.
+
+    The warm-up timezone while warm-up is on (so "sent today" matches the
+    warm-up meter), otherwise the send-window timezone.
+    """
+    warm = warmup.load_state()
+    if warm["enabled"]:
+        return warm["timezone"]
+    return load_schedule().get("timezone") or send_stats.DEFAULT_TIMEZONE
+
+
 async def enforce_warmup(client: ListMonkClient) -> float:
-    """One iteration of the warm-up loop; returns the seconds to wait next."""
-    snap = await warmup.observe(client)
+    """One iteration of the warm-up loop; returns the seconds to wait next.
+
+    The same poll also feeds the always-on daily send statistics, so it runs
+    whether warm-up is on or not; a statistics failure never blocks quota
+    enforcement.
+    """
+    stats = await warmup.fetch_running(client)
+    try:
+        await send_stats.observe(client, stats, _send_stats_timezone())
+    except Exception as e:
+        logger.warning(f"Send statistics update failed: {e}")
+    snap = await warmup.observe(client, stats=stats)
     if not snap["enabled"]:
+        # Counting is delta-based, so the statistics lose nothing at the
+        # slower pace; only quota enforcement needs the 1 s poll.
         return WARMUP_IDLE_POLL
     if snap["rolled"]:
         # A new day began: campaigns held back by yesterday's quota may go on

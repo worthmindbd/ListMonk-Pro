@@ -453,22 +453,23 @@ def _nonneg(value) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
-def _apply_counts(state: dict, stats: list[dict], finals: dict) -> int:
-    """Add the sends since the last poll to the counters; returns the delta.
+def count_deltas(seen: dict, stats: list[dict], finals: dict) -> dict[str, int]:
+    """Advance the cumulative ``seen`` counters; returns the sends per campaign.
 
     ``stats`` are the currently running campaigns; ``finals`` the last known
     counts of campaigns that left the running list (``None`` = deleted).
     A campaign never seen before starts from zero: it either is brand new, or
-    its earlier sends happened while warm-up was off and were baselined away.
+    its earlier sends happened before counting started and were baselined away.
+    Shared by the warm-up quota and the always-on daily send statistics
+    (``send_stats``), so both count a send exactly the same way.
     """
-    seen = state["seen"]
-    counted = 0
+    deltas: dict[str, int] = {}
     for stat in stats:
         key = str(stat["id"])
         sent = _nonneg(stat.get("sent"))
         prev = seen.get(key, 0)
         if sent > prev:
-            counted += sent - prev
+            deltas[key] = deltas.get(key, 0) + sent - prev
             seen[key] = sent
         else:
             seen.setdefault(key, prev)
@@ -479,7 +480,8 @@ def _apply_counts(state: dict, stats: list[dict], finals: dict) -> int:
             continue
         sent, status = final
         prev = seen.get(key, 0)
-        counted += max(0, sent - prev)
+        if sent > prev:
+            deltas[key] = deltas.get(key, 0) + sent - prev
         if status in ("finished", "cancelled"):
             seen.pop(key, None)
         else:
@@ -488,7 +490,17 @@ def _apply_counts(state: dict, stats: list[dict], finals: dict) -> int:
         # Oldest campaigns have the lowest ids; they are the ones finished.
         for key in sorted(seen, key=int)[: len(seen) - SEEN_LIMIT]:
             del seen[key]
-    return counted
+    return deltas
+
+
+def _apply_counts(state: dict, stats: list[dict], finals: dict) -> int:
+    """Add the sends since the last poll to the counters; returns the delta."""
+    return sum(count_deltas(state["seen"], stats, finals).values())
+
+
+async def fetch_running(client) -> list[dict]:
+    """``/api/campaigns/running/stats`` as a list of ``{id, sent, …}`` dicts."""
+    return await _fetch_running(client)
 
 
 async def _fetch_running(client) -> list[dict]:
@@ -524,18 +536,22 @@ async def _fetch_final(client, campaign_id: int):
     return _nonneg(data.get("sent")), str(data.get("status") or "")
 
 
-async def observe(client, now: Optional[datetime] = None) -> dict:
+async def observe(client, now: Optional[datetime] = None,
+                  stats: Optional[list[dict]] = None) -> dict:
     """One poll: roll the day if needed and count what was sent since the last.
 
     Network calls happen outside the lock; the read-modify-write of
     warmup.json happens inside it, against a fresh load, so a settings change
     made while the request was in flight is never overwritten with stale state.
+    ``stats`` lets the caller pass a running-stats snapshot it already fetched
+    (the loop shares one poll with ``send_stats``).
     """
     first = load_state()
     if not first["enabled"]:
         return {"enabled": False, "rolled": False, "running": [], "remaining": 0}
 
-    stats = await _fetch_running(client)
+    if stats is None:
+        stats = await _fetch_running(client)
     running_ids = [s["id"] for s in stats]
 
     baseline = None

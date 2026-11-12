@@ -88,8 +88,11 @@ const Subscribers = {
             this._rows = subscribers;
 
             const ids = this.pageIds();
+            const noun = App.term('subscriber');
+            const nouns = App.term('subscriber', { plural: true });
+            const totalPages = Math.max(1, Math.ceil(total / this.perPage));
             App.selection.register('subscribers', {
-                noun: 'subscriber',
+                noun,
                 pageValues: ids,
                 actions: [
                     { label: 'Add / Remove from list', onclick: 'Subscribers.showBulkLists()' },
@@ -107,12 +110,12 @@ const Subscribers = {
                 <div class="search-bar">
                     <div class="search-input">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                        <input type="search" id="subSearch" placeholder="Search subscribers by email or name…"
-                            aria-label="Search subscribers by email or name"
-                            value="${App.escapeHtml(this.query)}" onkeydown="if(event.key==='Enter')Subscribers.search()">
+                        <input type="search" id="subSearch" placeholder="Search ${nouns} by email or name…"
+                            aria-label="Search ${nouns} by email or name"
+                            value="${App.escapeHtml(this.query)}" oninput="Subscribers.searchLive()" onkeydown="if(event.key==='Enter')Subscribers.search()">
                     </div>
                     <select id="subListFilter" aria-label="Filter leads by list" style="width:auto;min-width:180px" onchange="Subscribers.filterList(this.value)">
-                        <option value="0" ${!this.listFilter ? 'selected' : ''}>All Lists</option>
+                        <option value="0" ${!this.listFilter ? 'selected' : ''}>All ${App.term('list', { plural: true, cap: true })}</option>
                         ${listOptions}
                     </select>
                     <select id="subStatusFilter" aria-label="Filter leads by status" style="width:auto" onchange="Subscribers.filterStatus(this.value)">
@@ -120,21 +123,26 @@ const Subscribers = {
                         <option value="enabled" ${this.statusFilter === 'enabled' ? 'selected' : ''}>Enabled</option>
                         <option value="blocklisted" ${this.statusFilter === 'blocklisted' ? 'selected' : ''}>Blocklisted</option>
                     </select>
-                    <button class="btn" onclick="Subscribers.search()">Search</button>
+                    <span class="search-count">${App.formatNumber(total)} ${total === 1 ? noun : nouns}${totalPages > 1 ? ` · page ${this.page} of ${App.formatNumber(totalPages)}` : ''}</span>
                     <div class="page-actions">
-                        <button class="btn" onclick="Subscribers.exportAll()">Export CSV</button>
-                        <button class="btn btn-primary" onclick="Subscribers.showCreate()">+ Add Subscriber</button>
+                        <button class="btn btn-primary" onclick="Subscribers.showCreate()">+ Add ${App.term('subscriber', { cap: true })}</button>
+                        ${App.moreMenu([
+                            { label: `Export ${this.query || this.listFilter || this.statusFilter ? 'filtered ' : 'all '}(CSV)`, onclick: 'Subscribers.exportAll()' },
+                            { label: 'Import a CSV…', onclick: "location.hash='#/converter'" },
+                        ], `More ${noun} actions`)}
                     </div>
                 </div>
                 ${App.selection.bar('subscribers')}
                 <div class="table-wrapper" tabindex="0" role="region" aria-label="Scrollable data table"><table>
                     <thead><tr>
-                        <th class="col-select">${App.selection.headbox('subscribers', 'Select all subscribers on this page')}</th>
+                        <th class="col-select">${App.selection.headbox('subscribers', `Select all ${nouns} on this page`)}</th>
                         <th>ID</th><th>Email</th><th>Name</th><th>Status</th><th>Lists</th><th>Created</th><th class="cell-actions">Actions</th>
                     </tr></thead><tbody>`;
 
             if (!subscribers.length) {
-                html += '<tr><td colspan="8"><div class="empty-state"><h2>No subscribers found</h2></div></td></tr>';
+                const filtered = this.query || this.listFilter || this.statusFilter;
+                html += `<tr><td colspan="8"><div class="empty-state"><h2>No ${nouns} found</h2>
+                    <p>${filtered ? 'Try clearing the search or filters.' : `Add one by hand or import a CSV with the <a href="#/converter">CSV Converter</a>.`}</p></div></td></tr>`;
             }
 
             subscribers.forEach(s => {
@@ -143,7 +151,7 @@ const Subscribers = {
                 html += `<tr class="${App.selection.has('subscribers', s.id) ? 'row-selected' : ''}">
                     <td class="col-select">${App.selection.rowbox('subscribers', s.id, `Select ${s.email}`)}</td>
                     <td>${s.id}</td>
-                    <td><strong class="cell-email" title="${App.escapeHtml(s.email)}">${App.escapeHtml(s.email)}</strong></td>
+                    <td><strong class="cell-email" title="${App.escapeHtml(s.email)}">${App.escapeHtml(s.email)}</strong><span class="phone-only">${App.statusBadge(s.status)}</span></td>
                     <td>${App.escapeHtml(s.name) || '-'}</td>
                     <td>${App.statusBadge(s.status)}</td>
                     <td>${lists}</td>
@@ -152,8 +160,12 @@ const Subscribers = {
                         <div class="action-btns">
                             <button class="btn btn-sm" onclick="Subscribers.showDetail(${s.id})">View</button>
                             <button class="btn btn-sm" onclick="Subscribers.showEdit(${s.id})">Edit</button>
-                            ${isBlocked ? '' : `<button class="btn btn-sm" onclick="Subscribers.blocklist(${s.id})">Blocklist</button>`}
-                            <button class="btn btn-sm btn-danger" onclick="Subscribers.remove(${s.id})">Delete</button>
+                            ${App.moreMenu([
+                                isBlocked
+                                    ? { label: 'Unblock', onclick: `Subscribers.unblock(${s.id})` }
+                                    : { label: 'Blocklist…', onclick: `Subscribers.blocklist(${s.id})` },
+                                { label: 'Delete…', onclick: `Subscribers.remove(${s.id})`, danger: true },
+                            ], `More actions for ${s.email}`)}
                         </div>
                     </td>
                 </tr>`;
@@ -166,10 +178,112 @@ const Subscribers = {
                 page: this.page, q: this.query,
                 list: this.listFilter, status: this.statusFilter,
             });
+            const keepFocus = document.activeElement?.id === 'subSearch';
             App.setContent(html);
+            if (keepFocus) {
+                const box = document.getElementById('subSearch');
+                if (box) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+            }
         } catch {
             if (App.stale(seq)) return;
-            App.setContent('<div class="empty-state"><h2>Failed to load subscribers</h2></div>');
+            App.setContent(`<div class="empty-state"><h2>Failed to load ${App.term('subscriber', { plural: true })}</h2></div>`);
+        }
+    },
+
+    searchLive: App.debounce(() => Subscribers.search(), 400),
+
+    // ── Attribute editor ─────────────────────────────────
+    /** Key/value rows for flat attributes (the usual case: company, title,
+        email_1_subject …), with a JSON mode for nested values. Starts in
+        JSON mode when any value is an object or array. */
+    _attribEditor(attribs) {
+        const a = attribs && typeof attribs === 'object' ? attribs : {};
+        const flat = Object.values(a).every(v => v === null || typeof v !== 'object');
+        this._attribTypes = Object.fromEntries(Object.entries(a).map(([k, v]) => [k, typeof v]));
+        return `<div class="form-group attrib-editor" id="attribEditor" data-mode="${flat ? 'rows' : 'json'}">
+            <div class="label-row">
+                <label>Attributes</label>
+                <button type="button" class="btn btn-sm" onclick="Subscribers._toggleAttribMode()" id="attribModeBtn">${flat ? 'Edit as JSON' : 'Edit as fields'}</button>
+            </div>
+            <div id="attribRows" ${flat ? '' : 'hidden'}>
+                ${Object.entries(flat ? a : {}).map(([k, v]) => this._attribRow(k, v)).join('')}
+                <button type="button" class="btn btn-sm" onclick="Subscribers._addAttribRow()">+ Add attribute</button>
+            </div>
+            <textarea id="attribJson" class="code-input" rows="8" ${flat ? 'hidden' : ''} spellcheck="false">${App.escapeHtml(JSON.stringify(a, null, 2))}</textarea>
+            <p class="field-hint">Used in campaigns as <code>{{ .Subscriber.Attribs.key }}</code>.</p>
+        </div>`;
+    },
+
+    _attribRow(k = '', v = '') {
+        const val = v === null || v === undefined ? '' : String(v);
+        return `<div class="attrib-row">
+            <input type="text" class="attrib-key" placeholder="key (e.g. company)" value="${App.escapeHtml(k)}" aria-label="Attribute name">
+            <input type="text" class="attrib-val" placeholder="value" value="${App.escapeHtml(val)}" aria-label="Attribute value">
+            <button type="button" class="btn btn-sm" aria-label="Remove attribute" onclick="this.parentElement.remove()">×</button>
+        </div>`;
+    },
+
+    _addAttribRow() {
+        const rows = document.getElementById('attribRows');
+        if (!rows) return;
+        rows.lastElementChild.insertAdjacentHTML('beforebegin', this._attribRow());
+        rows.querySelectorAll('.attrib-key')[rows.querySelectorAll('.attrib-key').length - 1]?.focus();
+    },
+
+    _rowsToObject() {
+        const out = {};
+        const types = this._attribTypes || {};
+        for (const row of document.querySelectorAll('#attribRows .attrib-row')) {
+            const k = row.querySelector('.attrib-key').value.trim();
+            const raw = row.querySelector('.attrib-val').value;
+            if (!k) {
+                if (raw.trim()) throw new Error('Every attribute value needs a name');
+                continue;
+            }
+            // Keep the stored type: a number stays a number, true stays true.
+            let v = raw;
+            if (types[k] === 'number' && raw.trim() !== '' && !isNaN(Number(raw))) v = Number(raw);
+            else if (types[k] === 'boolean' && /^(true|false)$/i.test(raw.trim())) v = raw.trim().toLowerCase() === 'true';
+            out[k] = v;
+        }
+        return out;
+    },
+
+    _toggleAttribMode() {
+        const ed = document.getElementById('attribEditor');
+        const rows = document.getElementById('attribRows');
+        const json = document.getElementById('attribJson');
+        const btn = document.getElementById('attribModeBtn');
+        if (!ed) return;
+        if (ed.dataset.mode === 'rows') {
+            try { json.value = JSON.stringify(this._rowsToObject(), null, 2); }
+            catch (e) { App.toast(e.message, 'error'); return; }
+            ed.dataset.mode = 'json'; rows.hidden = true; json.hidden = false; btn.textContent = 'Edit as fields';
+        } else {
+            let obj;
+            try { obj = JSON.parse(json.value || '{}'); } catch { App.toast('Attributes is not valid JSON', 'error'); return; }
+            if (!obj || typeof obj !== 'object' || Array.isArray(obj)) { App.toast('Attributes must be a JSON object', 'error'); return; }
+            if (Object.values(obj).some(v => v !== null && typeof v === 'object')) {
+                App.toast('Nested values can only be edited as JSON', 'error'); return;
+            }
+            this._attribTypes = Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, typeof v]));
+            rows.innerHTML = Object.entries(obj).map(([k, v]) => this._attribRow(k, v)).join('')
+                + '<button type="button" class="btn btn-sm" onclick="Subscribers._addAttribRow()">+ Add attribute</button>';
+            ed.dataset.mode = 'rows'; rows.hidden = false; json.hidden = true; btn.textContent = 'Edit as JSON';
+        }
+    },
+
+    /** The edited attributes, or null (after a toast) when they are invalid. */
+    _readAttribs() {
+        const ed = document.getElementById('attribEditor');
+        try {
+            if (ed && ed.dataset.mode === 'rows') return this._rowsToObject();
+            const obj = JSON.parse(document.getElementById('attribJson').value || '{}');
+            if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new Error('Attributes must be a JSON object');
+            return obj;
+        } catch (e) {
+            App.toast(e instanceof SyntaxError ? 'Attributes is not valid JSON' : e.message, 'error');
+            return null;
         }
     },
 
@@ -225,7 +339,7 @@ const Subscribers = {
 
         App.setContent(`
             <div class="inline-form">
-                <h2 style="margin-bottom:16px">Add Subscriber</h2>
+                <h2 style="margin-bottom:16px">Add ${App.term('subscriber', { cap: true })}</h2>
                 <div class="form-grid">
                     <div class="form-group"><label>Email *</label><input type="email" id="subEmail" placeholder="email@example.com"></div>
                     <div class="form-group"><label>Name</label><input type="text" id="subName" placeholder="Full name"></div>
@@ -238,13 +352,13 @@ const Subscribers = {
                     </select>
                 </div>
                 <div class="form-group">
-                    <label>Lists</label>
+                    <label>${App.term('list', { plural: true, cap: true })}</label>
                     <div class="checkbox-group">${listChecks}</div>
+                    <label class="plain-check" style="margin-top:10px"><input type="checkbox" id="subPreconfirm" checked>
+                        <span>Mark subscriptions as confirmed</span></label>
+                    <p class="field-hint">Off: double opt-in lists keep them unconfirmed until the ${App.term('subscriber')} confirms by email, and campaigns skip them.</p>
                 </div>
-                <div class="form-group">
-                    <label>Attributes (JSON)</label>
-                    <textarea id="subAttribs" placeholder='{"company": "Acme"}'>{}</textarea>
-                </div>
+                ${this._attribEditor({})}
                 <div class="form-actions">
                     <button class="btn btn-primary" onclick="Subscribers.create()">Create</button>
                     <button class="btn btn-secondary" onclick="Subscribers.render()">Cancel</button>
@@ -259,13 +373,9 @@ const Subscribers = {
         const status = document.getElementById('subStatus').value;
         // A typo in the JSON must not silently create the subscriber with
         // empty attributes — surface the error and abort instead.
-        let attribs;
-        try {
-            attribs = JSON.parse(document.getElementById('subAttribs').value || '{}');
-        } catch {
-            App.toast('Attributes is not valid JSON', 'error');
-            return;
-        }
+        const attribs = this._readAttribs();
+        if (attribs === null) return;
+        const preconfirm = !!document.getElementById('subPreconfirm')?.checked;
 
         if (!email) { App.toast('Email is required', 'error'); return; }
 
@@ -274,8 +384,10 @@ const Subscribers = {
             .filter(n => Number.isInteger(n));
 
         try {
-            await API.post('/api/subscribers', { email, name, status, attribs, lists });
-            App.toast('Subscriber created', 'success');
+            await API.post('/api/subscribers', {
+                email, name, status, attribs, lists, preconfirm_subscriptions: preconfirm,
+            });
+            App.toast(`${App.term('subscriber', { cap: true })} created`, 'success');
             this.render();
         } catch {
             // API.request already surfaced the server message.
@@ -305,7 +417,7 @@ const Subscribers = {
 
             // showResult sets the title via textContent — escaping here would
             // show the entities literally.
-            App.showResult(`Subscriber: ${s.email}`, `
+            App.showResult(`${App.term('subscriber', { cap: true })}: ${s.email}`, `
                 <div style="font-size:0.9rem;line-height:1.7">
                     <p><strong>Name:</strong> ${App.escapeHtml(s.name) || '-'}</p>
                     <p><strong>Status:</strong> ${App.statusBadge(s.status)}</p>
@@ -346,7 +458,7 @@ const Subscribers = {
 
             App.setContent(`
                 <div class="inline-form">
-                    <h2 style="margin-bottom:16px">Edit Subscriber #${s.id}</h2>
+                    <h2 style="margin-bottom:16px">Edit ${App.term('subscriber', { cap: true })} #${s.id}</h2>
                     <div class="form-grid">
                         <div class="form-group"><label>Email</label><input type="email" id="editEmail" value="${App.escapeHtml(s.email || '')}"></div>
                         <div class="form-group"><label>Name</label><input type="text" id="editName" value="${App.escapeHtml(s.name || '')}"></div>
@@ -359,13 +471,10 @@ const Subscribers = {
                         </select>
                     </div>
                     <div class="form-group">
-                        <label>Lists</label>
+                        <label>${App.term('list', { plural: true, cap: true })}</label>
                         <div class="checkbox-group">${listBoxes || '<span style="color:var(--text-muted)">No lists available</span>'}</div>
                     </div>
-                    <div class="form-group">
-                        <label>Attributes (JSON)</label>
-                        <textarea id="editAttribs">${App.escapeHtml(JSON.stringify(s.attribs || {}, null, 2))}</textarea>
-                    </div>
+                    ${this._attribEditor(s.attribs || {})}
                     <div class="form-actions">
                         <button class="btn btn-primary" onclick="Subscribers.update(${s.id})">Update</button>
                         <button class="btn btn-secondary" onclick="Subscribers.render()">Cancel</button>
@@ -384,13 +493,8 @@ const Subscribers = {
         // ListMonk's PUT is a full replace: silently substituting {} for a
         // malformed JSON body would wipe the subscriber's stored attributes
         // while reporting success. Abort with the error instead.
-        let attribs;
-        try {
-            attribs = JSON.parse(document.getElementById('editAttribs').value || '{}');
-        } catch {
-            App.toast('Attributes is not valid JSON', 'error');
-            return;
-        }
+        const attribs = this._readAttribs();
+        if (attribs === null) return;
 
         const boxes = Array.from(document.querySelectorAll('input[name="editSubLists"]'));
         const checked = boxes.filter(cb => cb.checked).map(cb => parseInt(cb.value));
@@ -414,7 +518,7 @@ const Subscribers = {
             const lists = [...checked, ...hidden];
 
             await API.put(`/api/subscribers/${id}`, { email, name, status, attribs, lists });
-            App.toast('Subscriber updated', 'success');
+            App.toast(`${App.term('subscriber', { cap: true })} updated`, 'success');
             this.render();
         } catch {
             // API.request already surfaced the server message.
@@ -422,10 +526,10 @@ const Subscribers = {
     },
 
     async remove(id) {
-        if (await App.confirm('Delete Subscriber', 'Are you sure you want to delete this subscriber?')) {
+        if (await App.confirm(`Delete ${App.term('subscriber', { cap: true })}`, `Permanently delete this ${App.term('subscriber')}? Their campaign history goes with them.`)) {
             try {
                 await API.del(`/api/subscribers/${id}`);
-                App.toast('Subscriber deleted', 'success');
+                App.toast(`${App.term('subscriber', { cap: true })} deleted`, 'success');
                 App.selection.clear('subscribers');
                 this.render();
             } catch {
@@ -435,11 +539,23 @@ const Subscribers = {
     },
 
     async blocklist(id) {
-        if (!await App.confirm('Blocklist Subscriber',
-                'Blocklist this subscriber? They will stop receiving all mail.')) return;
+        if (!await App.confirm(`Blocklist ${App.term('subscriber', { cap: true })}`,
+                `Blocklist this ${App.term('subscriber')}? They will stop receiving all mail.`)) return;
         try {
             await API.put(`/api/subscribers/${id}/blocklist`);
-            App.toast('Subscriber blocklisted', 'success');
+            App.toast(`${App.term('subscriber', { cap: true })} blocklisted`, 'success');
+            this.render();
+        } catch {
+            // API.request already surfaced the server message.
+        }
+    },
+
+    async unblock(id) {
+        if (!await App.confirm(`Unblock ${App.term('subscriber', { cap: true })}`,
+                `Set this ${App.term('subscriber')} back to Enabled? Their list subscriptions stay as they are: re-add them to a list from Edit if they should get campaigns again.`)) return;
+        try {
+            await API.put(`/api/subscribers/${id}/unblock`);
+            App.toast(`${App.term('subscriber', { cap: true })} unblocked`, 'success');
             this.render();
         } catch {
             // API.request already surfaced the server message.
@@ -450,11 +566,11 @@ const Subscribers = {
     async bulkBlocklist() {
         const ids = this._selectedIds();
         if (!ids.length) return;
-        if (!await App.confirm('Blocklist Subscribers',
-                `Blocklist ${ids.length} selected subscriber(s)? They will stop receiving all campaigns.`)) return;
+        if (!await App.confirm(`Blocklist ${App.term('subscriber', { plural: true, cap: true })}`,
+                `Blocklist ${ids.length} selected ${App.term('subscriber')}(s)? They will stop receiving all campaigns.`)) return;
         try {
             await API.put('/api/subscribers/blocklist', { ids });
-            App.toast(`${ids.length} subscriber(s) blocklisted`, 'success');
+            App.toast(`${ids.length} ${App.term('subscriber')}(s) blocklisted`, 'success');
             App.selection.clear('subscribers');
             this.render();
         } catch {
@@ -465,12 +581,12 @@ const Subscribers = {
     async bulkDelete() {
         const ids = this._selectedIds();
         if (!ids.length) return;
-        if (!await App.confirm('Delete Subscribers',
-                `Permanently delete ${ids.length} selected subscriber(s)? This cannot be undone.`)) return;
+        if (!await App.confirm(`Delete ${App.term('subscriber', { plural: true, cap: true })}`,
+                `Permanently delete ${ids.length} selected ${App.term('subscriber')}(s)? This cannot be undone.`)) return;
         try {
             const params = ids.map(id => `ids=${id}`).join('&');
             await API.del(`/api/subscribers?${params}`);
-            App.toast(`${ids.length} subscriber(s) deleted`, 'success');
+            App.toast(`${ids.length} ${App.term('subscriber')}(s) deleted`, 'success');
             App.selection.clear('subscribers');
             this.render();
         } catch {
@@ -487,31 +603,35 @@ const Subscribers = {
             `<option value="${l.id}">${App.escapeHtml(l.name)}</option>`
         ).join('');
 
-        App.showResult('Add / Remove from List', `
-            <p style="color:var(--text-secondary)">Apply to <strong>${ids.length}</strong> selected subscriber(s):</p>
+        const nouns = App.term('subscriber', { plural: ids.length !== 1 });
+        App.showForm('Add / Remove from List', `
+            <p style="color:var(--text-secondary)">Apply to <strong>${ids.length}</strong> selected ${nouns}:</p>
             <div class="form-group" style="margin-top:12px"><label>List</label><select id="bulkListSelect">${options}</select></div>
-            <div class="form-actions">
-                <button class="btn btn-primary" onclick="Subscribers.applyBulkLists('add')">Subscribe to list</button>
-                <button class="btn" onclick="Subscribers.applyBulkLists('remove')">Unsubscribe from list</button>
+            <div class="form-group">
+                <label class="checkbox-label"><input type="radio" name="bulkListAction" value="add" checked><span>Subscribe to this list (confirmed)</span></label>
+                <label class="checkbox-label"><input type="radio" name="bulkListAction" value="remove"><span>Remove from this list</span></label>
             </div>
-        `);
+        `, 'Apply', () => this.applyBulkLists(
+            document.querySelector('input[name="bulkListAction"]:checked')?.value || 'add'));
     },
 
+    /** Returns false to keep the dialog open when the request failed. */
     async applyBulkLists(action) {
         const ids = this._selectedIds();
         const listId = parseInt(document.getElementById('bulkListSelect')?.value);
-        if (!ids.length || !listId) return;
+        if (!ids.length || !listId) return false;
 
         try {
             const payload = { ids, action, target_list_ids: [listId] };
             if (action === 'add') payload.status = 'confirmed';
             await API.put('/api/subscribers/lists', payload);
-            App.toast(`${action === 'add' ? 'Subscribed' : 'Unsubscribed'} ${ids.length} subscriber(s)`, 'success');
-            App.closeModal();
+            App.toast(`${action === 'add' ? 'Subscribed' : 'Removed'} ${ids.length} ${App.term('subscriber', { plural: ids.length !== 1 })}`, 'success');
             App.selection.clear('subscribers');
             this.render();
+            return true;
         } catch {
             // API.request already surfaced the server message.
+            return false;
         }
     },
 

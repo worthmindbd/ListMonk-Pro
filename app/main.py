@@ -14,6 +14,7 @@ from jinja2 import Environment, FileSystemLoader
 import httpx
 
 from app.services.listmonk_client import listmonk
+from app.services import auto_unblock_state
 from app.services.auto_unblock import (
     find_blocklisted_engaged,
     unblock_subscribers,
@@ -37,7 +38,7 @@ from app.services import email_cleanup
 from app.services.imap_reply_tracker import scan_and_track_replies
 from app.routers import (
     subscribers, lists, campaigns, templates, bounces, converter, unsubscribes,
-    replies, deliverability, appsettings, warmup, email_validation,
+    replies, deliverability, appsettings, warmup, email_validation, sends,
 )
 
 logger = logging.getLogger("listmonk-dashboard")
@@ -195,14 +196,20 @@ async def auto_unblock_loop():
     failures = 0
     while True:
         try:
-            subs = await find_blocklisted_engaged(listmonk)
-            if subs:
-                result = await unblock_subscribers(listmonk, subs)
-                logger.info(f"Auto-unblock: {result['success']} unblocked, {result['failed']} failed")
+            # Switched off in Settings → Auto-Unblock: skip the run (the
+            # interval keeps ticking so turning it back on needs no restart).
+            if auto_unblock_state.load_state()["enabled"]:
+                subs = await find_blocklisted_engaged(listmonk)
+                result = {"success": 0, "failed": 0, "bounces_deleted": 0, "unblocked": []}
+                if subs:
+                    result = await unblock_subscribers(listmonk, subs)
+                    logger.info(f"Auto-unblock: {result['success']} unblocked, {result['failed']} failed")
+                await auto_unblock_state.record_run(result, "schedule")
             failures = 0
         except Exception as e:
             failures += 1
             logger.error(f"Auto-unblock error (#{failures}): {e}")
+            await auto_unblock_state.record_run(None, "schedule", error=str(e))
         await asyncio.sleep(_backoff_delay(failures, AUTO_UNBLOCK_INTERVAL))
 
 
@@ -414,6 +421,7 @@ app.include_router(deliverability.router, prefix="/api/deliverability", tags=["D
 app.include_router(appsettings.router, prefix="/api/app-settings", tags=["App Settings"])
 app.include_router(warmup.router, prefix="/api/warmup", tags=["Warm-up"])
 app.include_router(email_validation.router, prefix="/api/email-validation", tags=["Email Validation"])
+app.include_router(sends.router, prefix="/api/sends", tags=["Send Statistics"])
 
 
 # ── Template Helper ───────────────────────────────────────
@@ -535,24 +543,32 @@ async def auto_unblock_status():
     # Deliberately not a 5xx: the Settings page loads this alongside the
     # scheduler with Promise.all, so raising here would blank the whole page
     # when only this readout is unavailable. The client renders `error`.
+    state = auto_unblock_state.load_state()
+    base = {
+        "enabled": state["enabled"],
+        "last_run": state["last_run"],
+        "history": state["history"][:50],
+        "history_total": len(state["history"]),
+        "interval_hours": AUTO_UNBLOCK_INTERVAL // 3600,
+    }
     try:
         # The same candidate set the run acts on (bounce-blocklisted engaged
         # subscribers minus opt-outs), so the count never promises unblocks
         # the run will deliberately skip.
         total = len(await find_blocklisted_engaged(listmonk))
-        return {
-            "blocklisted_engaged": total,
-            "blocklisted_clickers": total,
-            "interval_hours": AUTO_UNBLOCK_INTERVAL // 3600,
-        }
+        return {**base, "blocklisted_engaged": total, "blocklisted_clickers": total}
     except Exception as e:
         logger.error(f"auto-unblock status failed: {e}")
-        return {
-            "error": str(e),
-            "blocklisted_engaged": 0,
-            "blocklisted_clickers": 0,
-            "interval_hours": AUTO_UNBLOCK_INTERVAL // 3600,
-        }
+        return {**base, "error": str(e), "blocklisted_engaged": 0, "blocklisted_clickers": 0}
+
+
+@app.put("/api/auto-unblock/settings")
+async def auto_unblock_settings(data: dict):
+    """Turn the six-hourly background run on or off ("Run now" always works)."""
+    if not isinstance(data, dict) or set(data) != {"enabled"} or not isinstance(data["enabled"], bool):
+        raise HTTPException(status_code=400, detail='Send {"enabled": true|false}')
+    state = await auto_unblock_state.set_enabled(data["enabled"])
+    return {"enabled": state["enabled"]}
 
 
 @app.post("/api/auto-unblock/run")
@@ -560,10 +576,15 @@ async def auto_unblock_run_now():
     try:
         subs = await find_blocklisted_engaged(listmonk)
         if not subs:
-            return {"success": 0, "failed": 0, "unblocked": [], "message": "No blocklisted engaged subscribers found"}
-        return await unblock_subscribers(listmonk, subs)
+            result = {"success": 0, "failed": 0, "bounces_deleted": 0, "unblocked": [],
+                      "message": "No blocklisted engaged subscribers found"}
+        else:
+            result = await unblock_subscribers(listmonk, subs)
+        await auto_unblock_state.record_run(result, "manual")
+        return result
     except Exception as e:
         logger.error(f"auto-unblock run failed: {e}", exc_info=True)
+        await auto_unblock_state.record_run(None, "manual", error=str(e))
         raise HTTPException(status_code=502, detail=f"Auto-unblock failed: {e}")
 
 

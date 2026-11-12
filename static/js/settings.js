@@ -12,12 +12,23 @@ const Settings = {
     _previewTimer: null,
     _previewSeq: 0,
 
+    TABS: [
+        ['scheduler', 'Send Window', '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>'],
+        ['warmup', 'Warm-up', '<polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/>'],
+        ['automation', 'Automation', '<polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/>'],
+        ['cleanup', 'Email Cleanup', '<path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>'],
+        ['autounblock', 'Auto-Unblock', '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>'],
+    ],
+
     async render() {
         this._seq = App.seq();
+        // Deep-linkable tab: #/settings?tab=automation
+        const wantedTab = App.routeQuery().get('tab');
+        if (wantedTab && this.TABS.some(t => t[0] === wantedTab)) this.activeTab = wantedTab;
         App.setContent('<div class="loading-spinner">Loading settings...</div>');
 
         try {
-            const [sched, unblock, warmup, cleanup] = await Promise.all([
+            const [sched, unblock, warmup, cleanup, unsub] = await Promise.all([
                 API.get('/api/scheduler'),
                 API.get('/api/auto-unblock/status'),
                 // Warm-up is its own feature: if it fails to load, the other
@@ -25,12 +36,16 @@ const Settings = {
                 API.get('/api/warmup', true).catch(() => null),
                 // Same for email cleanup.
                 API.get('/api/email-validation/cleanup', true).catch(() => null),
+                // Automation tab: unsubscribe action + reply rules.
+                API.get('/api/unsubscribes/settings', true).catch(() => null),
+                typeof Replies !== 'undefined' ? Replies.loadSettings() : Promise.resolve(),
             ]);
             if (App.stale(this._seq)) return;
             this.schedule = sched;
             this.unblockStatus = unblock;
             this.warmup = warmup;
             this.cleanup = cleanup;
+            this.unsubSettings = unsub;
         } catch {
             if (App.stale(this._seq)) return;
             App.setContent('<div class="empty-state"><h2>Failed to load settings</h2></div>');
@@ -46,23 +61,12 @@ const Settings = {
     renderPage() {
         if (this._seq !== undefined && App.stale(this._seq)) return;
         const html = `
-            <div class="settings-tabs">
-                <button class="settings-tab ${this.activeTab === 'scheduler' ? 'active' : ''}" onclick="Settings.switchTab('scheduler')">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                    Campaign Scheduler
-                </button>
-                <button class="settings-tab ${this.activeTab === 'warmup' ? 'active' : ''}" onclick="Settings.switchTab('warmup')">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
-                    Sending Warm-up
-                </button>
-                <button class="settings-tab ${this.activeTab === 'cleanup' ? 'active' : ''}" onclick="Settings.switchTab('cleanup')">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
-                    Email Cleanup
-                </button>
-                <button class="settings-tab ${this.activeTab === 'autounblock' ? 'active' : ''}" onclick="Settings.switchTab('autounblock')">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                    Auto-Unblock Protection
-                </button>
+            <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+                ${this.TABS.map(([key, label, icon]) => `
+                <button class="settings-tab ${this.activeTab === key ? 'active' : ''}" role="tab" aria-selected="${this.activeTab === key}" data-tab="${key}" onclick="Settings.switchTab('${key}')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">${icon}</svg>
+                    ${label}
+                </button>`).join('')}
             </div>
             <div id="settingsContent"></div>
         `;
@@ -72,8 +76,13 @@ const Settings = {
 
     switchTab(tab) {
         this.activeTab = tab;
-        document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
-        document.querySelector(`.settings-tab[onclick="Settings.switchTab('${tab}')"]`)?.classList.add('active');
+        document.querySelectorAll('.settings-tab').forEach(t => {
+            const on = t.dataset.tab === tab;
+            t.classList.toggle('active', on);
+            t.setAttribute('aria-selected', on ? 'true' : 'false');
+            if (on) t.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        });
+        App.syncUrl('settings', { tab });
         this.renderTab();
     },
 
@@ -86,6 +95,8 @@ const Settings = {
             el.innerHTML = this.renderWarmup();
         } else if (this.activeTab === 'cleanup') {
             el.innerHTML = this.renderCleanup();
+        } else if (this.activeTab === 'automation') {
+            el.innerHTML = this.renderAutomation();
         } else {
             el.innerHTML = this.renderAutoUnblock();
         }
@@ -127,13 +138,19 @@ const Settings = {
         const enabled = s.enabled;
         const inWindow = s.in_send_window;
 
+        // Outside the window is the normal state most of the day: only call
+        // it out as a warning when campaigns are actually being held.
+        const held = (s.auto_paused_campaigns || []).length;
+        const nextOpen = enabled && !inWindow ? this._nextWindowOpen(s) : '';
         let statusHtml;
         if (!enabled) {
-            statusHtml = '<span class="badge badge-default" style="font-size:0.9rem;padding:6px 14px">DISABLED</span>';
+            statusHtml = '<span class="badge badge-default">Off: campaigns send any time</span>';
         } else if (inWindow) {
-            statusHtml = '<span class="badge badge-success" style="font-size:0.9rem;padding:6px 14px">SENDING - Inside send window</span>';
+            statusHtml = '<span class="badge badge-success">Inside send window</span>';
+        } else if (held) {
+            statusHtml = `<span class="badge badge-warning">Holding ${held} campaign${held === 1 ? '' : 's'}${nextOpen ? ` until ${App.escapeHtml(nextOpen)}` : ''}</span>`;
         } else {
-            statusHtml = '<span class="badge badge-warning" style="font-size:0.9rem;padding:6px 14px">PAUSED - Outside send window</span>';
+            statusHtml = `<span class="badge badge-default">Outside send window${nextOpen ? ` · opens ${App.escapeHtml(nextOpen)}` : ''}</span>`;
         }
 
         const allDays = [
@@ -212,17 +229,11 @@ const Settings = {
             <div class="card">
                 <div class="card-header"><h2 class="card-title">Schedule Configuration</h2></div>
 
-                <div class="form-group" style="margin-bottom:20px">
-                    <label class="checkbox-label ${enabled ? 'toggle-on' : ''}" id="schedEnabledBanner" style="font-size:1rem;padding:12px 18px;border-width:2px;display:flex;width:100%">
-                        <input type="checkbox" id="schedEnabled" ${enabled ? 'checked' : ''} onchange="Settings.toggleScheduler(this.checked)">
-                        <span style="font-weight:600" id="schedEnabledLabel">${enabled ? 'Scheduler is ON' : 'Scheduler is OFF'}</span>
-                        <span class="banner-switch" aria-hidden="true"></span>
-                    </label>
-                    <p style="font-size:0.85rem;color:var(--text-muted);margin-top:8px">
-                        When enabled, running campaigns will auto-pause outside the send window and auto-resume when the window opens.
-                        Manually paused campaigns are never affected. Turning the scheduler off resumes the campaigns it auto-paused.
-                    </p>
-                </div>
+                ${this._switchRow({
+                    id: 'schedEnabled', checked: enabled, onchange: 'Settings.toggleScheduler(this.checked)',
+                    title: 'Only send inside the window', labelId: 'schedEnabledLabel',
+                    desc: 'Running campaigns auto-pause outside the window and resume when it opens. Manually paused campaigns are never touched. Turning this off resumes the campaigns it paused.',
+                })}
 
                 <div class="form-group">
                     <label>Timezone</label>
@@ -337,16 +348,43 @@ const Settings = {
             `<button type="button" class="btn btn-sm" title="${App.escapeHtml(p.summary)}" onclick="Settings.applyWarmupPreset('${App.escapeHtml(key)}')">${App.escapeHtml(p.label)} <span style="color:var(--text-muted)">${p.growth_percent === 100 ? 'x2' : '+' + p.growth_percent + '%'}</span></button>`
         ).join('');
 
-        const historyRows = (w.history || []).map(h => `
+        // Newest first. Days with no entry were never closed (this app was
+        // not running then): say so instead of silently skipping them, and
+        // flag a day that went over its plan.
+        const hist = (w.history || []).filter(h => h && h.date);
+        const dayMs = 86400000;
+        const parseDay = (iso) => { const [y, m, d] = iso.split('-').map(Number); return Date.UTC(y, m - 1, d); };
+        const fmtDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+        const historyRows = hist.map((h, i) => {
+            const over = (h.sent ?? 0) - (h.quota ?? 0);
+            const overBadge = over > 0
+                ? ` <span class="badge badge-danger" title="ListMonk sent faster than the per-second check could stop it, or this app was not running for part of the day">Over by ${this._n(over)}</span>`
+                : '';
+            let row = `
             <tr>
-                <td>${App.escapeHtml(h.date || '')}</td>
+                <td>${App.escapeHtml(h.date)}</td>
                 <td>${this._n(h.day ?? 0)}</td>
                 <td>${this._n(h.quota ?? 0)}</td>
-                <td>${this._n(h.sent ?? 0)}</td>
+                <td>${this._n(h.sent ?? 0)}${overBadge}</td>
                 <td>${h.advanced
                     ? '<span class="badge badge-success">Stepped up</span>'
                     : `<span class="badge badge-warning" title="Fewer than ${this._n(w.advance_min_percent)}% of the planned volume was sent, so the ramp waited">Held</span>`}</td>
-            </tr>`).join('');
+            </tr>`;
+            const older = hist[i + 1];
+            if (older?.date) {
+                const gap = Math.round((parseDay(h.date) - parseDay(older.date)) / dayMs) - 1;
+                if (gap > 0) {
+                    const first = fmtDay(parseDay(older.date) + dayMs);
+                    const last = fmtDay(parseDay(h.date) - dayMs);
+                    row += `
+            <tr class="row-muted">
+                <td>${gap === 1 ? first : `${first} – ${last}`}</td>
+                <td colspan="4">Not recorded: this app was not running, so ${gap === 1 ? 'that day was' : `those ${gap} days were`} neither counted nor capped.</td>
+            </tr>`;
+                }
+            }
+            return row;
+        }).join('');
 
         return `
             <div class="card" style="margin-bottom:20px">
@@ -368,16 +406,12 @@ const Settings = {
             <div class="card" style="margin-bottom:20px">
                 <div class="card-header"><h2 class="card-title">Warm-up Plan</h2></div>
 
-                <div class="form-group" style="margin-bottom:20px">
-                    <label class="checkbox-label ${w.enabled ? 'toggle-on' : ''}" id="warmupEnabledBanner" style="font-size:1rem;padding:12px 18px;border-width:2px;display:flex;width:100%">
-                        <input type="checkbox" id="warmupEnabled" ${w.enabled ? 'checked' : ''} onchange="Settings.toggleWarmup(this.checked)">
-                        <span style="font-weight:600" id="warmupEnabledLabel">${w.enabled ? 'Warm-up is ON' : 'Warm-up is OFF'}</span>
-                        <span class="banner-switch" aria-hidden="true"></span>
-                    </label>
-                    <p style="font-size:0.85rem;color:var(--text-muted);margin-top:8px">
-                        While on, all campaigns together may send only today's quota. Running campaigns pause when it is used up
-                        and resume automatically on the next day. Manually paused campaigns are never touched.
-                    </p>
+                <div style="margin-bottom:20px">
+                ${this._switchRow({
+                    id: 'warmupEnabled', checked: !!w.enabled, onchange: 'Settings.toggleWarmup(this.checked)',
+                    title: 'Limit daily sending (warm-up)',
+                    desc: "All campaigns together may send only today's quota. Running campaigns pause when it is used up and resume on their own the next day. Manually paused campaigns are never touched.",
+                })}
                 </div>
 
                 <div class="form-group">
@@ -466,12 +500,11 @@ const Settings = {
         const fill = document.getElementById('warmupFill');
         if (fill) fill.style.width = pct + '%';
         document.getElementById('warmupBar')?.setAttribute('aria-valuenow', String(pct));
-        const label = document.getElementById('warmupEnabledLabel');
-        const banner = document.getElementById('warmupEnabledBanner');
         const box = document.getElementById('warmupEnabled');
-        if (label) label.textContent = w.enabled ? 'Warm-up is ON' : 'Warm-up is OFF';
-        if (banner) banner.classList.toggle('toggle-on', !!w.enabled);
-        if (box) box.checked = !!w.enabled;
+        if (box) {
+            box.checked = !!w.enabled;
+            box.closest('.switch-row')?.classList.toggle('on', !!w.enabled);
+        }
     },
 
     _warmupForm() {
@@ -527,18 +560,24 @@ const Settings = {
         // A newer keystroke (or leaving the tab) superseded this response.
         if (seq !== this._previewSeq || document.getElementById('warmupRamp') !== el) return;
 
-        const shown = data.ramp.slice(0, 30);
+        // Keep today's ramp day in view: show 30 days around it.
+        const current = this.warmup?.enabled ? this.warmup?.day : null;
+        const startIdx = current && current > 30 ? Math.min(current - 15, Math.max(0, data.ramp.length - 30)) : 0;
+        const shown = data.ramp.slice(startIdx, startIdx + 30);
         const top = Math.max(...shown, 1);
-        const current = this.warmup?.day;
         const bars = shown.map((v, i) => {
-            const day = i + 1;
-            return `<div class="warmup-bar ${day === current ? 'is-current' : ''}" style="height:${Math.max(3, Math.round(v / top * 100))}%" title="Day ${day}: ${this._n(v)} emails"></div>`;
+            const day = startIdx + i + 1;
+            const here = day === current;
+            return `<div class="warmup-bar ${here ? 'is-current' : ''}" style="height:${Math.max(3, Math.round(v / top * 100))}%" title="Day ${day}: ${this._n(v)} emails${here ? ' (today)' : ''}">${here ? '<span class="warmup-today">Today</span>' : ''}</div>`;
         }).join('');
         const more = data.ramp.length > shown.length
-            ? ` (chart shows the first ${shown.length})` : '';
+            ? ` (chart shows days ${startIdx + 1}–${startIdx + shown.length})` : '';
         el.innerHTML = `
-            <div class="warmup-bars" role="img" aria-label="Daily volume by ramp day">${bars}</div>
-            <div class="warmup-ramp-axis"><span>Day 1: ${this._n(data.ramp[0])}</span><span>Day ${shown.length}: ${this._n(shown[shown.length - 1])}</span></div>
+            <div class="warmup-chart">
+                <div class="warmup-yaxis" aria-hidden="true"><span>${this._n(top)}</span><span>${this._n(Math.round(top / 2))}</span><span>0</span></div>
+                <div class="warmup-bars" role="img" aria-label="Daily volume by ramp day">${bars}</div>
+            </div>
+            <div class="warmup-ramp-axis"><span>Day ${startIdx + 1}: ${this._n(shown[0])}</span>${current ? `<span>Today: day ${this._n(current)}</span>` : ''}<span>Day ${startIdx + shown.length}: ${this._n(shown[shown.length - 1])}</span></div>
             <p style="font-size:0.85rem;color:var(--text-secondary);margin-top:8px">
                 Reaches <strong>${this._n(f.target_volume)}/day on day ${this._n(data.days)}</strong>${more};
                 ${this._n(data.total)} emails in total by then.
@@ -701,7 +740,7 @@ const Settings = {
             <div class="card" style="margin-bottom:20px">
                 <div class="card-header"><h2 class="card-title">Recently Blocklisted</h2></div>
                 <p style="font-size:0.85rem;color:var(--text-muted);margin:0 0 12px">
-                    Blocklisted, never deleted. To bring one back, unblock it from the Leads page.
+                    Blocklisted, never deleted. To bring one back, find it on the Leads page (filter Status: Blocklisted) and press Unblock.
                 </p>
                 <div class="table-wrapper" tabindex="0" role="region" aria-label="Scrollable data table"><table>
                     <thead><tr><th>When</th><th>Email</th><th>Why</th></tr></thead>
@@ -991,6 +1030,44 @@ const Settings = {
         }
     },
 
+    // ── Automation Tab ───────────────────────────────────
+    /** Every rule that acts on people without a click, in one place: what an
+        unsubscribe does, and the reply-inbox rules (which can blocklist real
+        prospects). Email cleanup and auto-unblock keep their own tabs. */
+    renderAutomation() {
+        const u = this.unsubSettings;
+        const unsubCard = u ? `
+            <div class="card" style="margin-bottom:20px">
+                <div class="card-header"><h2 class="card-title">Unsubscribe requests</h2>
+                    <a class="btn btn-sm" href="#/unsubscribes">Open Unsubscribes</a></div>
+                <p class="field-hint" style="margin-bottom:12px">Applies to "remove me" replies and to unsubscribe-link clicks found by the hourly scan.
+                    The ${App.term('subscriber')} is always taken off every list.</p>
+                ${this._switchRow({
+                    id: 'unsubBlocklist', checked: !!u.blocklist_enabled,
+                    onchange: 'Settings.toggleUnsubBlocklist(this.checked)',
+                    title: 'Also blocklist the address',
+                    desc: 'On: ListMonk will never mail them again, even after a re-import. Off: they are only unsubscribed and could be added back to a list later.',
+                })}
+            </div>` : `<div class="card" style="margin-bottom:20px"><p class="field-hint">Unsubscribe settings could not be loaded.</p></div>`;
+
+        const replyCard = typeof Replies !== 'undefined'
+            ? `<div id="settingsReplyAuto">${Replies.renderAutomation(true)}</div>
+               <p class="field-hint" style="margin-top:8px">${App.isCold() ? '' : 'These rules belong to the Cold Email reply inbox (Replies & Leads). '}Open the inbox: <a href="#/replies">Replies &amp; Leads</a>.</p>`
+            : '';
+        return unsubCard + replyCard;
+    },
+
+    async toggleUnsubBlocklist(enabled) {
+        if (typeof Unsubscribes === 'undefined') return;
+        Unsubscribes.settings = { ...(Unsubscribes.settings || {}), ...(this.unsubSettings || {}) };
+        const ok = await Unsubscribes.toggleBlocklist(enabled);
+        if (ok) this.unsubSettings = { ...(this.unsubSettings || {}), blocklist_enabled: enabled };
+        else {
+            const box = document.getElementById('unsubBlocklist');
+            if (box) { box.checked = !enabled; box.closest('.switch-row')?.classList.toggle('on', !enabled); }
+        }
+    },
+
     // ── Auto-Unblock Tab ─────────────────────────────────
     renderAutoUnblock() {
         const u = this.unblockStatus || {};
@@ -1003,30 +1080,61 @@ const Settings = {
                 ? `<span class="badge badge-warning" style="font-size:0.9rem;padding:6px 14px">${count} blocklisted engaged subscriber(s) found</span>`
                 : '<span class="badge badge-success" style="font-size:0.9rem;padding:6px 14px">All clear</span>';
 
+        const enabled = u.enabled !== false;
+        const last = u.last_run;
+        const lastLine = last
+            ? `${App.formatDateTime(last.at)} (${last.trigger === 'manual' ? 'run by hand' : 'scheduled'}) · ${last.error
+                ? `<span style="color:var(--danger)">failed: ${App.escapeHtml(last.error)}</span>`
+                : `${last.success} re-enabled${last.failed ? `, ${last.failed} failed` : ''}`}`
+            : 'Not run since this was installed';
+        const history = u.history || [];
+        const historyHtml = history.length
+            ? `<div class="table-wrapper" tabindex="0" role="region" aria-label="Auto-unblock history"><table>
+                    <thead><tr><th>Address</th><th>When</th><th>How</th></tr></thead>
+                    <tbody>${history.map(h => `<tr>
+                        <td><a href="#/subscribers?q=${encodeURIComponent(h.email)}">${App.escapeHtml(h.email)}</a></td>
+                        <td>${App.formatDateTime(h.at)}</td>
+                        <td>${h.trigger === 'manual' ? 'By hand' : 'Scheduled'}</td>
+                    </tr>`).join('')}</tbody></table></div>
+               ${u.history_total > history.length ? `<p class="field-hint">Showing the latest ${history.length} of ${App.formatNumber(u.history_total)}.</p>` : ''}`
+            : '<p class="field-hint">Nobody has been re-enabled yet.</p>';
+
         return `
             <div class="card" style="margin-bottom:20px">
                 <div class="card-header">
                     <h2 class="card-title">Auto-Unblock Status</h2>
                     <div class="action-btns">${statusBadge}</div>
                 </div>
-                <div style="display:flex;gap:20px;align-items:center;flex-wrap:wrap">
+                ${this._switchRow({
+                    id: 'autoUnblockEnabled', checked: enabled,
+                    onchange: 'Settings.toggleAutoUnblock(this.checked)',
+                    title: `Run automatically every ${interval} hours`,
+                    desc: 'Off: nothing is re-enabled in the background. "Run Auto-Unblock Now" below still works.',
+                })}
+                <div style="display:flex;gap:20px;align-items:center;flex-wrap:wrap;margin-top:14px">
                     <div>
-                        <span style="color:var(--text-muted);font-size:0.85rem">Blocklisted engaged:</span>
+                        <span style="color:var(--text-muted);font-size:0.85rem">Waiting to be re-enabled:</span>
                         <strong style="color:${failed ? 'var(--text-muted)' : (count > 0 ? 'var(--warning)' : 'var(--success)')}">${failed ? '—' : count}</strong>
                     </div>
                     <div>
-                        <span style="color:var(--text-muted);font-size:0.85rem">Auto-check interval:</span>
-                        <strong>Every ${interval} hours</strong>
+                        <span style="color:var(--text-muted);font-size:0.85rem">Last run:</span>
+                        <strong>${lastLine}</strong>
                     </div>
                 </div>
             </div>
 
             <div class="card" style="margin-bottom:20px">
+                <div class="card-header"><h2 class="card-title">Re-enabled addresses</h2></div>
+                ${historyHtml}
+            </div>
+
+            <div class="card" style="margin-bottom:20px">
                 <div class="card-header"><h2 class="card-title">Manual Unblock</h2></div>
                 <p style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:16px">
-                    Click the button below to scan for subscribers who opened or clicked campaigns but got blocklisted due to bounces.
-                    They will be re-enabled and their bounce records will be deleted. Blocklistings without a bounce record
-                    (manual, reply or import blocklists) and anyone who unsubscribed are never touched.
+                    Click the button below to scan for subscribers who were blocklisted because of a bounce but opened or clicked
+                    a campaign <strong>after</strong> that bounce. They will be re-enabled and their bounce records will be deleted.
+                    Anyone who unsubscribed, and every blocklisting made on purpose in this app (Leads, Replies, Email Validation,
+                    cleanup), is never touched.
                 </p>
                 <button class="btn btn-primary" id="runUnblockBtn" onclick="Settings.runUnblock()">
                     Run Auto-Unblock Now
@@ -1039,7 +1147,8 @@ const Settings = {
                 <div style="font-size:0.85rem;color:var(--text-secondary);line-height:1.8">
                     <p><strong>Every ${interval} hours</strong>, the system automatically:</p>
                     <ul style="padding-left:20px;margin:8px 0">
-                        <li>Finds subscribers who <strong>opened or clicked</strong> any campaign but are <strong>blocklisted with a bounce record</strong> (unsubscribed addresses are always skipped)</li>
+                        <li>Finds subscribers who are <strong>blocklisted with a bounce record</strong> but <strong>opened or clicked after their latest bounce</strong> (engagement before a bounce proves nothing: the mailbox may have died since)</li>
+                        <li>Skips anyone who unsubscribed and every blocklisting made on purpose in this app</li>
                         <li><strong>Re-enables</strong> them (removes blocklist status)</li>
                         <li><strong>Deletes</strong> their bounce records (since they clearly received the email)</li>
                     </ul>
@@ -1047,6 +1156,17 @@ const Settings = {
                 </div>
             </div>
         `;
+    },
+
+    async toggleAutoUnblock(enabled) {
+        try {
+            await API.put('/api/auto-unblock/settings', { enabled });
+            this.unblockStatus = { ...(this.unblockStatus || {}), enabled };
+            App.toast(`Automatic auto-unblock ${enabled ? 'on' : 'off'}`, 'success');
+        } catch {
+            const box = document.getElementById('autoUnblockEnabled');
+            if (box) { box.checked = !enabled; box.closest('.switch-row')?.classList.toggle('on', !enabled); }
+        }
     },
 
     // ── Scheduler Actions ────────────────────────────────
@@ -1090,13 +1210,54 @@ const Settings = {
         }
     },
 
-    /** Update the ON/OFF banner (text + switch visual) in place. */
+    /** Update the switch row in place. */
     _syncSchedulerBanner() {
         const enabled = !!this.schedule?.enabled;
-        const label = document.getElementById('schedEnabledLabel');
-        const banner = document.getElementById('schedEnabledBanner');
-        if (label) label.textContent = enabled ? 'Scheduler is ON' : 'Scheduler is OFF';
-        if (banner) banner.classList.toggle('toggle-on', enabled);
+        const box = document.getElementById('schedEnabled');
+        if (box) {
+            box.checked = enabled;
+            box.closest('.switch-row')?.classList.toggle('on', enabled);
+        }
+    },
+
+    /** A compact on/off row (the same switch the Replies automation uses),
+        instead of a full-width coloured banner. */
+    _switchRow({ id, checked, onchange, title, desc, labelId = '' }) {
+        return `<label class="switch-row settings-switch ${checked ? 'on' : ''}">
+            <span class="switch">
+                <input type="checkbox" id="${id}" ${checked ? 'checked' : ''} onchange="this.closest('.switch-row').classList.toggle('on', this.checked);${onchange}">
+                <span class="slider"></span>
+            </span>
+            <span class="switch-text">
+                <span class="switch-title"${labelId ? ` id="${labelId}"` : ''}>${title}</span>
+                <span class="switch-desc">${desc}</span>
+            </span>
+        </label>`;
+    },
+
+    /** "Thu 8:00 AM" (or "today 8:00 AM") for the next opening of the send
+        window, computed in the window's own timezone. */
+    _nextWindowOpen(s) {
+        try {
+            const tz = s.timezone || 'UTC';
+            const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+                timeZone: tz, weekday: 'short', hour: 'numeric', minute: 'numeric', hourCycle: 'h23',
+            }).formatToParts(new Date()).map(p => [p.type, p.value]));
+            const keys = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+            const labels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+            const today = keys.indexOf(parts.weekday.slice(0, 3).toLowerCase());
+            const nowMin = (parseInt(parts.hour, 10) % 24) * 60 + parseInt(parts.minute, 10);
+            const startMin = s.start_hour * 60 + s.start_minute;
+            const days = new Set(s.days || []);
+            for (let i = 0; i < 8; i++) {
+                const d = (today + i) % 7;
+                if (!days.has(keys[d])) continue;
+                if (i === 0 && startMin <= nowMin) continue;
+                const when = this.formatTime(s.start_hour, s.start_minute);
+                return i === 0 ? `today ${when}` : i === 1 ? `tomorrow ${when}` : `${labels[d]} ${when}`;
+            }
+        } catch { /* unknown timezone in this browser */ }
+        return '';
     },
 
     async saveSchedule() {
@@ -1141,7 +1302,7 @@ const Settings = {
         // Mutates real data (re-enables subscribers, deletes bounce records):
         // needs the same confirmation as every other destructive action.
         if (!await App.confirm('Run Auto-Unblock',
-                'This re-enables bounce-blocklisted subscribers who engaged (opened or clicked) and deletes their false bounce records. Unsubscribed addresses stay blocklisted. Continue?')) return;
+                'This re-enables bounce-blocklisted subscribers who opened or clicked after their latest bounce, and deletes their false bounce records. Unsubscribed addresses and deliberate blocklistings stay blocklisted. Continue?')) return;
         const btn = document.getElementById('runUnblockBtn');
         const resultEl = document.getElementById('unblockResult');
         btn.disabled = true;
@@ -1161,8 +1322,12 @@ const Settings = {
                 }
                 resultEl.innerHTML = html;
             }
-            // Refresh status
+            // Refresh status (last run + history) without losing the result line.
             this.unblockStatus = await API.get('/api/auto-unblock/status');
+            const keep = resultEl.innerHTML;
+            this.renderTab();
+            const fresh = document.getElementById('unblockResult');
+            if (fresh) fresh.innerHTML = keep;
         } catch {
             // API.request already surfaced the server message; reflect it inline.
             resultEl.innerHTML = '<div class="badge badge-danger" style="padding:8px 14px">Auto-unblock run failed — see the notification above</div>';

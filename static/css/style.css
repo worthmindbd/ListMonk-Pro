@@ -457,11 +457,23 @@ input {
 }
 
 .sidebar-footer {
-    padding: 16px 18px;
+    padding: 12px 18px;
     border-top: 1px solid var(--glass-border);
     display: flex;
-    flex-direction: column;
-    gap: 12px;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px 12px;
+}
+
+/* Short desktop screens (a 900px-high laptop): the full nav plus the footer
+   used to push Settings below the fold. Tighten the rhythm so every entry
+   fits without scrolling the sidebar. */
+@media (max-height: 960px) {
+    .sidebar-header { padding: 16px 20px 14px; }
+    .nav-menu { padding: 8px 10px; gap: 1px; }
+    .nav-section-title { margin: 8px 0 2px 0; }
+    .nav-link { padding: 7px 14px; }
 }
 
 .connection-status {
@@ -513,12 +525,12 @@ input {
 }
 
 .logout-btn {
-    width: 100%;
     justify-content: center;
     gap: 8px;
 }
 
 .sidebar-credit {
+    flex-basis: 100%;
     text-align: center;
     font-size: 0.73rem;
     color: var(--text-muted);
@@ -532,6 +544,18 @@ input {
 
 .sidebar-credit a:hover {
     text-decoration: underline;
+}
+
+/* Scroll affordance: without it the clipped last entry reads as a
+   rendering bug rather than "scroll for more". Toggled by App.init(). */
+.nav-menu.is-scrollable {
+    scrollbar-width: thin;
+    scrollbar-color: var(--glass-border) transparent;
+}
+
+.nav-menu.is-scrollable:not(.at-end) {
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent);
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent);
 }
 
 /* ── Main Content Area ─────────────────────────────────────── */
@@ -746,11 +770,12 @@ input {
 /* ── Stat Cards Grid (from DESIGN.md) ──────────────────────── */
 .stats-grid {
     display: grid;
-    /* 165px, not 220px: the five-card pages (Analytics, Replies) only fitted
-       four columns at 1440px, leaving the fifth card orphaned, and the
-       six-card campaign-detail row fitted five. `auto-fit` collapses unused
-       tracks, so rows with fewer cards keep their full-width cards. */
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    /* 160px, not 220px: the five-card pages (Replies) only fitted four
+       columns at 1440px, leaving the fifth card orphaned, and the six-card
+       rows (Analytics with "Sent Today", campaign detail) fitted five at
+       180px. `auto-fit` collapses unused tracks, so rows with fewer cards
+       keep their full-width cards. */
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
     gap: 18px;
     margin-bottom: 24px;
 }
@@ -1085,6 +1110,7 @@ input[type="email"],
 input[type="search"],
 input[type="number"],
 input[type="date"],
+input[type="datetime-local"],
 input[type="password"],
 select,
 textarea {
@@ -2209,11 +2235,12 @@ td .tag {
 }
 
 /* ── Toast Notifications ───────────────────────────────────── */
-/* Offset below the top bar: at top:24px the toast covered the theme toggle
-   and made it unclickable. */
+/* Bottom-right: at the top (even offset below the top bar) toasts covered
+   the theme toggle and the first row of page content — page toolbars and
+   the converter's step tabs. The bottom corner is the emptiest spot. */
 .toast-container {
     position: fixed;
-    top: calc(var(--topbar-height) + 16px);
+    bottom: 24px;
     right: 24px;
     z-index: 1000;
     display: flex;
@@ -2865,23 +2892,17 @@ td .tag {
         gap: 8px;
     }
 
-    /* Scroll affordance: without it the clipped last entry reads as a
-       rendering bug rather than "scroll for more". Toggled by App.init(). */
-    .nav-menu.is-scrollable {
-        scrollbar-width: thin;
-        scrollbar-color: var(--glass-border) transparent;
-    }
-
-    .nav-menu.is-scrollable:not(.at-end) {
-        mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent);
-        -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent);
-    }
 
     /* Both settings tabs stay fully readable instead of the strip clipping
        "Auto-Unblock Pr..." mid-word. */
+    /* One scrolling row of tabs: wrapping five tabs took three lines. */
     .settings-tabs {
-        flex-wrap: wrap;
+        flex-wrap: nowrap;
+        scrollbar-width: none;
+        gap: 6px;
     }
+    .settings-tabs::-webkit-scrollbar { display: none; }
+    .settings-tab { flex-shrink: 0; white-space: nowrap; }
 
     /* The IMAP monitor's badge plus three buttons squeezed the card title
        into three lines ("IMAP / Unsubscribe / Monitor"). Give the actions
@@ -5444,5 +5465,198 @@ td .valid-suggest {
 
     .valid-stats .stat-value {
         font-size: 1.7rem;
+    }
+}
+
+/* ── Overflow ("⋯") menu ──────────────────────────────────────
+   Secondary and destructive actions live here so they are not one stray
+   click away from everyday buttons. The popover is position:fixed and placed
+   by App.init() so a scrolling table cannot clip it. */
+.more-menu {
+    position: relative;
+    display: inline-block;
+}
+.more-menu > summary {
+    list-style: none;
+    cursor: pointer;
+    user-select: none;
+}
+.more-menu > summary::-webkit-details-marker { display: none; }
+.more-menu-btn { min-width: 34px; justify-content: center; font-weight: 700; letter-spacing: 0.05em; }
+.more-menu-pop {
+    position: fixed;
+    z-index: 1200;
+    min-width: 190px;
+    padding: 6px;
+    background: var(--bg-table-sticky);
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md, 12px);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.more-menu-item {
+    all: unset;
+    box-sizing: border-box;
+    display: block;
+    width: 100%;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 0.86rem;
+    color: var(--text-primary);
+    cursor: pointer;
+    white-space: nowrap;
+}
+.more-menu-item:hover,
+.more-menu-item:focus-visible {
+    background: var(--bg-surface-hover);
+}
+.more-menu-item.is-danger { color: var(--ruby, #ef4444); }
+.more-menu-item.is-danger:hover,
+.more-menu-item.is-danger:focus-visible { background: rgba(239, 68, 68, 0.12); }
+.more-menu-sep { height: 1px; margin: 4px 6px; background: var(--glass-border); }
+
+/* ── Empty chart state ───────────────────────────────────────
+   Sits over (or instead of) a canvas that has nothing to draw. */
+.chart-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    text-align: center;
+    padding: 16px;
+    color: var(--text-muted);
+    font-size: 0.88rem;
+}
+.chart-empty svg { opacity: 0.55; }
+.chart-empty p { margin: 0; max-width: 300px; }
+.chart-empty a { color: var(--primary-soft); font-weight: 600; text-decoration: none; }
+.chart-empty a:hover { text-decoration: underline; }
+.has-chart-empty { position: relative; }
+.has-chart-empty canvas { visibility: hidden; }
+
+/* ── Shared small pieces (campaign table / detail) ─────────── */
+.search-count { color: var(--text-secondary); font-size: 0.9rem; white-space: nowrap; }
+.cell-sub,
+.stat-sub { font-size: 0.8rem; color: var(--text-muted); }
+.stat-sub { margin-top: 2px; }
+a.stat-card-link { display: block; color: inherit; text-decoration: none; cursor: pointer; }
+a.stat-card-link:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.cell-link { color: var(--text-primary); font-weight: 600; text-decoration: none; }
+.cell-link:hover { color: var(--primary-soft); text-decoration: underline; }
+td a:not(.btn):not(.tag):not(.cell-link) { color: var(--primary-soft); font-weight: 600; text-decoration: none; }
+td a:not(.btn):not(.tag):not(.cell-link):hover { text-decoration: underline; }
+.btn-warning-outline { border-color: var(--warning); color: var(--warning); }
+.cell-progress { min-width: 110px; }
+.cell-progress small { color: var(--text-muted); }
+.mini-bar { margin-top: 4px; height: 4px; border-radius: 999px; background: var(--bg-input); overflow: hidden; }
+.mini-bar > div { height: 100%; background: linear-gradient(90deg, var(--primary), var(--emerald)); }
+.campaign-progress { padding: 16px 20px; margin-bottom: 16px; }
+.campaign-progress-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 16px; margin-bottom: 10px; font-size: 0.9rem; color: var(--text-secondary); }
+.campaign-progress-head strong { color: var(--text-primary); }
+.progress-track { height: 10px; border-radius: 999px; background: var(--bg-input); border: 1px solid var(--glass-border); overflow: hidden; }
+.progress-fill { height: 100%; background: linear-gradient(90deg, var(--primary), var(--emerald)); border-radius: 999px; transition: width 0.4s ease; }
+.progress-fill.is-paused { background: var(--lemon); }
+.detail-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 20px; }
+.detail-head > div:first-child { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; min-width: 0; }
+.detail-head h2 { margin: 0; overflow-wrap: anywhere; }
+.detail-head .action-btns { flex-wrap: wrap; justify-content: flex-end; }
+.detail-table { width: auto; }
+.detail-table td:first-child { color: var(--text-muted); padding: 8px 20px 8px 0; white-space: nowrap; }
+a.tag { text-decoration: none; color: inherit; }
+a.tag:hover { border-color: var(--primary-soft); }
+.label-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.label-row label { margin: 0; }
+textarea.code-input {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 0.84rem;
+    line-height: 1.55;
+    tab-size: 2;
+}
+.draft-preview { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--glass-border); }
+.attrib-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto; gap: 8px; margin-bottom: 8px; }
+.attrib-editor textarea[hidden], .attrib-editor [hidden] { display: none; }
+.template-editor { max-width: none; }
+.template-editor-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.template-editor-grid textarea { min-height: 520px; }
+.template-live-frame { height: 520px; min-height: 0; }
+@media (max-width: 1100px) {
+    .template-editor-grid { grid-template-columns: 1fr; }
+    .template-editor-grid textarea { min-height: 320px; }
+}
+.seg-count { display: inline-block; min-width: 1.4em; margin-left: 4px; padding: 0 6px; border-radius: 999px; background: var(--bg-input); font-size: 0.74rem; font-weight: 600; text-align: center; }
+.deliv-seg-btn.is-active .seg-count { background: rgba(255, 255, 255, 0.22); }
+.warmup-chart { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; }
+.warmup-yaxis { display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; height: 120px; font-size: 0.72rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.warmup-ramp-axis { padding-left: 0; }
+.warmup-bar { position: relative; }
+.warmup-today { position: absolute; bottom: calc(100% + 4px); left: 50%; transform: translateX(-50%); font-size: 0.66rem; font-weight: 700; color: var(--emerald); white-space: nowrap; }
+.warmup-bars { padding-top: 22px; }
+tr.row-muted td { color: var(--text-muted); font-style: italic; font-size: 0.85rem; }
+.settings-switch { margin-bottom: 4px; }
+.warmup-yaxis { padding-top: 22px; box-sizing: border-box; }
+
+/* ── Dashboard "needs attention" strip ─────────────────────── */
+.attention-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.attention-item {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 8px 14px; border-radius: var(--radius-pill);
+    background: var(--bg-surface); border: 1px solid var(--glass-border);
+    color: var(--text-primary); font-size: 0.85rem; font-weight: 500; text-decoration: none;
+    transition: var(--transition-ui);
+}
+.attention-item:hover { border-color: var(--glass-border-hover); background: var(--bg-surface-hover); }
+.attention-item > span[aria-hidden] { color: var(--text-muted); }
+.attention-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--info); }
+.tone-success .attention-dot { background: var(--emerald); }
+.tone-warning .attention-dot { background: var(--lemon); }
+.tone-danger .attention-dot { background: var(--ruby); }
+
+/* Phones: KPI cards two per row instead of four stacked full-width cards
+   that filled the whole first screen. */
+@media (max-width: 600px) {
+    .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .stats-grid .stat-card { padding: 14px 14px; }
+    .stats-grid .stat-value { font-size: 1.5rem; }
+    .stats-grid .stat-label { font-size: 0.68rem; letter-spacing: 0.04em; }
+    /* Toolbar: search on its own line, filters and actions share the next. */
+    .search-bar .search-input { flex: 1 1 100%; }
+    .search-bar .page-actions { margin-left: auto; flex-wrap: nowrap; }
+}
+.an-filter-action { flex-direction: column; gap: 6px; }
+.an-filter-action .btn { min-width: 0; width: auto; }
+.an-quick-label { font-size: 0.85rem; font-weight: 500; color: var(--text-secondary); }
+@media (max-width: 1100px) { .an-filter-action { grid-column: 1 / -1; } }
+th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.an-compare table { min-width: 640px; }
+.inline-details { display: inline; margin-left: 4px; }
+.inline-details > summary { display: inline; cursor: pointer; color: var(--primary-soft); font-size: 0.8rem; font-weight: 600; }
+.inline-details[open] .inline-details-body { display: block; margin-top: 8px; padding: 10px 12px; border-radius: var(--radius-md); background: var(--bg-input); border: 1px solid var(--glass-border); font-size: 0.82rem; color: var(--text-secondary); }
+.inline-details-body p { margin: 0 0 6px; }
+.inline-details-body p:last-child { margin-bottom: 0; }
+details.val-quick > summary { list-style: none; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+details.val-quick > summary::-webkit-details-marker { display: none; }
+details.val-quick > summary::before { content: '▸'; color: var(--text-muted); transition: transform 0.15s; }
+details.val-quick[open] > summary::before { transform: rotate(90deg); }
+.plain-check { display: inline-flex; align-items: center; gap: 8px; font-size: 0.88rem; color: var(--text-primary); cursor: pointer; }
+.plain-check input { width: 16px; height: 16px; accent-color: var(--primary); }
+/* Phones: the pinned Actions column covers the middle of a wide table, so
+   the status that matters most rides under the name, and an empty-state
+   message stays in view instead of centring across the 600px-wide table. */
+.phone-only { display: none; }
+@media (max-width: 600px) {
+    .phone-only { display: block; margin-top: 4px; }
+    .table-wrapper td[colspan] > .empty-state {
+        position: sticky;
+        left: 0;
+        width: calc(100vw - 52px);
+        padding-left: 8px;
+        padding-right: 8px;
     }
 }

@@ -7,9 +7,9 @@ const App = {
 
     pages: {
         'dashboard': { title: 'Dashboard', render: () => Dashboard.render() },
-        'subscribers': { title: 'Subscribers', render: () => Subscribers.render() },
-        'lists': { title: 'Lists', render: () => Lists.render() },
-        'campaigns': { title: 'Campaigns', render: () => Campaigns.render() },
+        'subscribers': { title: 'Subscribers', coldTitle: 'Leads', render: () => Subscribers.render() },
+        'lists': { title: 'Lists', coldTitle: 'Lead Lists', render: () => Lists.render() },
+        'campaigns': { title: 'Campaigns', coldTitle: 'Cold Outreach', render: () => Campaigns.render() },
         'analytics': { title: 'Analytics', render: () => Analytics.render() },
         'settings': { title: 'Settings', render: () => Settings.render() },
         'templates': { title: 'Templates', render: () => Templates.render() },
@@ -30,15 +30,14 @@ const App = {
 
         window.addEventListener('hashchange', () => this.route());
 
-        // The mobile sidebar's nav list scrolls; without a hint the clipped
-        // last entry reads as a rendering bug instead of "scroll for more".
-        // Only the off-canvas drawer needs it - on desktop the full nav is
-        // always visible and masking it would just cut the last entry.
+        // The nav list scrolls when the screen is too short for it (phones,
+        // and short laptop screens); without a hint the clipped last entry
+        // reads as a rendering bug instead of "scroll for more".
         const navMenu = document.querySelector('.nav-menu');
         const navMq = window.matchMedia('(max-width: 768px)');
         const syncNavHint = () => {
             if (!navMenu) return;
-            const scrollable = navMq.matches && navMenu.scrollHeight > navMenu.clientHeight + 1;
+            const scrollable = navMenu.scrollHeight > navMenu.clientHeight + 1;
             navMenu.classList.toggle('is-scrollable', scrollable);
             navMenu.classList.toggle(
                 'at-end',
@@ -91,6 +90,64 @@ const App = {
                 }
             });
         }
+
+        // One "⋯" menu open at a time: a click anywhere else closes it.
+        document.addEventListener('click', (e) => {
+            document.querySelectorAll('.more-menu[open]').forEach(d => {
+                if (!d.contains(e.target) && !(d._pop && d._pop.contains(e.target))) d.open = false;
+            });
+        });
+        // While open, the popover is moved to <body> and placed from the
+        // button's rect: inside the table it was clipped by the scrolling
+        // .table-wrapper, and glass cards (backdrop-filter) turn
+        // position:fixed into position:absolute for their descendants.
+        document.addEventListener('toggle', (e) => {
+            const d = e.target;
+            if (!(d instanceof HTMLElement) || !d.classList.contains('more-menu')) return;
+            const pop = d._pop || d.querySelector('.more-menu-pop');
+            const btn = d.querySelector('summary');
+            if (!pop || !btn) return;
+            d._pop = pop;
+            if (!d.open) { pop.remove(); return; }
+            document.querySelectorAll('.more-menu[open]').forEach(o => { if (o !== d) o.open = false; });
+            document.body.appendChild(pop);
+            const r = btn.getBoundingClientRect();
+            pop.style.visibility = 'hidden';
+            pop.style.top = '0px'; pop.style.left = '0px';
+            const w = pop.offsetWidth, h = pop.offsetHeight;
+            let left = d.classList.contains('more-menu-left') ? r.left : r.right - w;
+            left = Math.max(8, Math.min(left, window.innerWidth - w - 8));
+            let top = r.bottom + 4;
+            if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 4);
+            pop.style.left = left + 'px';
+            pop.style.top = top + 'px';
+            pop.style.visibility = '';
+            pop.querySelector('.more-menu-item')?.focus();
+        }, true);
+        // A scrolled page would leave the fixed popover floating off its button.
+        document.getElementById('contentArea')?.addEventListener('scroll', () => {
+            document.querySelectorAll('.more-menu[open]').forEach(d => { d.open = false; });
+        }, { passive: true });
+        document.addEventListener('keydown', (e) => {
+            const open = document.querySelector('.more-menu[open]');
+            if (!open) return;
+            if (e.key === 'Escape') {
+                open.open = false;
+                open.querySelector('summary')?.focus();
+                return;
+            }
+            // Arrow keys move through the items; Tab leaves the menu.
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                const items = Array.from(open._pop?.querySelectorAll('.more-menu-item') || []);
+                if (!items.length) return;
+                e.preventDefault();
+                const i = items.indexOf(document.activeElement);
+                const next = e.key === 'ArrowDown' ? (i + 1) % items.length : (i - 1 + items.length) % items.length;
+                items[next].focus();
+            } else if (e.key === 'Tab') {
+                open.open = false;
+            }
+        });
 
         // Close sidebar on content click (mobile)
         document.querySelector('.content-area').addEventListener('click', () => {
@@ -343,6 +400,8 @@ const App = {
 
         // Release charts bound to the outgoing page's canvases
         this.destroyCharts();
+        this.stopAutoRefresh();
+        this.closeMenus();
 
         // Update nav
         document.querySelectorAll('.nav-link').forEach(link => {
@@ -352,8 +411,8 @@ const App = {
             else link.removeAttribute('aria-current');
         });
 
-        // Update title
-        document.getElementById('pageTitle').textContent = page.title;
+        // Update title: the same mode-aware wording as the sidebar entry.
+        document.getElementById('pageTitle').textContent = this.pageTitle(hash);
 
         // Render page
         const content = document.getElementById('contentArea');
@@ -366,14 +425,98 @@ const App = {
                     // currentPage (not the render generation): in-page seq
                     // bumps must not suppress this navigation-level error UI.
                     if (this.currentPage !== hash) return;
-                    content.innerHTML = `<div class="empty-state"><h2>Failed to load ${App.escapeHtml(page.title)}</h2><p>${App.escapeHtml(err?.message || '')}</p></div>`;
+                    content.innerHTML = `<div class="empty-state"><h2>Failed to load ${App.escapeHtml(this.pageTitle(hash))}</h2><p>${App.escapeHtml(err?.message || '')}</p></div>`;
                 });
             }
         } catch (err) {
             console.error(`Error rendering page ${hash}:`, err);
             if (this.currentPage !== hash) return;
-            content.innerHTML = `<div class="empty-state"><h2>Failed to load ${App.escapeHtml(page.title)}</h2><p>${App.escapeHtml(err?.message || '')}</p></div>`;
+            content.innerHTML = `<div class="empty-state"><h2>Failed to load ${App.escapeHtml(this.pageTitle(hash))}</h2><p>${App.escapeHtml(err?.message || '')}</p></div>`;
         }
+    },
+
+    /** Page heading for the current mode (Cold Email renames three pages). */
+    pageTitle(hash) {
+        const page = this.pages[hash];
+        if (!page) return '';
+        return (this.isCold() && page.coldTitle) || page.title;
+    },
+
+    isCold() { return this.currentMode === 'cold_email'; },
+
+    /** Mode-aware nouns, so copy matches the sidebar: "lead" in Cold Email
+        mode, "subscriber" in Newsletter mode. `plural` and `cap` select the
+        form ("Leads", "subscribers"). */
+    term(word, { plural = false, cap = false } = {}) {
+        const cold = this.isCold();
+        const forms = {
+            subscriber: cold ? ['lead', 'leads'] : ['subscriber', 'subscribers'],
+            list: cold ? ['lead list', 'lead lists'] : ['list', 'lists'],
+        }[word] || [word, word + 's'];
+        const out = forms[plural ? 1 : 0];
+        return cap ? out.charAt(0).toUpperCase() + out.slice(1) : out;
+    },
+
+    /** Debounce helper for search-as-you-type boxes. */
+    debounce(fn, ms = 350) {
+        let t = null;
+        return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+    },
+
+    /** "⋯" overflow menu for secondary / dangerous actions. `items` are
+        {label, onclick, danger?, hidden?}; hidden ones are skipped. Built on
+        <details>, so it opens with the keyboard too; a document click closes
+        any other open menu (see init). */
+    moreMenu(items, label = 'More actions', { align = 'right', text = '' } = {}) {
+        const rows = items.filter(i => i && !i.hidden).map(i =>
+            `<button type="button" role="menuitem" class="more-menu-item${i.danger ? ' is-danger' : ''}"
+                onclick="App.closeMenus();${App.escapeHtml(i.onclick)}">${App.escapeHtml(i.label)}</button>`
+        ).join('');
+        if (!rows) return '';
+        return `<details class="more-menu more-menu-${align}">
+            <summary class="btn btn-sm more-menu-btn" aria-label="${App.escapeHtml(label)}" title="${App.escapeHtml(label)}">${text ? App.escapeHtml(text) + ' ' : ''}<span aria-hidden="true">⋯</span></summary>
+            <div class="more-menu-pop" role="menu">${rows}</div>
+        </details>`;
+    },
+
+    /** Close every open "⋯" menu (their popovers live on <body> while open). */
+    closeMenus() {
+        document.querySelectorAll('.more-menu[open]').forEach(d => { d.open = false; });
+        document.querySelectorAll('body > .more-menu-pop').forEach(p => p.remove());
+    },
+
+    /** Empty-state overlay for a chart card: a bare 0–1 grid or a grey ring
+        reads as "broken"; say what is missing and where to go instead. */
+    emptyChart(message, linkHref = '', linkText = '') {
+        return `<div class="chart-empty">
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" width="28" height="28"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+            <p>${App.escapeHtml(message)}</p>
+            ${linkHref ? `<a href="${App.escapeHtml(linkHref)}">${App.escapeHtml(linkText)} →</a>` : ''}
+        </div>`;
+    },
+
+    // ── Auto refresh ─────────────────────────────────────
+    /** One page-level refresh timer. A page calls App.autoRefresh(page, fn, ms)
+        while it shows live data (a running campaign); route() clears it, and it
+        skips ticks while the tab is hidden or a dialog is open. */
+    _refreshTimer: null,
+    autoRefresh(page, fn, ms = 15000) {
+        this.stopAutoRefresh();
+        this._refreshTimer = setInterval(() => {
+            if (this.currentPage !== page) { this.stopAutoRefresh(); return; }
+            if (document.hidden) return;
+            const overlay = document.getElementById('modalOverlay');
+            if (overlay && overlay.style.display !== 'none') return;
+            // Never repaint over something the user is typing into.
+            const a = document.activeElement;
+            if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.type !== 'checkbox') return;
+            if (document.querySelector('.more-menu[open]')) return;
+            try { fn(); } catch (e) { console.error(e); }
+        }, ms);
+    },
+    stopAutoRefresh() {
+        if (this._refreshTimer) clearInterval(this._refreshTimer);
+        this._refreshTimer = null;
     },
 
     async checkConnection() {
@@ -570,6 +713,39 @@ const App = {
         confirmBtn.className = 'btn btn-primary';
         confirmBtn.onclick = () => this.closeModal();
         this._openModalOverlay();
+    },
+
+    /** A small form in the shared dialog: Cancel + one primary action, so
+        it never shows a second "OK" next to the form's own button. The
+        handler returns false to keep the dialog open (validation failed). */
+    showForm(title, bodyHtml, confirmText, onConfirm) {
+        this._modalResolve = null;
+        const body = document.getElementById('modalBody');
+        document.getElementById('modalTitle').textContent = title;
+        body.innerHTML = bodyHtml;
+        this.labelControls(body);
+        const cancelBtn = document.getElementById('modalCancel');
+        cancelBtn.style.display = '';
+        const confirmBtn = document.getElementById('modalConfirm');
+        confirmBtn.style.display = '';
+        confirmBtn.textContent = confirmText;
+        confirmBtn.className = 'btn btn-primary';
+        confirmBtn.onclick = async () => {
+            confirmBtn.disabled = true;
+            try {
+                const keep = await onConfirm();
+                if (keep !== false) this.closeModal();
+            } finally {
+                confirmBtn.disabled = false;
+            }
+        };
+        this._openModalOverlay();
+        const first = body.querySelector('input, select, textarea');
+        if (first) first.focus();
+        // Enter in the form's field submits like the button.
+        body.querySelectorAll('input').forEach(inp => inp.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); confirmBtn.click(); }
+        }));
     },
 
     // ── Pagination ───────────────────────────────────────
@@ -880,10 +1056,9 @@ const Templates = {
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
                         <input type="search" id="tplSearch" placeholder="Search templates by name…"
                             aria-label="Search templates"
-                            value="${App.escapeHtml(this._filter)}" onkeydown="if(event.key==='Enter')Templates.search()">
+                            value="${App.escapeHtml(this._filter)}" oninput="Templates.searchLive()" onkeydown="if(event.key==='Enter')Templates.search()">
                     </div>
-                    <button class="btn" onclick="Templates.search()">Search</button>
-                    <span style="color:var(--text-secondary);font-size:0.9rem">${templates.length} template(s)</span>
+                    <span class="search-count">${templates.length} template${templates.length === 1 ? '' : 's'}</span>
                     <div class="page-actions">
                         <button class="btn btn-primary" onclick="Templates.showCreate()">+ New Template</button>
                     </div>
@@ -892,29 +1067,30 @@ const Templates = {
                 <div class="table-wrapper" tabindex="0" role="region" aria-label="Scrollable data table"><table>
                     <thead><tr>
                         <th class="col-select">${App.selection.headbox('templates', 'Select all templates shown')}</th>
-                        <th>ID</th><th>Name</th><th>Type</th><th>Default</th><th>Created</th><th>Updated</th><th class="cell-actions">Actions</th>
+                        <th>ID</th><th>Name</th><th>Type</th><th>Default</th><th>Created</th><th class="cell-actions">Actions</th>
                     </tr></thead><tbody>`;
 
             if (!templates.length) {
-                html += '<tr><td colspan="8"><div class="empty-state"><h2>No templates found</h2></div></td></tr>';
+                html += '<tr><td colspan="7"><div class="empty-state"><h2>No templates found</h2></div></td></tr>';
             }
             templates.forEach(t => {
                 const name = App.escapeHtml(t.name || '');
                 html += `<tr class="${App.selection.has('templates', t.id) ? 'row-selected' : ''}">
                     <td class="col-select">${App.selection.rowbox('templates', t.id, `Select ${t.name}`)}</td>
                     <td>${t.id}</td>
-                    <td><strong class="cell-clamp" title="${name}">${name}</strong></td>
+                    <td><a class="cell-link cell-clamp cell-clamp-lg" href="javascript:void(0)" onclick="Templates.preview(${t.id})" title="${name}">${name}</a></td>
                     <td><span class="badge badge-info">${App.escapeHtml(t.type || '-')}</span></td>
                     <td>${t.is_default ? '<span class="badge badge-success">Default</span>' : '-'}</td>
-                    <td>${App.formatDate(t.created_at)}</td>
-                    <td>${App.formatDate(t.updated_at)}</td>
+                    <td title="Updated ${App.escapeHtml(App.formatDateTime(t.updated_at))}">${App.formatDate(t.created_at)}</td>
                     <td class="cell-actions">
                         <div class="action-btns">
                             <button class="btn btn-sm" onclick="Templates.preview(${t.id})">Preview</button>
-                            <button class="btn btn-sm" onclick="Templates.duplicate(${t.id})">Duplicate</button>
                             <button class="btn btn-sm" onclick="Templates.showEdit(${t.id})">Edit</button>
-                            ${!t.is_default ? `<button class="btn btn-sm" onclick="Templates.setDefault(${t.id})">Set Default</button>` : ''}
-                            <button class="btn btn-sm btn-danger" onclick="Templates.remove(${t.id})">Delete</button>
+                            ${App.moreMenu([
+                                { label: 'Duplicate', onclick: `Templates.duplicate(${t.id})` },
+                                { label: 'Set as default', onclick: `Templates.setDefault(${t.id})`, hidden: !!t.is_default },
+                                { label: 'Delete…', onclick: `Templates.remove(${t.id})`, danger: true, hidden: !!t.is_default },
+                            ], `More actions for ${t.name}`)}
                         </div>
                     </td>
                 </tr>`;
@@ -923,7 +1099,12 @@ const Templates = {
             html += '</tbody></table></div>';
             if (App.stale(seq)) return;
             App.syncUrl('templates', { q: this._filter });
+            const keepFocus = document.activeElement?.id === 'tplSearch';
             App.setContent(html);
+            if (keepFocus) {
+                const box = document.getElementById('tplSearch');
+                if (box) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+            }
         } catch (err) {
             console.error('Templates load error:', err);
             if (App.stale(seq)) return;
@@ -937,50 +1118,106 @@ const Templates = {
         this.render();
     },
 
-    preview(id) {
+    searchLive: App.debounce(() => Templates.search(), 250),
+
+    /** Editor with a live, ListMonk-rendered preview beside the code. */
+    _editor({ title, nameId, bodyId, name, body, actions }) {
+        return `
+            <div class="inline-form template-editor">
+                <h2 style="margin-bottom:16px">${title}</h2>
+                <div class="form-group"><label>Name</label><input type="text" id="${nameId}" value="${App.escapeHtml(name || '')}" placeholder="Template name"></div>
+                <div class="template-editor-grid">
+                    <div class="form-group">
+                        <label for="${bodyId}">Body (HTML)</label>
+                        <textarea id="${bodyId}" class="code-input" rows="24" spellcheck="false" placeholder="HTML content. Put {{ template &quot;content&quot; . }} where the campaign body goes."
+                            oninput="Templates.livePreview('${bodyId}')">${App.escapeHtml(body || '')}</textarea>
+                        <p class="field-hint">A campaign template must contain <code>{{ template "content" . }}</code>: that is where each campaign's body is inserted.</p>
+                    </div>
+                    <div class="form-group">
+                        <div class="label-row"><label>Live preview</label><span class="cell-sub" id="tplPreviewState">Sample campaign &amp; subscriber</span></div>
+                        <iframe class="preview-frame template-live-frame" id="tplLiveFrame" sandbox="" title="Template preview"></iframe>
+                    </div>
+                </div>
+                <div class="form-actions">${actions}</div>
+            </div>`;
+    },
+
+    _previewTimer: null,
+    livePreview(bodyId, immediate = false) {
+        clearTimeout(this._previewTimer);
+        const run = async () => {
+            const frame = document.getElementById('tplLiveFrame');
+            const state = document.getElementById('tplPreviewState');
+            const body = document.getElementById(bodyId)?.value ?? '';
+            if (!frame) return;
+            if (!body.trim()) { frame.srcdoc = ''; if (state) state.textContent = 'Nothing to preview yet'; return; }
+            if (state) state.textContent = 'Rendering…';
+            try {
+                const res = await API.request('POST', '/api/templates/preview', { body, type: 'campaign' }, false, true);
+                if (!document.getElementById('tplLiveFrame')) return;
+                frame.srcdoc = res?.html ?? '';
+                if (state) state.textContent = 'Rendered by ListMonk with sample data';
+            } catch (err) {
+                if (state) state.textContent = `Template error: ${err?.message || 'could not render'}`;
+            }
+        };
+        if (immediate) run(); else this._previewTimer = setTimeout(run, 700);
+    },
+
+    async preview(id) {
         const t = this._data.find(tpl => tpl.id === id);
         if (!t) return;
-        App.setContent(`
+        const seq = App.bumpSeq();
+        const header = `
             <div style="margin-bottom:12px">
                 <button class="btn btn-secondary" onclick="Templates.render()">Back to Templates</button>
                 <span style="margin-left:12px;font-size:1.1rem;font-weight:600">${App.escapeHtml(t.name || '')}</span>
-            </div>
-            <iframe class="preview-frame" sandbox="" srcdoc="${App.escapeHtml(t.body || '')}"></iframe>
+            </div>`;
+        App.setContent(`${header}<div class="loading-spinner">Rendering preview…</div>`);
+        // ListMonk renders the template with a sample campaign and subscriber,
+        // so {{ … }} actions show their output instead of raw template code.
+        let html = null;
+        try {
+            const res = await API.get(`/api/templates/${id}/preview`, true);
+            html = res && typeof res.html === 'string' ? res.html : null;
+        } catch { /* fall back to the raw body below */ }
+        if (App.stale(seq)) return;
+        const note = html === null
+            ? '<p style="margin-bottom:8px;color:var(--text-muted)">ListMonk could not render this template (check it for template errors). Showing the raw HTML.</p>'
+            : '<p style="margin-bottom:8px;color:var(--text-muted)">Rendered with ListMonk\'s sample campaign and subscriber.</p>';
+        App.setContent(`${header}${note}
+            <iframe class="preview-frame" sandbox="" srcdoc="${App.escapeHtml(html ?? (t.body || ''))}"></iframe>
         `);
     },
 
     showCreate() {
-        App.setContent(`
-            <div class="inline-form">
-                <h2 style="margin-bottom:16px">Create Template</h2>
-                <div class="form-group"><label>Name</label><input type="text" id="tplName" placeholder="Template name"></div>
-                <div class="form-group">
-                    <label>Type</label>
-                    <select id="tplType"><option value="campaign">Campaign</option></select>
-                </div>
-                <div class="form-group"><label>Body (HTML)</label><textarea id="tplBody" rows="15" placeholder="HTML content"></textarea></div>
-                <div class="form-actions">
-                    <button class="btn btn-primary" onclick="Templates.create()">Create</button>
-                    <button class="btn btn-secondary" onclick="Templates.render()">Cancel</button>
-                </div>
-            </div>
-        `);
+        const starter = `<!doctype html>
+<html>
+  <body style="font-family: Arial, sans-serif; color: #222;">
+    {{ template "content" . }}
+    <p style="font-size: 12px; color: #888;">
+      <a href="{{ UnsubscribeURL }}">Unsubscribe</a>
+    </p>
+  </body>
+</html>`;
+        App.setContent(this._editor({
+            title: 'Create Template', nameId: 'tplName', bodyId: 'tplBody', name: '', body: starter,
+            actions: `<button class="btn btn-primary" onclick="Templates.create()">Create</button>
+                      <button class="btn btn-secondary" onclick="Templates.render()">Cancel</button>`,
+        }));
+        this.livePreview('tplBody', true);
     },
 
     async showEdit(id) {
         const t = this._data.find(tpl => tpl.id === id);
         if (!t) { App.toast('Template not found', 'error'); return; }
-        App.setContent(`
-            <div class="inline-form">
-                <h2 style="margin-bottom:16px">Edit Template #${t.id}</h2>
-                <div class="form-group"><label>Name</label><input type="text" id="editTplName" value="${App.escapeHtml(t.name || '')}"></div>
-                <div class="form-group"><label>Body (HTML)</label><textarea id="editTplBody" rows="15">${App.escapeHtml(t.body || '')}</textarea></div>
-                <div class="form-actions">
-                    <button class="btn btn-primary" onclick="Templates.update(${t.id})">Update</button>
-                    <button class="btn btn-secondary" onclick="Templates.render()">Cancel</button>
-                </div>
-            </div>
-        `);
+        App.setContent(this._editor({
+            title: `Edit Template #${t.id}`, nameId: 'editTplName', bodyId: 'editTplBody', name: t.name, body: t.body,
+            actions: `<button class="btn btn-primary" onclick="Templates.update(${t.id})">Save</button>
+                      <button class="btn" onclick="Templates.preview(${t.id})">Full preview</button>
+                      <button class="btn btn-secondary" onclick="Templates.render()">Cancel</button>`,
+        }));
+        this.livePreview('editTplBody', true);
     },
 
     async create() {
@@ -1098,9 +1335,18 @@ const Bounces = {
                 ? API.get('/api/campaigns?per_page=500&order_by=created_at&order=DESC')
                 : Promise.resolve(null);
 
-            const [campRes, bounceRes] = await Promise.all([
+            // Per-type totals for the tabs (best effort: a failed count shows
+            // no number rather than failing the page).
+            const countFor = (type) => {
+                const p = new URLSearchParams({ page: '1', per_page: '1' });
+                if (type) p.set('bounce_type', type);
+                if (this.campaignFilter) p.set('campaign_id', String(this.campaignFilter));
+                return API.get(`/api/bounces?${p}`, true).then(r => r?.data?.total ?? null).catch(() => null);
+            };
+            const [campRes, bounceRes, ...counts] = await Promise.all([
                 fetchCampaigns,
                 API.get(`/api/bounces?${this._queryParams()}`),
+                ...['hard', 'soft', ''].map(t => t === this.typeFilter ? Promise.resolve('self') : countFor(t)),
             ]);
             if (App.stale(seq)) return;
             if (campRes) this.campaigns = campRes?.data?.results || [];
@@ -1108,6 +1354,8 @@ const Bounces = {
             const data = bounceRes?.data || {};
             const pageBounces = data.results || [];
             const total = data.total || 0;
+            const typeCounts = Object.fromEntries(['hard', 'soft', ''].map((t, i) =>
+                [t, counts[i] === 'self' ? total : counts[i]]));
             // A delete can strand the view past the last page; clamp and
             // re-fetch instead of painting a false "no bounces" page.
             const clamped = App.clampPage(this.page, total, this.perPage);
@@ -1146,19 +1394,21 @@ const Bounces = {
                         <option value="0" ${!this.campaignFilter ? 'selected' : ''}>All Campaigns</option>
                         ${campOptions}
                     </select>
-                    <select id="bounceTypeFilter" aria-label="Filter bounces by type" onchange="Bounces.filterType(this.value)" style="width:auto">
-                        <option value="hard" ${this.typeFilter === 'hard' ? 'selected' : ''}>Hard Bounces</option>
-                        <option value="soft" ${this.typeFilter === 'soft' ? 'selected' : ''}>Soft Bounces</option>
-                        <option value="" ${!this.typeFilter ? 'selected' : ''}>All Bounce Types</option>
-                    </select>
-                    <span style="color:var(--text-secondary);font-size:0.9rem">
-                        ${App.formatNumber(total)} ${this._typeLabel()}
-                        ${this.campaignFilter ? ' for ' + App.escapeHtml(filterLabel) : ''}
-                    </span>
+                    <div class="deliv-seg" role="tablist" aria-label="Bounce type">
+                        ${[['hard', 'Hard'], ['soft', 'Soft'], ['', 'All']].map(([v, l]) => {
+                            const n = typeCounts[v];
+                            const active = this.typeFilter === v;
+                            return `<button type="button" role="tab" aria-selected="${active}" class="deliv-seg-btn${active ? ' is-active' : ''}"
+                                onclick="Bounces.filterType('${v}')">${l}${n === null || n === undefined ? '' : ` <span class="seg-count">${App.formatNumber(n)}</span>`}</button>`;
+                        }).join('')}
+                    </div>
+                    ${this.campaignFilter ? `<span class="search-count">for ${App.escapeHtml(filterLabel)}</span>` : ''}
                     <div class="page-actions">
                         <button class="btn btn-primary" onclick="Bounces.ingestBounces()">Ingest New Bounces</button>
-                        <button class="btn" onclick="Bounces.exportBounces()">Export CSV</button>
-                        <button class="btn btn-danger" onclick="Bounces.deleteAll()">${deleteActionLabel}</button>
+                        ${App.moreMenu([
+                            { label: 'Export CSV', onclick: 'Bounces.exportBounces()' },
+                            { label: `${deleteActionLabel}…`, onclick: 'Bounces.deleteAll()', danger: true, hidden: !total },
+                        ], 'More bounce actions')}
                     </div>
                 </div>
                 ${App.selection.bar('bounces')}`;
@@ -1167,7 +1417,8 @@ const Bounces = {
             // keeps a 600px min-width on phones, which pushed the centred
             // message off-screen behind the pinned action column.
             if (!pageBounces.length) {
-                html += `<div class="card"><div class="empty-state"><h2>No ${this._typeLabel()} found</h2></div></div>`;
+                html += `<div class="card"><div class="empty-state"><h2>No ${this._typeLabel()} found</h2>
+                    ${this.typeFilter === 'hard' && typeCounts.soft ? `<p>There ${typeCounts.soft === 1 ? 'is' : 'are'} ${App.formatNumber(typeCounts.soft)} soft bounce${typeCounts.soft === 1 ? '' : 's'}. <a href="javascript:void(0)" onclick="Bounces.filterType('soft')">Show soft bounces</a></p>` : ''}</div></div>`;
             } else {
                 html += `<div class="table-wrapper" tabindex="0" role="region" aria-label="Scrollable data table"><table>
                     <thead><tr>

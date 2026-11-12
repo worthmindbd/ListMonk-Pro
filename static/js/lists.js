@@ -28,11 +28,14 @@ const Lists = {
             if (clamped !== this.page) { this.page = clamped; return this.render(); }
             this._rows = lists;
 
+            const subsCap = App.term('subscriber', { plural: true, cap: true });
+            const listNoun = App.term('list');
+            const listNouns = App.term('list', { plural: true });
             App.selection.register('lists', {
-                noun: 'list',
+                noun: listNoun,
                 pageValues: this.pageIds(),
                 actions: [
-                    { label: 'Export Subscribers', onclick: 'Lists.bulkExport()' },
+                    { label: `Export ${subsCap}`, onclick: 'Lists.bulkExport()' },
                     { label: 'Delete', onclick: 'Lists.bulkDelete()', danger: true },
                 ],
             });
@@ -41,24 +44,25 @@ const Lists = {
                 <div class="search-bar">
                     <div class="search-input">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                        <input type="search" id="listSearch" placeholder="Search lists…"
-                            aria-label="Search lists"
-                            value="${App.escapeHtml(this.query)}" onkeydown="if(event.key==='Enter')Lists.search()">
+                        <input type="search" id="listSearch" placeholder="Search ${listNouns}…"
+                            aria-label="Search ${listNouns}"
+                            value="${App.escapeHtml(this.query)}" oninput="Lists.searchLive()" onkeydown="if(event.key==='Enter')Lists.search()">
                     </div>
-                    <button class="btn" onclick="Lists.search()">Search</button>
+                    <span class="search-count">${App.formatNumber(total)} ${total === 1 ? listNoun : listNouns}</span>
                     <div class="page-actions">
-                        <button class="btn btn-primary" onclick="Lists.showCreate()">+ New List</button>
+                        <button class="btn btn-primary" onclick="Lists.showCreate()">+ New ${App.term('list', { cap: true })}</button>
                     </div>
                 </div>
                 ${App.selection.bar('lists')}
                 <div class="table-wrapper" tabindex="0" role="region" aria-label="Scrollable data table"><table>
                     <thead><tr>
                         <th class="col-select">${App.selection.headbox('lists', 'Select all lists on this page')}</th>
-                        <th>ID</th><th>Name</th><th>Type</th><th>Optin</th><th>Subscribers</th><th>Status</th><th>Created</th><th class="cell-actions">Actions</th>
+                        <th>ID</th><th>Name</th><th>${subsCap}</th><th>Type</th><th>Optin</th><th>Status</th><th>Created</th><th class="cell-actions">Actions</th>
                     </tr></thead><tbody>`;
 
             if (!lists.length) {
-                html += '<tr><td colspan="9"><div class="empty-state"><h2>No lists found</h2></div></td></tr>';
+                html += `<tr><td colspan="9"><div class="empty-state"><h2>No ${listNouns} found</h2>
+                    ${this.query ? '<p>Try a different search.</p>' : `<p><button class="btn btn-primary" onclick="Lists.showCreate()">+ Create a ${listNoun}</button></p>`}</div></td></tr>`;
             }
 
             lists.forEach(l => {
@@ -66,18 +70,20 @@ const Lists = {
                 html += `<tr class="${App.selection.has('lists', l.id) ? 'row-selected' : ''}">
                     <td class="col-select">${App.selection.rowbox('lists', l.id, `Select ${l.name}`)}</td>
                     <td>${l.id}</td>
-                    <td><strong>${App.escapeHtml(l.name)}</strong> ${tags}</td>
+                    <td><a class="cell-link" href="javascript:void(0)" onclick="Lists.viewSubscribers(${l.id})" title="Show the ${App.term('subscriber', { plural: true })} on this ${listNoun}">${App.escapeHtml(l.name)}</a> ${tags}</td>
+                    <td><a href="javascript:void(0)" onclick="Lists.viewSubscribers(${l.id})">${App.formatNumber(l.subscriber_count || 0)}</a></td>
                     <td><span class="badge badge-${l.type === 'public' ? 'info' : 'default'}">${App.escapeHtml(l.type || '')}</span></td>
                     <td>${App.escapeHtml(l.optin || '')}</td>
-                    <td>${App.formatNumber(l.subscriber_count || 0)}</td>
                     <td>${App.statusBadge(l.status || 'active')}</td>
                     <td>${App.formatDate(l.created_at)}</td>
                     <td class="cell-actions">
                         <div class="action-btns">
-                            <button class="btn btn-sm" onclick="Lists.viewSubscribers(${l.id})">View Subscribers</button>
-                            <button class="btn btn-sm" onclick="Lists.exportSubscribers(${l.id})">Export</button>
+                            <button class="btn btn-sm" onclick="Lists.viewSubscribers(${l.id})">View ${subsCap}</button>
                             <button class="btn btn-sm" onclick="Lists.showEdit(${l.id})">Edit</button>
-                            <button class="btn btn-sm btn-danger" onclick="Lists.remove(${l.id})">Delete</button>
+                            ${App.moreMenu([
+                                { label: `Export ${subsCap} (CSV)`, onclick: `Lists.exportSubscribers(${l.id})` },
+                                { label: 'Delete…', onclick: `Lists.remove(${l.id})`, danger: true },
+                            ], `More actions for ${l.name}`)}
                         </div>
                     </td>
                 </tr>`;
@@ -87,12 +93,19 @@ const Lists = {
             html += App.renderPagination(this.page, total, this.perPage, 'Lists.goToPage');
             if (App.stale(seq)) return;
             App.syncUrl('lists', { page: this.page, q: this.query });
+            const keepFocus = document.activeElement?.id === 'listSearch';
             App.setContent(html);
+            if (keepFocus) {
+                const box = document.getElementById('listSearch');
+                if (box) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+            }
         } catch {
             if (App.stale(seq)) return;
-            App.setContent('<div class="empty-state"><h2>Failed to load lists</h2></div>');
+            App.setContent(`<div class="empty-state"><h2>Failed to load ${App.term('list', { plural: true })}</h2></div>`);
         }
     },
+
+    searchLive: App.debounce(() => Lists.search(), 400),
 
     /** IDs (as strings) of the rows currently on screen. */
     pageIds() {

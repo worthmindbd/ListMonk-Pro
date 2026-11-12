@@ -11,6 +11,8 @@ build/
 uploads/
 schedule.json
 warmup.json
+send_stats.json
+auto_unblock.json
 email_cleanup.json*
 email_validation_results.json*
 .claude/

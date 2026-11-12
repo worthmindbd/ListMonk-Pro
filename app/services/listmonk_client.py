@@ -249,6 +249,14 @@ class ListMonkClient:
     async def preview_campaign(self, campaign_id: int) -> httpx.Response:
         return await self._request_raw("GET", f"/api/campaigns/{campaign_id}/preview")
 
+    async def preview_campaign_draft(self, campaign_id: int, body: str,
+                                     content_type: str, template_id: Optional[int]) -> httpx.Response:
+        """Render unsaved edits of a campaign (ListMonk reads form fields)."""
+        form: dict[str, Any] = {"body": body, "content_type": content_type}
+        if template_id:
+            form["template_id"] = str(template_id)
+        return await self._request_raw("POST", f"/api/campaigns/{campaign_id}/preview", data=form)
+
     async def test_campaign(self, campaign_id: int, emails: list[str]) -> dict:
         """Send a test copy of a campaign to the given e-mail addresses.
 
@@ -325,6 +333,17 @@ class ListMonkClient:
 
     async def get_template(self, template_id: int) -> dict:
         return await self._request("GET", f"/api/templates/{template_id}")
+
+    async def preview_template(self, template_id: int) -> httpx.Response:
+        """The template rendered by ListMonk with its sample campaign and subscriber."""
+        return await self._request_raw("GET", f"/api/templates/{template_id}/preview")
+
+    async def preview_template_body(self, body: str, template_type: str = "campaign") -> httpx.Response:
+        """Render an unsaved template body (the editor's live preview)."""
+        return await self._request_raw(
+            "POST", "/api/templates/preview",
+            data={"body": body, "template_type": template_type},
+        )
 
     async def create_template(self, data: dict) -> dict:
         return await self._request("POST", "/api/templates", json=data)

@@ -384,6 +384,12 @@ const Replies = {
     },
 
     _paintAutomation() {
+        // Settings → Automation renders the same panel.
+        if (App.currentPage === 'settings') {
+            const el = document.getElementById('settingsReplyAuto');
+            if (el) { el.innerHTML = this.renderAutomation(true); App.labelControls(el); }
+            return;
+        }
         if (App.currentPage !== 'replies') return;
         this._keepFocus(() => {
             this._set('repliesAuto', this.renderAutomation());
@@ -464,8 +470,8 @@ const Replies = {
                 ${(s.campaign_options || []).map(c => `<option value="${c.id}" ${this.campaignId === c.id ? 'selected' : ''}>${this._esc(c.name)} (${c.count})</option>`).join('')}
             </select>
 
-            <button type="button" class="btn reply-auto-btn" data-fk="auto" aria-expanded="${this.autoOpen}" aria-controls="repliesAuto" onclick="Replies.toggleAutomation()"
-                title="Hot-lead flagging, auto-blocklisting and how often the mailbox is scanned">
+            <button type="button" class="btn reply-auto-btn" data-fk="auto" onclick="Replies.toggleAutomation()"
+                title="Hot-lead flagging, auto-blocklisting and scan interval (Settings → Automation)">
                 ${this.icon('sliders')}<span>Automation</span>${autoOn ? `<span class="reply-count-chip" aria-label="${autoOn} enabled">${autoOn}</span>` : ''}
             </button>
 
@@ -476,13 +482,15 @@ const Replies = {
         `;
     },
 
+    /** The rules live with the other automation in Settings → Automation:
+        they can blocklist real people, so they belong next to the
+        unsubscribe and cleanup rules rather than inside the inbox. */
     toggleAutomation() {
-        this.autoOpen = !this.autoOpen;
-        this._paintAutomation();
+        window.location.hash = '#/settings?tab=automation';
     },
 
-    renderAutomation() {
-        if (!this.autoOpen) return '';
+    renderAutomation(force = false) {
+        if (!force && !this.autoOpen) return '';
         const st = this.settings;
         const row = (checked, onchange, title, desc) => `
             <label class="switch-row ${checked ? 'on' : ''}">
