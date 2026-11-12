@@ -3,6 +3,9 @@ venv/
 __pycache__/
 *.pyc
 .env
+# Per-instance env files (.env.<name>) hold real credentials
+.env.*
+!.env.example
 .git/
 .claude/
 .agents/
