@@ -18,8 +18,17 @@ const Dashboard = {
         };
     },
 
+    /** Re-read everything from ListMonk now (the header's Refresh button). */
+    refresh() {
+        this._fresh = true;
+        App.bumpSeq();
+        this.render();
+    },
+
     async render() {
         const seq = App.seq();
+        const fresh = this._fresh === true;
+        this._fresh = false;
         App.setContent('<div class="loading-spinner">Loading dashboard...</div>');
 
         const isCold = App.currentMode === 'cold_email';
@@ -30,7 +39,7 @@ const Dashboard = {
                 API.get('/api/lists?per_page=1&minimal=true'),
                 API.get('/api/campaigns?per_page=10&order_by=created_at&order=DESC'),
                 API.get('/api/subscribers?per_page=1'),
-                API.get('/api/campaigns/summary'),
+                API.get(`/api/campaigns/summary${fresh ? '?fresh=true' : ''}`),
                 // Silent: a failed daily count only hides the "today" line.
                 API.get('/api/sends/daily?days=1', true),
             ];
@@ -47,8 +56,16 @@ const Dashboard = {
             const [listsRes, campaignsRes, subscribersRes, summaryRes, sendsRes] = results;
             const replyStatsRes = isCold ? results[5] : null;
             const recentRepliesRes = isCold ? results[6] : null;
-            const sentToday = sendsRes.status === 'fulfilled' ? (sendsRes.value?.sent_today ?? null) : null;
-            const sentTodayText = sentToday === null ? '' : `${App.formatNumber(sentToday)} sent today`;
+            const sends = sendsRes.status === 'fulfilled' ? (sendsRes.value || null) : null;
+            const sentToday = sends ? (sends.sent_today ?? null) : null;
+            // Sends by a campaign deleted since still happened today, but
+            // ListMonk no longer lists it: say so, or the number looks invented.
+            const byDeleted = sends?.sent_today_by_deleted || 0;
+            const deletedNote = !byDeleted ? ''
+                : byDeleted >= sentToday ? ' (by a deleted campaign)'
+                : ` (${App.formatNumber(byDeleted)} by a deleted campaign)`;
+            const sentTodayText = sentToday === null ? '' : `${App.formatNumber(sentToday)} sent today${deletedNote}`;
+            this.loadedAt = new Date();
 
             this.summary = summaryRes.status === 'fulfilled' ? (summaryRes.value || null) : null;
             const totalLists = listsRes.status === 'fulfilled' ? (listsRes.value?.data?.total || 0) : 0;
@@ -82,6 +99,7 @@ const Dashboard = {
 
                 html += `
                     <!-- Cold Email KPI Cards -->
+                    ${this._syncBar()}
                     <div id="dashAttention"></div>
                     <div class="stats-grid dash-kpis">
                         <a class="stat-card stat-card-link accent" href="#/subscribers">
@@ -90,7 +108,7 @@ const Dashboard = {
                             <div class="stat-sub">Across ${totalLists} lead list${totalLists === 1 ? '' : 's'}</div>
                         </a>
                         <a class="stat-card stat-card-link info" href="#/analytics">
-                            <div class="stat-label">Outbound Dispatched</div>
+                            <div class="stat-label">Outbound Sent</div>
                             <div class="stat-value">${App.formatNumber(totalSent)}</div>
                             <div class="stat-sub">${sentTodayText ? `<strong style="color:var(--primary-soft)">${sentTodayText}</strong> · ` : ''}${totalCampaigns} campaign${totalCampaigns === 1 ? '' : 's'}</div>
                         </a>
@@ -174,7 +192,7 @@ const Dashboard = {
                             <div class="table-wrapper" tabindex="0" role="region" aria-label="Scrollable data table" style="border:none;box-shadow:none;background:transparent">
                                 <table>
                                     <thead><tr>
-                                        <th>Campaign</th><th>Status</th><th>Dispatched</th>
+                                        <th>Campaign</th><th>Status</th><th>Sent</th>
                                     </tr></thead>
                                     <tbody>`;
 
@@ -187,7 +205,7 @@ const Dashboard = {
                         onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();Campaigns.showDetail(${c.id})}">
                         <td><strong>${App.escapeHtml(c.name)}</strong></td>
                         <td>${App.statusBadge(c.status)}</td>
-                        <td>${App.formatNumber(c.sent || c.to_send || 0)}</td>
+                        <td>${this._sentOf(c)}</td>
                     </tr>`;
                 });
 
@@ -212,6 +230,7 @@ const Dashboard = {
                 // mode.
                 this.lastRepStats = null;
                 html += `
+                    ${this._syncBar()}
                     <div id="dashAttention"></div>
                     <div class="stats-grid dash-kpis">
                         <a class="stat-card stat-card-link accent" href="#/subscribers">
@@ -294,20 +313,53 @@ const Dashboard = {
         }
     },
 
+    /** "sent / audience": the audience alone used to stand in for the sent
+        count while nothing had gone out, which read as "1,730 dispatched". */
+    _sentOf(c) {
+        const sent = App.formatNumber(c.sent || 0);
+        return c.to_send ? `${sent} <span style="color:var(--text-muted)">/ ${App.formatNumber(c.to_send)}</span>` : sent;
+    },
+
+    /** Where the numbers come from and when they were read, plus Refresh. */
+    _syncBar() {
+        const at = (this.loadedAt || new Date()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        return `<div class="dash-sync" role="status">
+            <span><span class="dash-sync-dot" aria-hidden="true"></span>Live from ListMonk · read at <strong>${at}</strong><span id="dashSyncPoll"></span></span>
+            <button type="button" class="btn btn-sm" onclick="Dashboard.refresh()">Refresh</button>
+        </div>`;
+    },
+
+    _fmtSpan(seconds) {
+        const m = Math.floor(seconds / 60);
+        if (m < 60) return `${Math.max(1, m)} min`;
+        const h = Math.floor(m / 60), r = m % 60;
+        return r ? `${h} h ${r} min` : `${h} h`;
+    },
+
     /** Things that need a look, gathered from what other pages already
         expose: unread replies, campaigns held by the send window or the
         warm-up quota, a cleanup run held for review. Each request is best
         effort; nothing here may fail the dashboard. */
     async _attention(isCold) {
         const quiet = (p) => p.then(v => v).catch(() => null);
-        const [unread, sched, warm, cleanup, running] = await Promise.all([
+        const [unread, sched, warm, cleanup, running, progress] = await Promise.all([
             isCold ? quiet(API.get('/api/replies?status=unread&per_page=1', true)) : null,
             quiet(API.get('/api/scheduler', true)),
             quiet(API.get('/api/warmup', true)),
             quiet(API.get('/api/email-validation/cleanup', true)),
             quiet(API.get('/api/campaigns?status=running&per_page=1', true)),
+            quiet(API.get('/api/sends/progress', true)),
         ]);
+        this.lastProgress = progress;
         const items = [];
+        // A "running" campaign that sends nothing is the one failure ListMonk
+        // never reports (see services/send_stats.track_progress).
+        for (const c of (progress?.campaigns || []).filter(c => c.stalled)) {
+            items.push({
+                tone: 'danger', href: '#/deliverability',
+                text: `${c.name || `Campaign #${c.id}`} is running but has sent nothing for ${this._fmtSpan(c.idle_seconds)}: ListMonk's send queue looks stuck (a paused or deleted campaign can hold it; restarting ListMonk clears it)`,
+            });
+        }
         const unreadN = unread?.total || 0;
         if (unreadN) items.push({ tone: 'success', href: '#/replies?status=unread', text: `${App.formatNumber(unreadN)} unread repl${unreadN === 1 ? 'y' : 'ies'}` });
         const held = sched?.enabled ? (sched.auto_paused_campaigns || []).length : 0;
@@ -322,7 +374,11 @@ const Dashboard = {
             items.push({ tone: 'danger', href: '#/settings?tab=cleanup', text: 'The last email cleanup failed' });
         }
         const runningN = running?.data?.total || 0;
-        if (runningN) items.push({ tone: 'info', href: '#/campaigns?status=running', text: `${runningN} campaign${runningN === 1 ? '' : 's'} sending now` });
+        const stalledN = (progress?.campaigns || []).filter(c => c.stalled).length;
+        if (runningN > stalledN) {
+            const n = runningN - stalledN;
+            items.push({ tone: 'info', href: '#/campaigns?status=running', text: `${n} campaign${n === 1 ? '' : 's'} sending now` });
+        }
         return items;
     },
 
@@ -330,6 +386,12 @@ const Dashboard = {
         let items = [];
         try { items = await promise; } catch { return; }
         if (App.stale(seq)) return;
+        const poll = document.getElementById('dashSyncPoll');
+        const last = this.lastProgress?.last_poll ? new Date(this.lastProgress.last_poll) : null;
+        if (poll && last && !isNaN(last)) {
+            const ago = Math.max(0, Math.round((Date.now() - last.getTime()) / 1000));
+            poll.textContent = ` · send counters checked ${ago < 60 ? `${ago} s` : this._fmtSpan(ago)} ago`;
+        }
         const el = document.getElementById('dashAttention');
         if (!el || !items.length) return;
         el.innerHTML = `<div class="attention-strip" role="status" aria-label="Needs attention">

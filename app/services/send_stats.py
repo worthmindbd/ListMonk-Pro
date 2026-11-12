@@ -44,6 +44,74 @@ DEFAULT_TIMEZONE = "UTC"
 # Serialises load → mutate → save of send_stats.json (reset in conftest).
 _STATS_LOCK = asyncio.Lock()
 
+# Live progress of the running campaigns, in memory only (reset in conftest):
+# campaign id -> {"sent": n, "to_send": n, "since": datetime of the last change}.
+# A campaign ListMonk calls "running" whose count has not moved for far longer
+# than the sending window allows is stuck, not slow: ListMonk drains every
+# campaign through ONE loop, so a paused, cancelled or deleted campaign whose
+# fetched batch is still being pushed through a long sliding window holds every
+# other campaign back for hours without any error. Nothing else reports that.
+_PROGRESS: dict[int, dict] = {}
+# When the running stats were last read from ListMonk (the dashboard's
+# "synced" time), or None before the first successful poll.
+_LAST_POLL: Optional[datetime] = None
+
+
+def reset_progress() -> None:
+    """Forget the in-memory progress tracking (tests, rule 11)."""
+    global _LAST_POLL
+    _PROGRESS.clear()
+    _LAST_POLL = None
+
+
+def track_progress(stats: list[dict], now: Optional[datetime] = None) -> None:
+    """Record when each running campaign's ``sent`` count last moved."""
+    global _LAST_POLL
+    now = now or datetime.now().astimezone()
+    _LAST_POLL = now
+    running = set()
+    for stat in stats:
+        cid = stat.get("id")
+        if not isinstance(cid, int) or isinstance(cid, bool):
+            continue
+        running.add(cid)
+        sent = stat.get("sent") if _nonneg_int(stat.get("sent")) else 0
+        to_send = stat.get("to_send") if _nonneg_int(stat.get("to_send")) else 0
+        prev = _PROGRESS.get(cid)
+        if prev is None or prev["sent"] != sent:
+            _PROGRESS[cid] = {"sent": sent, "to_send": to_send, "since": now}
+        else:
+            prev["to_send"] = to_send
+    for cid in list(_PROGRESS):
+        if cid not in running:
+            del _PROGRESS[cid]
+
+
+def progress(threshold_seconds: float, now: Optional[datetime] = None) -> dict:
+    """Running campaigns with how long their count has been flat.
+
+    ``stalled`` is set once a campaign has sent nothing for longer than
+    ``threshold_seconds`` while it still has recipients left. A campaign
+    already sent in full is never stalled (ListMonk finishes it shortly).
+    """
+    now = now or datetime.now().astimezone()
+    rows = []
+    for cid, p in sorted(_PROGRESS.items()):
+        idle = max(0, int((now - p["since"]).total_seconds()))
+        left = p["to_send"] == 0 or p["sent"] < p["to_send"]
+        rows.append({
+            "id": cid,
+            "sent": p["sent"],
+            "to_send": p["to_send"],
+            "idle_seconds": idle,
+            "stalled": left and idle > threshold_seconds,
+        })
+    return {
+        "last_poll": _LAST_POLL.isoformat() if _LAST_POLL else None,
+        "threshold_seconds": int(threshold_seconds),
+        "campaigns": rows,
+    }
+
 
 def _default_state() -> dict:
     return {

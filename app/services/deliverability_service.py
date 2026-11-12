@@ -9,7 +9,7 @@ import logging
 import re
 from app.services import app_settings
 from app.services.listmonk_client import ListMonkClient
-from app.services.template_unsubscribe import get_unsubscribe_link_status
+from app.services.template_unsubscribe import campaign_templates, summarize_unsubscribe_links
 
 logger = logging.getLogger("deliverability_service")
 
@@ -74,6 +74,87 @@ def _as_number(value, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def sending_window(raw_settings: dict) -> dict:
+    """ListMonk's sliding-window limit as it actually behaves.
+
+    ``active`` mirrors ListMonk's own condition (window on, rate > 0, duration
+    over one second). ``effective_rate`` is what really leaves per window:
+    ListMonk v6 (internal/manager/pipe.go) tests the limit with the elapsed
+    time measured *before* it resets an expired window, so with a rate of 1
+    the message that opens a window "waits" for a negative duration and the
+    next one goes out at once — two messages per window, not one. Rates of 2
+    and more are enforced as set.
+    """
+    rate = _as_number(raw_settings.get("app.message_sliding_window_rate"), 0)
+    seconds = _duration_seconds(raw_settings.get("app.message_sliding_window_duration"))
+    active = bool(raw_settings.get("app.message_sliding_window") is True and rate > 0 and seconds > 1)
+    rate = int(rate)
+    return {
+        "active": active,
+        "rate": rate,
+        "seconds": seconds,
+        "effective_rate": (2 if rate == 1 else rate) if active else None,
+    }
+
+
+def _fmt_span(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds >= 3600:
+        h, m = divmod(seconds // 60, 60)
+        return f"{h} h {m} min" if m else f"{h} h"
+    return f"{max(1, seconds // 60)} min"
+
+
+# Inline styles that hide an element from the reader.
+_HIDDEN_STYLE_RE = re.compile(
+    r"display\s*:\s*none"
+    r"|visibility\s*:\s*hidden"
+    r"|font-size\s*:\s*0(?:\.0+)?(?:px|pt|em|rem|%)?\s*(?:;|$|!)"
+    r"|opacity\s*:\s*0(?:\.0+)?\s*(?:;|$|!)"
+    r"|max-height\s*:\s*0(?:px)?\s*(?:;|$|!)",
+    re.I,
+)
+_TAG_RE = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9]*)\b([^>]*)>")
+_STYLE_ATTR_RE = re.compile(r"""style\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.I)
+# A preheader (the hidden inbox preview line) is short; padding is not.
+HIDDEN_TEXT_LIMIT = 200
+
+
+def hidden_text_blocks(body: str) -> list[int]:
+    """Lengths of the hidden-element texts in a template longer than a preheader.
+
+    Hidden filler ("ghost ink": hundreds of invisible words to dilute a short
+    sales pitch) is a classic spam-filter evasion trick, and the filters look
+    for exactly that pattern. The text length ignores markup and template
+    actions, so a hidden ``{{ .Subscriber.Attribs.x }}`` preheader stays short.
+    """
+    found = []
+    tags = list(_TAG_RE.finditer(body or ""))
+    i = 0
+    while i < len(tags):
+        m = tags[i]
+        closing, name, attrs = m.group(1), m.group(2).lower(), m.group(3)
+        style = _STYLE_ATTR_RE.search(attrs)
+        style_text = (style.group(1) or style.group(2) or "") if style else ""
+        if closing or not _HIDDEN_STYLE_RE.search(style_text) or attrs.rstrip().endswith("/"):
+            i += 1
+            continue
+        depth, j = 1, i + 1
+        while j < len(tags) and depth:
+            if tags[j].group(2).lower() == name:
+                depth += -1 if tags[j].group(1) else 1
+            j += 1
+        end = tags[j - 1].start() if depth == 0 else len(body)
+        inner = body[m.end():end]
+        text = re.sub(r"\{\{.*?\}\}", " ", inner, flags=re.S)
+        text = re.sub(r"<[^>]*>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) > HIDDEN_TEXT_LIMIT:
+            found.append(len(text))
+        i = j  # nested hidden elements are part of this one
+    return found
 
 
 async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
@@ -145,8 +226,10 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
     # the link people actually see comes from the campaign templates, so it is
     # read (and toggled) there. Unreadable templates degrade to "info" rather
     # than failing the whole audit.
+    templates = None
     try:
-        unsub_link = await get_unsubscribe_link_status(listmonk)
+        templates = await campaign_templates(listmonk)
+        unsub_link = summarize_unsubscribe_links(templates)
     except Exception as e:
         logger.warning(f"Could not read templates for the unsubscribe link check: {e}")
         unsub_link = {"state": "unknown", "counts": {}, "templates": [], "error": str(e)}
@@ -164,18 +247,65 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
         "impact": "High",
     })
 
-    # 4. Safe Batch Size
+    # 4. Safe Batch Size. With a sliding window the batch also decides how
+    # long a stopped campaign blocks the others: ListMonk sends every campaign
+    # through ONE loop and sleeps out the window *inside* a fetched batch, and
+    # pausing, cancelling or deleting a campaign does not end that loop — it
+    # keeps pushing (and discarding) the rest of the batch, window by window.
+    # 100 messages at 1 per 15 min held every other campaign for ~12 hours.
     batch_size = raw_settings.get("app.batch_size", 1000)
+    batch_n = _as_number(batch_size, 1000)
+    window = sending_window(raw_settings)
+    if window["active"]:
+        hold = max(0.0, batch_n - window["effective_rate"]) / window["effective_rate"] * window["seconds"]
+        batch_status = "pass" if batch_n <= window["rate"] else ("warn" if hold <= 3600 else "fail")
+        batch_check = {
+            "description": (
+                "With a sliding window, ListMonk waits out the window inside each fetched batch. "
+                "A paused, cancelled or deleted campaign keeps that batch going, one window at a time, "
+                "and every other campaign waits behind it without an error"
+                + (f": up to {_fmt_span(hold)} with these settings." if hold else ".")
+                + " Keep the batch no larger than the window rate."
+            ),
+            "recommended": f"<= {window['rate']} (the window rate)",
+        }
+    else:
+        batch_status = "pass" if batch_n <= 100 else ("warn" if batch_n <= 250 else "fail")
+        batch_check = {
+            "description": "Batches of <= 100 allow fine-grained pacing and prevent sudden provider rate limiting.",
+            "recommended": "<= 100",
+        }
     checks.append({
         "id": "batch_size",
         "group": "sending",
         "name": "Sending Batch Size",
-        "description": "Batches of <= 100 allow fine-grained pacing and prevent sudden provider rate limiting.",
-        "status": "pass" if _as_number(batch_size, 1000) <= 100 else (
-            "warn" if _as_number(batch_size, 1000) <= 250 else "fail"),
+        "status": batch_status,
         "current_value": batch_size,
-        "recommended": "<= 100",
         "impact": "High",
+        **batch_check,
+    })
+
+    # 4b. Sliding window enforced as displayed (see sending_window): a rate of
+    # 1 sends two messages per window, so "1 per 15 min" really is 1 per 7.5.
+    if not window["active"]:
+        rate_status, rate_value = "info", "sliding window off"
+    else:
+        rate_status = "warn" if window["rate"] == 1 else "pass"
+        rate_value = (
+            f"{window['rate']} per {raw_settings.get('app.message_sliding_window_duration')}"
+            + (f" (really {window['effective_rate']})" if window["effective_rate"] != window["rate"] else "")
+        )
+    checks.append({
+        "id": "sliding_window_rate",
+        "group": "sending",
+        "name": "Sending Window Enforced as Set",
+        "description": "ListMonk lets two messages through each window when the window rate is 1, so "
+                       "1 per 15 min actually sends 1 every 7.5 min. Double both numbers instead "
+                       "(2 per 30 min): the same average, enforced exactly.",
+        "status": rate_status,
+        "current_value": rate_value,
+        "recommended": "rate >= 2",
+        "impact": "Medium",
     })
 
     # 5. Concurrency
@@ -274,12 +404,9 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
     window_rate = raw_settings.get("app.message_sliding_window_rate")
     message_rate = raw_settings.get("app.message_rate")
     per_day = None
-    try:
-        seconds = _duration_seconds(window_duration)
-        if sliding and seconds and window_rate:
-            per_day = int(86400 / seconds * int(window_rate))
-    except (TypeError, ValueError, ZeroDivisionError):
-        per_day = None
+    if window["active"]:
+        # What really leaves, not the nominal rate (a rate of 1 sends 2).
+        per_day = int(86400 / window["seconds"] * window["effective_rate"])
     checks.append({
         "id": "send_cadence",
         "group": "sending",
@@ -295,6 +422,28 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
         ),
         "recommended": "match the cadence to your list size",
         "impact": "Informational",
+    })
+
+    # 9b. Hidden text in campaign templates (see hidden_text_blocks).
+    hidden = []
+    if templates is not None:
+        for tpl in templates:
+            blocks = hidden_text_blocks(tpl.get("body") or "")
+            if blocks:
+                hidden.append({"id": tpl.get("id"), "name": tpl.get("name"), "chars": sum(blocks)})
+    checks.append({
+        "id": "hidden_text",
+        "group": "privacy",
+        "name": "No Hidden Text in Templates",
+        "description": "Invisible filler text (display:none, 0px fonts, transparent blocks) is a known "
+                       "spam-filter evasion trick, and filters penalise it. A short hidden preheader is fine.",
+        "status": "info" if templates is None else ("fail" if hidden else "pass"),
+        "current_value": (
+            "templates unreadable" if templates is None else
+            ", ".join(f"{h['name']} (~{h['chars']:,} hidden chars)" for h in hidden) or "none"
+        ),
+        "recommended": f"no hidden block over {HIDDEN_TEXT_LIMIT} characters",
+        "impact": "High",
     })
 
     # 10. Media upload allow-list (the audit page is "Deliverability & Safety").
@@ -363,6 +512,8 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
             "sliding_window": sliding,
             "sliding_window_rate": window_rate,
             "sliding_window_duration": window_duration,
+            "sliding_window_effective_rate": window["effective_rate"],
+            "hidden_text_templates": hidden,
             "upload_extensions": extensions,
         }
     }
@@ -371,13 +522,24 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
 async def apply_deliverability_preset(listmonk: ListMonkClient, mode: str) -> dict:
     """Apply optimized settings to Listmonk for the chosen mode."""
     if mode == "cold_email":
+        # Batch no larger than the sliding-window rate (see the batch_size
+        # check): a stopped campaign then releases ListMonk's send loop within
+        # one window instead of holding every other campaign for hours.
+        batch = 100
+        try:
+            current = (await listmonk.get_settings()).get("data") or {}
+            window = sending_window(current)
+            if window["active"]:
+                batch = max(1, min(100, window["rate"]))
+        except Exception as e:
+            logger.warning(f"Cold preset: could not read the sending window, batch size {batch}: {e}")
         payload = {
             "privacy.disable_tracking": True,
             "privacy.individual_tracking": False,
             # One-click unsubscribe stays on in cold mode too (see the audit
             # check above): it is a bulk-sender requirement, not a label.
             "privacy.unsubscribe_header": True,
-            "app.batch_size": 100,
+            "app.batch_size": batch,
             "app.concurrency": 1,
             "app.max_send_errors": 10,
             "app.enable_public_archive": False,

@@ -413,6 +413,21 @@ const Deliverability = {
                     ? { label: `Hidden in ${hidden} of ${withLink} templates`, tone: 'warn' }
                     : `Shown in ${withLink} of ${withLink} templates`];
             }
+            case 'hidden_text': {
+                const hits = Array.isArray(raw.hidden_text_templates) ? raw.hidden_text_templates : [];
+                return hits.map(h => ({
+                    label: `${h.name}: ~${App.formatNumber(h.chars)} hidden chars`,
+                    tone: 'bad', wide: true, title: String(h.name || ''),
+                }));
+            }
+            case 'sliding_window_rate': {
+                const eff = Number(raw.sliding_window_effective_rate);
+                const rate = Number(raw.sliding_window_rate);
+                if (raw.sliding_window && eff && eff !== rate) {
+                    return [{ label: `Really sends ${eff} per ${raw.sliding_window_duration}`, tone: 'warn', wide: true }];
+                }
+                return [];
+            }
             case 'upload_extensions': {
                 const ext = Array.isArray(raw.upload_extensions) ? raw.upload_extensions : [];
                 return ext.includes('*') ? [{ label: '* wildcard allowed', tone: 'bad' }] : [];

@@ -331,10 +331,11 @@ const Analytics = {
         if (!s) {
             body = '<div class="empty-state"><p>Daily send counts could not be loaded.</p></div>';
         } else {
-            const nameOf = id => this.campaigns.find(c => c.id === id)?.name || `Campaign #${id}`;
+            // The server names each campaign, including deleted ones.
+            const nameOf = c => c.name || this.campaigns.find(x => x.id === c.id)?.name || `Campaign #${c.id}`;
             const split = (s.today_by_campaign || []).map(c => `
                 <li style="display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid var(--glass-border)">
-                    <span class="cell-email" title="${App.escapeHtml(nameOf(c.id))}">${App.escapeHtml(nameOf(c.id))}</span>
+                    <span class="cell-email" title="${App.escapeHtml(nameOf(c))}"${c.deleted ? ' style="color:var(--text-muted)"' : ''}>${App.escapeHtml(nameOf(c))}</span>
                     <strong>${App.formatNumber(c.sent)}</strong>
                 </li>`).join('');
             const hasGaps = (s.days || []).some(d => !d.tracked);

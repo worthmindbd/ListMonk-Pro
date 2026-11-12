@@ -236,14 +236,15 @@ async def export_all_campaigns():
 
 
 @router.get("/summary")
-async def get_campaigns_summary():
+async def get_campaigns_summary(fresh: bool = False):
     """Aggregate totals across ALL campaigns for dashboard/analytics cards.
 
     Paginates the full campaign list, so the result is cached briefly.
+    ``fresh=true`` (the dashboard's Refresh button) skips the cache.
     """
     global _summary_cache, _summary_cached_at
     now = time.monotonic()
-    if _summary_cache and now - _summary_cached_at < _SUMMARY_TTL:
+    if not fresh and _summary_cache and now - _summary_cached_at < _SUMMARY_TTL:
         return _summary_cache
 
     campaigns = await listmonk.paginate_all(listmonk.get_campaigns, per_page=100)

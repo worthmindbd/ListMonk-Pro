@@ -56,7 +56,7 @@ ListMonk-Pro/
 │       ├── link_unsubscribe.py    # ListMonk direct link unsubscribe scanner & campaign attributor
 │       ├── listmonk_client.py     # Async HTTP client for ListMonk REST API (with paginate_all helper)
 │       ├── opener_cache.py        # In-memory campaign opener email cache with TTL & inflight deduplication
-│       ├── send_stats.py          # Always-on per-day send counter (delta-counted from running stats, shared poll with warm-up)
+│       ├── send_stats.py          # Always-on per-day send counter (delta-counted from running stats, shared poll with warm-up) + in-memory stall tracking of running campaigns
 │       ├── search_query.py        # Free-text search builders: escaped ILIKE for subscribers (SQL), plain_search_term for lists/campaigns (plain text)
 │       ├── reply_i18n.py          # Non-English reply vocabulary (ack / refusal / interest / dead-address) merged into the classifier, plus opt-out phrases merged into the unsubscribe scanner
 │       ├── reply_log.py           # Persistent JSON storage for prospect replies and sentiments
@@ -113,6 +113,7 @@ ListMonk-Pro/
 │   ├── test_email_validation.py   # Validator (syntax, DNS verdicts, flags, cache), scan, cleanup safety rails, schedule maths, API
 │   ├── test_send_stats_and_ui_fixes.py # Daily send counter, unattributed unsubscribe group, unblock, template preview
 │   ├── test_ui_review_round2.py   # Unsaved campaign/template previews, reply timeline, auto-unblock switch/history, validate-before-import
+│   ├── test_send_pacing_fixes.py  # Live sending incident: stall detection, window rate 1 = 2/window, batch vs window, deleted-campaign "sent today", hidden template text
 │   ├── test_fifth_review_fixes.py # Regressions for the fifth review (plain-text search, IP octets vs status codes, DSN gate, keyword boundaries, blocklist registry, subject matching, mode-aware audit, auth cross-site)
 │   ├── conftest.py                # Resets module-level caches between tests
 │   └── test_regressions.py        # Route order, IMAP seen-marking, prune, timestamp regressions
@@ -264,7 +265,8 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 - ListMonk stores only a cumulative `sent` per campaign, never *when* a message left, so "sent today" cannot be read from it later. `send_stats` counts sends as they happen, **warm-up on or off**, with the same delta function as warm-up (`warmup.count_deltas`): the first poll only baselines (`seen`), so a campaign's history is never charged to the day counting starts; campaigns that leave the running list are read once more for their final count.
 - Per-day buckets `{total, campaigns: {id: n}}` in `send_stats.json` (≤ 400 days). Day boundary = the warm-up timezone while warm-up is on (so the Analytics card and the warm-up meter agree), else the send-window timezone.
 - On first run the file is seeded from the warm-up history (`source: "warmup"`). A day is `tracked` from `counting_since` on (missing = really zero); before that only seeded days are known — the gaps are `tracked: false` (unknown, drawn without a bar), never zero.
-- Frontend: Analytics *Sent Today* card + *Daily Sends* chart (7/30/90 days, today split by campaign); Dashboard "N sent today" line.
+- Frontend: Analytics *Sent Today* card + *Daily Sends* chart (7/30/90 days, today split by campaign, deleted campaigns named); Dashboard "N sent today" line (says when it came from a deleted campaign), a "Live from ListMonk · read at …" bar with Refresh, a campaign table showing `sent / to_send`, and a danger item in the attention strip for a stalled running campaign.
+- **Stall tracking** (`send_stats.track_progress`, fed by the same poll): in memory only (`_PROGRESS`, `_LAST_POLL`, reset by `reset_progress()` in conftest) — when each running campaign's `sent` last moved.
 
 ### 5c. Email Validation & Cleanup (`app/services/email_validation.py`, `email_cleanup.py`)
 - **Verdicts:** `invalid` (can never receive mail), `risky` (disposable domain, role account such as `support@`, probable typo of a big provider), `unknown` (a DNS lookup failed transiently), `valid`. Checks: RFC 5321/5322 syntax (non-ASCII local parts and IDN domains are accepted), domain exists (NXDOMAIN → `no_domain`), mail server exists (MX; falls back to A/AAAA per RFC 5321; a Null MX per RFC 7505 → `null_mx`; nothing → `no_mx`). `hard_bounce` is added by subscriber scans only.
@@ -432,7 +434,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/lists/{id}` | GET / PUT / DELETE | Get / update / delete list (DELETE also removes non-blocklisted subscribers of the list and dismisses their Email Validation results, keeping blocklisted subscribers on the blocklist) |
 | **Campaigns** | `/api/campaigns` | GET / POST | List campaigns (with hard bounce cache) / create |
 | | `/api/campaigns/running/stats` | GET | Real-time running campaign stats |
-| | `/api/campaigns/summary` | GET | Aggregate totals across all campaigns (cached 60s) |
+| | `/api/campaigns/summary` | GET | Aggregate totals across all campaigns (cached 60s; `fresh=true` — the dashboard's Refresh — skips the cache) |
 | | `/api/campaigns/export-all` | GET | Export all campaigns summary as CSV |
 | | `/api/campaigns/analytics/{type}` | GET | Campaign analytics (views/clicks/bounces/links — the type is whitelisted before it reaches the upstream URL) |
 | | `/api/campaigns/analytics/{type}/export` | GET | Export campaign analytics as CSV |
@@ -465,7 +467,8 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | **Warm-up** | `/api/warmup` | GET / PUT | Ramp settings + today's quota, usage, forecast and recent days / change settings (strictly typed, unknown keys → 400, `target_volume < start_volume` → 400). `level` jumps the ramp to a given day. Ticks the scheduler right away |
 | | `/api/warmup/preview` | GET | The ramp a `start_volume` / `growth_percent` / `target_volume` triple would produce (the settings form's live chart) |
 | | `/api/warmup/insights` | GET | Queued recipients (running + paused campaigns), days to send them on this ramp, ListMonk's max messages/second and an overshoot warning. Best effort: parts that cannot be read from ListMonk are `null`, never a 5xx |
-| **Send Stats** | `/api/sends/daily` | GET | `days` (1–365): emails sent per calendar day (oldest first, `tracked` flag), `sent_today`, `today_by_campaign`, `tracking_since`, `timezone` |
+| **Send Stats** | `/api/sends/daily` | GET | `days` (1–365): emails sent per calendar day (oldest first, `tracked` flag), `sent_today`, `today_by_campaign` (each with `name` and `deleted`: sends by a since-deleted campaign still count), `sent_today_by_deleted`, `tracking_since`, `timezone` |
+| | `/api/sends/progress` | GET | Running campaigns' live `sent`/`to_send`, `idle_seconds` since the count last moved and `stalled` (flat for over 2 sliding windows + 5 min, or 15 min without a window; 2 h if ListMonk's settings are unreadable), plus `last_poll` (the dashboard's "send counters checked … ago") |
 | **Auto-Unblock** | `/api/auto-unblock/status` | GET | Count of blocklisted engaged contacts plus `enabled`, `last_run`, `history` (latest 50) |
 | | `/api/auto-unblock/settings` | PUT | `{"enabled": bool}` only: turns the six-hourly background run on/off ("Run now" always works) |
 | | `/api/auto-unblock/run` | POST | Manually run auto-unblock process |
@@ -526,9 +529,33 @@ helpers (`UnsubscribeURL`, `TrackLink`, …) are left in their bare shorthand, t
 ListMonk's pre-compile rewrite resolves. ListMonk compiles templates only at send time, so
 every switch renders the campaign preview and rolls back on a compile error (`422`).
 
-The audit has 12 checks: the ten above plus `unsubscribe_link` (footer link state read from
-the campaign templates; `info` when templates are unreadable or none has a link) and
-`public_subscription_page`.
+The audit has 14 checks: the ten above plus `unsubscribe_link` (footer link state read from
+the campaign templates; `info` when templates are unreadable or none has a link),
+`public_subscription_page`, `sliding_window_rate` and `hidden_text`. The templates are
+fetched once per audit (`template_unsubscribe.campaign_templates`).
+
+**ListMonk's sending engine, as it really behaves (v6, `internal/manager/pipe.go`)** — the
+audit and the cold preset are built on these facts, verified on a live incident:
+- Every campaign is drained through **one** loop, and the sliding-window sleep happens
+  *inside* a fetched batch. Pausing, cancelling or deleting a campaign does not end that
+  loop: it keeps pushing (and discarding) the rest of its batch, one window at a time, and
+  every other campaign waits behind it with no error. 100 messages at 1 per 15 min held a
+  freshly started campaign at 0 sent for hours. Hence `batch_size` must be ≤ the window
+  rate when a window is on (`batch_size` check: hold time in the description; the cold
+  preset sets `batch = window rate`), and `/api/sends/progress` + the dashboard flag a
+  running campaign whose count stays flat.
+- `sending_window()`: with a window rate of **1**, two messages leave per window (the limit
+  is tested with the elapsed time measured before the expired window is reset). Use 2 per
+  double the duration. `send_cadence_per_day` uses this effective rate.
+- `last_subscriber_id` advances to the end of a batch when it is *fetched*; only a clean
+  stop writes back the last subscriber really sent. A ListMonk restart (or a settings
+  reload) mid-batch therefore skips the unsent rest of that batch — another reason for
+  small batches.
+
+`hidden_text` fails on any element hidden by inline style (display:none, visibility:hidden,
+0 font-size / opacity / max-height) whose text, without markup and template actions, is over
+`HIDDEN_TEXT_LIMIT` (200) characters: invisible filler is a spam-filter evasion pattern; a
+preheader is short and passes.
 
 **Mode-aware:** once a mode has been chosen (`app_settings.mode_selected`), Newsletter mode
 reports the cold-outreach-only checks (`COLD_ONLY_CHECKS`: tracking, individual tracking,

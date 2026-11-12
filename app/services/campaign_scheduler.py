@@ -443,6 +443,7 @@ async def enforce_warmup(client: ListMonkClient) -> float:
     enforcement.
     """
     stats = await warmup.fetch_running(client)
+    send_stats.track_progress(stats)
     try:
         await send_stats.observe(client, stats, _send_stats_timezone())
     except Exception as e:

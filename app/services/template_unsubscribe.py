@@ -187,6 +187,16 @@ async def get_unsubscribe_link_status(listmonk) -> dict:
     return _summarize(await _campaign_templates(listmonk))
 
 
+async def campaign_templates(listmonk) -> list[dict]:
+    """All campaign templates (the audit reads them once for several checks)."""
+    return await _campaign_templates(listmonk)
+
+
+def summarize_unsubscribe_links(templates: list[dict]) -> dict:
+    """``get_unsubscribe_link_status`` for templates already fetched."""
+    return _summarize(templates)
+
+
 async def set_unsubscribe_links(listmonk, enabled: bool, template_ids: list[int] | None = None) -> dict:
     """Show (``enabled=True``) or hide the footer unsubscribe link.
 

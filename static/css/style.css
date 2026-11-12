@@ -5660,3 +5660,14 @@ details.val-quick[open] > summary::before { transform: rotate(90deg); }
         padding-right: 8px;
     }
 }
+
+/* Dashboard: where the numbers come from + Refresh. */
+.dash-sync {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 8px 16px; margin-bottom: 12px; font-size: 0.82rem; color: var(--text-muted);
+}
+.dash-sync strong { color: var(--text-secondary); font-weight: 600; }
+.dash-sync-dot {
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--emerald); margin-right: 8px; vertical-align: 1px;
+}

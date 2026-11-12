@@ -414,7 +414,9 @@ async def test_deliverability_checklist_evaluation():
             "privacy.disable_tracking": True,
             "privacy.individual_tracking": False,
             "privacy.unsubscribe_header": True,
-            "app.batch_size": 100,
+            # Batch no larger than the window rate, window rate >= 2: the
+            # pacing ListMonk really enforces (see the sliding-window checks).
+            "app.batch_size": 2,
             "app.concurrency": 1,
             "app.enable_public_archive": False,
             # A fully wired instance also needs the bounce loop + safe uploads,
@@ -425,19 +427,20 @@ async def test_deliverability_checklist_evaluation():
             "upload.extensions": ["jpg", "png"],
             "app.message_rate": 1,
             "app.message_sliding_window": True,
-            "app.message_sliding_window_duration": "2m",
-            "app.message_sliding_window_rate": 1,
+            "app.message_sliding_window_duration": "4m",
+            "app.message_sliding_window_rate": 2,
         }
     })
 
     result = await get_deliverability_checklist(mock_listmonk)
     assert result["score"] == 100
     assert result["overall_status"] == "optimal"
-    assert len(result["checks"]) == 12
+    assert len(result["checks"]) == 14
     # Informational context is reported but never scored: send cadence, plus
-    # the footer-link and sign-up-page checks this mock gives no data for.
+    # the footer-link, hidden-text and sign-up-page checks this mock gives no
+    # data for (its templates are unreadable).
     assert sorted(c["id"] for c in result["checks"] if c["status"] == "info") == [
-        "public_subscription_page", "send_cadence", "unsubscribe_link",
+        "hidden_text", "public_subscription_page", "send_cadence", "unsubscribe_link",
     ]
 
 
@@ -492,10 +495,11 @@ async def test_deliverability_reports_send_cadence_per_day():
     })
 
     result = await get_deliverability_checklist(mock_listmonk)
-    # 1 message per 2 minutes = 720/day, surfaced so slow drains are visible.
-    assert result["raw_settings"]["send_cadence_per_day"] == 720
+    # "1 message per 2 minutes" is really 2 (ListMonk lets two through a
+    # window at rate 1) = 1,440/day, surfaced so slow drains are visible.
+    assert result["raw_settings"]["send_cadence_per_day"] == 1440
     cadence = next(c for c in result["checks"] if c["id"] == "send_cadence")
-    assert "720" in cadence["current_value"]
+    assert "1440" in cadence["current_value"]
 
 
 @pytest.mark.asyncio

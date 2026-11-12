@@ -96,6 +96,7 @@ def _reset_module_caches():
         warmup._WARMUP_LOCK = asyncio.Lock()
         from app.services import send_stats
         send_stats._STATS_LOCK = asyncio.Lock()
+        send_stats.reset_progress()
         from app.services import auto_unblock_state
         auto_unblock_state._STATE_LOCK = asyncio.Lock()
         # Email validation: the per-domain DNS cache, in-flight lookups and
