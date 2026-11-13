@@ -11,76 +11,41 @@ fi
 # Port for the dev server (override with LISTMONK_PORT). Production ports come
 # from each deployment's own .env / docker-compose; this only affects ./start.sh.
 PORT="${LISTMONK_PORT:-8000}"
-PORT_TRIES=10
 
-# True when the PID is a previous instance of this app's uvicorn. Verify the
-# listener is actually ours before stopping it: previously this script killed
-# whatever happened to hold the port, which could be an unrelated service on
-# a shared machine.
-is_our_app() {
-    local cmd
-    cmd=$(ps -o command= -p "$1" 2>/dev/null || true)
-    case "$cmd" in
-        *uvicorn*app.main:app*|*"app.main:app"*) return 0 ;;
-    esac
-    return 1
+# PIDs LISTENING on the port. Only listeners count: a plain `lsof -i :PORT`
+# also matches clients connected to it (e.g. a browser tab still open on the
+# old dashboard), which made the script think the port was taken by the browser.
+listeners() {
+    lsof -t -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | sort -u || true
 }
 
-# Pick a port: the configured one, then the next PORT_TRIES-1. A previous
-# instance of this app is stopped; a port held by anything else (a browser's
-# local service, another dev server) is never killed — the holder is reported
-# and the next port is tried instead.
-chosen=""
-for (( try=0; try<PORT_TRIES; try++ )); do
-    candidate=$(( PORT + try ))
-    pids=$(lsof -t -i :"$candidate" 2>/dev/null || true)
-    if [ -z "$pids" ]; then
-        chosen=$candidate
-        break
-    fi
-
-    ours=()
-    foreign=()
+# Always run on the same port: stop whatever is listening there first
+# (a previous instance, its --reload parent, or anything else).
+pids=$(listeners "$PORT")
+if [ -n "$pids" ]; then
+    echo "⚠️ Port $PORT is in use. Stopping:"
     for pid in $pids; do
-        if is_our_app "$pid"; then
-            ours+=("$pid")
-        else
-            foreign+=("$pid")
-        fi
+        echo "  PID $pid: $(ps -o command= -p "$pid" 2>/dev/null | cut -c1-120 || echo '?')"
     done
-
-    if [ ${#ours[@]} -gt 0 ]; then
-        echo "⚠️ Port $candidate is in use by a previous instance. Stopping it..."
-        kill "${ours[@]}" 2>/dev/null || true
+    kill $pids 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+        [ -z "$(listeners "$PORT")" ] && break
         sleep 1
-        if lsof -i :"$candidate" > /dev/null 2>&1; then
-            kill -9 "${ours[@]}" 2>/dev/null || true
-            sleep 1
-        fi
-        echo "✅ Previous process stopped."
-        chosen=$candidate
-        break
-    fi
-
-    echo "⚠️ Port $candidate is held by a process that is not this app (left alone):"
-    for pid in "${foreign[@]}"; do
-        echo "  PID $pid: $(ps -o command= -p "$pid" 2>/dev/null || echo '?')"
     done
-done
-
-if [ -z "$chosen" ]; then
-    echo "Error: no free port found in $PORT–$((PORT + PORT_TRIES - 1))."
-    echo "Stop the holders yourself or pick another base port: LISTMONK_PORT=<port> ./start.sh"
-    exit 1
-fi
-
-if [ "$chosen" -ne "$PORT" ]; then
-    echo "➡️  Port $PORT was busy — starting on port $chosen instead."
-    echo "    Open the dashboard at http://localhost:$chosen"
+    pids=$(listeners "$PORT")
+    if [ -n "$pids" ]; then
+        kill -9 $pids 2>/dev/null || true
+        sleep 1
+    fi
+    if [ -n "$(listeners "$PORT")" ]; then
+        echo "Error: could not free port $PORT (try: sudo lsof -iTCP:$PORT -sTCP:LISTEN)."
+        exit 1
+    fi
+    echo "✅ Port $PORT freed."
 fi
 
 # Activate virtual environment
 source venv/bin/activate
 
 # Start the server
-uvicorn app.main:app --host 0.0.0.0 --port "$chosen" --reload
+uvicorn app.main:app --host 0.0.0.0 --port "$PORT" --reload
