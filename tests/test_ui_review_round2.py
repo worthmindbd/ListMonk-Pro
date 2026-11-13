@@ -226,3 +226,25 @@ def test_import_refuses_when_every_address_is_invalid(client):
         )
     assert res.status_code == 400
     lm.import_subscribers.assert_not_awaited()
+
+
+# ── Select chevron (light theme tiled it on focus, Deliverability lost it) ──
+
+def _css_rule(css: str, selector: str) -> str:
+    import re
+    m = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", css)
+    assert m, selector
+    return m.group(1)
+
+
+def test_select_rules_never_use_the_background_shorthand():
+    """A `background:` shorthand on a rule that matches a <select> resets the
+    chevron's background-image / -repeat: focused (open) selects tiled the
+    arrow in the light theme, the Deliverability selects had none at all."""
+    from pathlib import Path
+    css = (Path(__file__).resolve().parent.parent / "static/css/style.css").read_text(encoding="utf-8")
+    for selector in ("input:focus, select:focus, textarea:focus", ".deliv-field .deliv-input"):
+        body = _css_rule(css, selector)
+        assert "background:" not in body.replace("background-color:", ""), selector
+    deliv_select = _css_rule(css, ".deliv-field select.deliv-input")
+    assert "padding-right" in deliv_select

@@ -608,7 +608,7 @@ const Campaigns = {
                             <div class="stat-value">${App.formatNumber(c.bounces || 0)}</div>
                             <div class="stat-sub">${pctOf(c.bounces)}% bounce rate</div>
                         </a>
-                        <a class="stat-card stat-card-link" href="#/unsubscribes?campaign=${c.id}" style="border-left:3px solid var(--accent)">
+                        <a class="stat-card stat-card-link" href="#/analytics?campaign=${c.id}&section=unsubscribes" style="border-left:3px solid var(--accent)">
                             <div class="stat-label">Unsubscribes</div>
                             <div class="stat-value">${App.formatNumber(unsubTotal)}</div>
                             <div class="stat-sub">${unsubEmail} email · ${unsubLink} link</div>
@@ -833,16 +833,29 @@ const Campaigns = {
         }
     },
 
+    /** Delete-dialog option. ListMonk keeps a deleted campaign's bounces with
+        no campaign, where they can no longer be cleared by campaign. */
+    _BOUNCE_OPTION: 'Also delete the bounce records of this campaign',
+    _BOUNCE_OPTION_PLURAL: 'Also delete the bounce records of these campaigns',
+    _BOUNCE_HINT: 'Otherwise they stay on the Bounces page without a campaign. Contacts the bounces blocklisted stay blocklisted either way.',
+
     async remove(id) {
-        if (await App.confirm('Delete Campaign', 'Are you sure you want to delete this campaign?')) {
-            try {
-                await API.del(`/api/campaigns/${id}`);
-                App.toast('Campaign deleted', 'success');
-                App.selection.clear('campaigns');
-                this.render();
-            } catch {
-                // API.request already surfaced the server message.
-            }
+        const choice = await App.confirmWithOption('Delete Campaign',
+            'Are you sure you want to delete this campaign?',
+            this._BOUNCE_OPTION, this._BOUNCE_HINT);
+        if (!choice) return;
+        try {
+            const result = await API.del(
+                `/api/campaigns/${id}${choice.checked ? '?delete_bounces=true' : ''}`,
+                choice.checked ? API.LONG_TIMEOUT : undefined);
+            const n = result?.bounces_deleted;
+            App.toast(choice.checked
+                ? `Campaign and ${n ?? 0} bounce record(s) deleted`
+                : 'Campaign deleted', 'success');
+            App.selection.clear('campaigns');
+            this.render();
+        } catch {
+            // API.request already surfaced the server message.
         }
     },
 
@@ -914,12 +927,22 @@ const Campaigns = {
     async bulkDelete() {
         const ids = this._selectedIds();
         if (!ids.length) return;
-        if (!await App.confirm('Delete Campaigns',
-                `Permanently delete ${ids.length} selected campaign(s) and all their stats? This cannot be undone.`)) return;
+        const choice = await App.confirmWithOption('Delete Campaigns',
+            `Permanently delete ${ids.length} selected campaign(s) and all their stats? This cannot be undone.`,
+            this._BOUNCE_OPTION_PLURAL, this._BOUNCE_HINT);
+        if (!choice) return;
         try {
-            const params = ids.map(id => `ids=${id}`).join('&');
-            await API.del(`/api/campaigns?${params}`, API.LONG_TIMEOUT);
-            App.toast(`${ids.length} campaign(s) deleted`, 'success');
+            const params = ids.map(id => `ids=${id}`).join('&')
+                + (choice.checked ? '&delete_bounces=true' : '');
+            const result = await API.del(`/api/campaigns?${params}`, API.LONG_TIMEOUT);
+            if (choice.checked) {
+                const kept = result?.kept?.length || 0;
+                App.toast(`${result?.deleted ?? 0} campaign(s) and ${result?.bounces_deleted ?? 0} bounce record(s) deleted`
+                    + (kept ? `; ${kept} campaign(s) kept because some bounce records could not be deleted, try again` : ''),
+                    kept ? 'info' : 'success');
+            } else {
+                App.toast(`${ids.length} campaign(s) deleted`, 'success');
+            }
             App.selection.clear('campaigns');
             this.render();
         } catch {

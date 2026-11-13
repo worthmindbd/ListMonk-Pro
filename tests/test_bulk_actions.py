@@ -368,7 +368,7 @@ def test_unsubscribe_bulk_campaign_delete_needs_ids(client):
     ("lists.js", "lists"),
     ("campaigns.js", "campaigns"),
     ("replies.js", "replies"),
-    ("unsubscribes.js", "unsub_campaigns"),
+    ("unsubscribes.js", "unsub_records"),
 ])
 def test_list_pages_register_bulk_actions(js_file, key):
     src = (REPO_ROOT / "static" / "js" / js_file).read_text()

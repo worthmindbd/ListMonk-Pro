@@ -83,7 +83,8 @@ ListMonk-Pro/
 │   │   ├── replies.js             # Replies inbox: sentiment tabs, list + pinned reading pane, hot lead flagging, bulk triage
 │   │   ├── settings.js            # Settings UI: send window scheduler, sending warm-up (plan form, live meter, ramp chart), email cleanup schedule, auto-unblock
 │   │   ├── subscribers.js         # Subscriber/lead table: filters, edit modal, bulk list/blocklist/delete
-│   │   ├── unsubscribes.js        # Campaign-grouped unsubscribe dashboard, source badges, bulk removal, undo reset
+│   │   ├── unsubscribes.js        # No page of its own: per-campaign records panel mounted in Analytics (`mount`), monitor card
+│   │   │                          #   (scan / export all / undo all) + no-campaign records in Settings → Automation; #/unsubscribes redirects
 │   │   └── validation.js          # Email Validation page: quick check, scan card with live progress, issues table + bulk bar
 │   ├── favicon.png
 │   └── favicon.svg
@@ -102,6 +103,8 @@ ListMonk-Pro/
 │   ├── test_csv_converter.py      # Encoding/delimiter/column detection
 │   ├── test_replies_deliverability.py # Reply sentiment, reply API & deliverability preset tests
 │   ├── test_bulk_actions.py       # Bulk select endpoints: ID validation, scoping, partial failures
+│   ├── test_unsubscribes_per_campaign.py # Orphan unsubscribe groups (unattributed / deleted campaign), no Unsubscribes page, panel wiring
+│   ├── test_campaign_delete_bounces.py # Campaign delete with its bounce records: bounces first, campaign kept on failure, never another campaign's bounce
 │   ├── test_service_hardening.py  # IMAP timeouts, DSN/reply fingerprint dedup, batch flush, scheduler lock, CSV sanitizer, state caps
 │   ├── test_review_fixes.py       # Regression tests for the full-codebase review
 │   ├── test_reply_body_extraction.py # HTML-only reply body fallback & stored empty-reply repair regressions
@@ -441,13 +444,13 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/campaigns/export-all` | GET | Export all campaigns summary as CSV |
 | | `/api/campaigns/analytics/{type}` | GET | Campaign analytics (views/clicks/bounces/links — the type is whitelisted before it reaches the upstream URL) |
 | | `/api/campaigns/analytics/{type}/export` | GET | Export campaign analytics as CSV |
-| | `/api/campaigns/{id}` | GET / PUT / DELETE | Get / update / delete campaign |
+| | `/api/campaigns/{id}` | GET / PUT / DELETE | Get / update / delete campaign. DELETE `delete_bounces=true` first deletes the campaign's bounce records (`bounce_list.delete_campaign_bounces`; ListMonk otherwise keeps them with `campaign: null`, unreachable by campaign) and keeps the campaign (502) if any of them fails |
 | | `/api/campaigns/{id}/preview` | GET | Preview campaign HTML rendering |
 | | `/api/campaigns/{id}/preview` | POST | Render unsaved edits (`body`, `content_type`, `template_id`) with ListMonk; sandboxed HTML (the editor's Preview) |
 | | `/api/campaigns/{id}/status` | PUT | Change status (start, pause, cancel) |
 | | `/api/campaigns/{id}/archive` | PUT | Archive campaign |
 | | `/api/campaigns/archive` | PUT | Bulk archive campaigns by ID array (registered before `/{id}`) |
-| | `/api/campaigns` | DELETE | Bulk delete campaigns by ID array |
+| | `/api/campaigns` | DELETE | Bulk delete campaigns by ID array; `delete_bounces=true` as above per campaign — campaigns whose bounces could not all be deleted are kept and reported (`kept` / `failed`), 502 when none could be deleted |
 | | `/api/campaigns/{id}/test` | POST | Send test email |
 | | `/api/campaigns/{id}/subscribers/{type}` | GET | View campaign viewers, clickers, or hard bounces |
 | | `/api/campaigns/{id}/subscribers/{type}/export` | GET | Export viewers, clickers, or hard bounces as CSV; optional `from_date`/`to_date` (YYYY-MM-DD, strictly validated) bound the export to the window the analytics charts show |
@@ -489,6 +492,7 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/unsubscribes/stats` | GET | Unsubscribe counts & source breakdown |
 | | `/api/unsubscribes/settings` | GET / PUT | Get / update unsubscribe settings (blocklist toggle) |
 | | `/api/unsubscribes/campaigns` | GET | Unsubscribes grouped by campaign |
+| | `/api/unsubscribes/orphans` | GET | Groups no campaign's Analytics view can show: `reason` `unattributed` or `deleted` (campaign id missing from ListMonk's full campaign list; a ListMonk failure is a 502, never a guess) |
 | | `/api/unsubscribes/campaigns` | DELETE | Bulk delete the records of several selected campaigns by ID array |
 | | `/api/unsubscribes/campaign/{id}` | GET / DELETE | Get / delete records for specific campaign; `id` may be `unknown` for the records no campaign could be attributed to (also accepted by `/export` and as `campaign_id` of `DELETE /records`) |
 | | `/api/unsubscribes/campaign/{id}/export` | GET | Export campaign unsubscribes as CSV |
@@ -604,11 +608,11 @@ Every data page exposes row-level actions plus a multi-select bulk bar
 |------|-------------|-----------------------------------------------|
 | Leads/Subscribers | View details, Edit (incl. list memberships), Blocklist / Unblock, Delete | Add/Remove from list, Blocklist, Export Selected (CSV), Delete |
 | Lead Lists | View Subscribers (jumps to the filtered Lead table), Export, Edit, Delete | Export Subscribers, Delete |
-| Cold Outreach/Campaigns | View, Start/Pause/Resume, Test Send, Archive, Delete | Archive, Export Selected (CSV), Delete |
+| Cold Outreach/Campaigns | View, Start/Pause/Resume, Test Send, Archive, Delete (dialog option: also delete its bounce records, `App.confirmWithOption`) | Archive, Export Selected (CSV), Delete |
 | Templates | Preview, Duplicate, Edit, Set Default, Delete (search by name) | Delete |
 | Bounces | Delete | Export Selected (CSV), Delete Selected (plus the existing filter-wide Delete All) |
 | Replies & Leads | Reading pane: status switch (Unread / Hot lead / Replied / Archived), Copy Email, Blocklist, Delete (`J`/`K` or ↑/↓ move between replies) | Mark Hot Lead / Replied / Archived / Unread, Blocklist, Delete |
-| Unsubscribes | per-campaign Remove, Remove List (detail view), record removal | Delete Records for the selected campaign cards |
+| Unsubscribes (Analytics → selected campaign; Settings → Automation for records without a campaign) | Remove record, Export CSV, Remove all records | Export Selected (CSV), Remove (`unsub_records`) |
 | Email Validation | Blocklist, Dismiss | Blocklist Selected, Dismiss Selected, Export Selected (CSV); filter-wide Export CSV |
 
 Frontend conventions:
@@ -624,7 +628,11 @@ Frontend conventions:
   a dialog or a menu is open); `App.debounce` drives search-as-you-type.
 - Automation that acts on people without a click lives in Settings (tabs: Send Window,
   Warm-up, Automation, Email Cleanup, Auto-Unblock; deep link `#/settings?tab=…`). The
-  Unsubscribes and Replies pages link there instead of carrying their own toggles.
+  Analytics unsubscribe panel and the Replies page link there instead of carrying their own toggles.
+  Unsubscribes have no page: each campaign's records are a panel under the campaign on
+  Analytics (`#/analytics?campaign=N&section=unsubscribes` scrolls to it; the campaign page
+  and old `#/unsubscribes?campaign=N` links land there); the monitor and the records of
+  deleted / unattributed campaigns are on Settings → Automation.
 
 - A page calls `App.selection.register(key, {noun, pageValues, actions})` on every
   render, places `App.selection.bar(key)` above its table and wires

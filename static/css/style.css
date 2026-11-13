@@ -1130,7 +1130,10 @@ input:focus, select:focus, textarea:focus {
     outline: none;
     border-color: var(--primary);
     box-shadow: 0 0 0 3px var(--primary-glow);
-    background: var(--bg-surface-elevated);
+    /* background-color, not the shorthand: on a focused (or open) <select>
+       the shorthand reset the chevron to background-repeat: repeat, tiling
+       it across the control in the light theme and dropping it in the dark. */
+    background-color: var(--bg-surface-elevated);
 }
 
 textarea {
@@ -5369,7 +5372,8 @@ td .tag {
     padding: 5px 9px;
     border: 1px solid var(--glass-border-hover);
     border-radius: var(--radius-sm);
-    background: var(--bg-surface);
+    /* Colour only: the shorthand removed the <select> chevron entirely. */
+    background-color: var(--bg-surface);
     color: var(--text-primary);
     font: inherit;
     font-size: 0.8rem;
@@ -5382,6 +5386,10 @@ td .tag {
     min-width: 136px;
     text-align: left;
     cursor: pointer;
+    /* Room for the chevron: the compact field padding above overrides the
+       global select's padding-right. */
+    padding-right: 30px;
+    background-position: right 8px center;
 }
 
 .deliv-field .deliv-input.is-short {

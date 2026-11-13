@@ -377,12 +377,9 @@ const App = {
             Bounces.campaignFilter = 0;
             Bounces.page = 1;
         }
-        // Same convention for the unsubscribe detail view: its selection and
-        // open campaign are page-local and must not survive navigation.
-        if (hash !== 'unsubscribes' && typeof Unsubscribes !== 'undefined') {
-            Unsubscribes.activeCampaign = null;
-            Unsubscribes.selectedEmails.clear();
-        }
+        // The unsubscribe records panel belongs to the page that mounted it
+        // (Analytics, Settings); the next page mounts its own.
+        if (typeof Unsubscribes !== 'undefined') Unsubscribes.panel = null;
 
         // The validation page polls a running scan; that timer must not outlive it.
         if (hash !== 'validation' && typeof Validation !== 'undefined') {
@@ -640,6 +637,30 @@ const App = {
                 this._modalResolve = null;
                 this.closeModal();
                 resolve(true);
+            };
+        });
+    },
+
+    /** confirm() with one unchecked-by-default option below the message.
+        Resolves null when cancelled, else {checked} — read before the
+        dialog closes. `label` / `hint` are plain text (escaped here). */
+    confirmWithOption(title, message, label, hint = '') {
+        return new Promise((resolve) => {
+            this._modalResolve = () => resolve(null);
+            document.getElementById('modalTitle').textContent = title;
+            document.getElementById('modalBody').innerHTML = `
+                <p>${this.escapeHtml(message)}</p>
+                <label class="checkbox-label" style="margin-top:12px;display:inline-flex">
+                    <input type="checkbox" id="modalOption"><span>${this.escapeHtml(label)}</span>
+                </label>
+                ${hint ? `<p style="margin-top:6px;color:var(--text-secondary);font-size:.8125rem">${this.escapeHtml(hint)}</p>` : ''}`;
+            this._resetModalButtons();
+            this._openModalOverlay();
+            document.getElementById('modalConfirm').onclick = () => {
+                const checked = !!document.getElementById('modalOption')?.checked;
+                this._modalResolve = null;
+                this.closeModal();
+                resolve({ checked });
             };
         });
     },

@@ -33,6 +33,9 @@ const Analytics = {
         if (rq.get('campaign')) this.selectedCampaignId = parseInt(rq.get('campaign'), 10) || 0;
         if (rq.get('from')) this.fromDate = rq.get('from');
         if (rq.get('to')) this.toDate = rq.get('to');
+        // #/analytics?campaign=6&section=unsubscribes opens on that campaign's
+        // unsubscribe records (the campaign page and old links point here).
+        this._scrollToUnsubs = rq.get('section') === 'unsubscribes';
         // Set default date range: last 30 days (LOCAL calendar days — an
         // toISOString() date is the UTC day, which shifts near local midnight).
         const now = new Date();
@@ -157,8 +160,8 @@ const Analytics = {
                 </div>`}
                 <div class="stat-card" style="border-left-color:#14b8a6">
                     <div class="stat-label">Unsubscribes</div>
-                    <div class="stat-value" style="color:#14b8a6">${App.formatNumber(totalUnsubs)}</div>
-                    <div style="font-size:0.8rem;color:var(--text-muted)"><a href="#/unsubscribes" style="color:#14b8a6;text-decoration:none">View details →</a></div>
+                    <div class="stat-value" style="color:#14b8a6" id="anUnsubTotal">${App.formatNumber(totalUnsubs)}</div>
+                    <div style="font-size:0.8rem;color:var(--text-muted)">listed per campaign below · <a href="#/settings?tab=automation" style="color:#14b8a6;text-decoration:none">monitor</a></div>
                 </div>
                 <div class="stat-card danger">
                     <div class="stat-label">Total Bounces</div>
@@ -225,7 +228,7 @@ const Analytics = {
                     ${isCold ? `
                     <div class="stat-card success"><div class="stat-label">Replies</div><div class="stat-value" style="color:var(--emerald)">${App.formatNumber(campReplies)}</div><div class="stat-sub"><strong style="color:var(--emerald)">${campReplyRate}%</strong> reply rate</div><div class="stat-sub" id="anRange_replies"></div></div>` : ''}
                     <div class="stat-card danger"><div class="stat-label">Bounces</div><div class="stat-value">${App.formatNumber(selectedCamp.bounces || 0)}</div><div class="stat-sub" id="anRange_bounces"></div></div>
-                    <div class="stat-card" style="border-left-color:#14b8a6"><div class="stat-label">Unsubscribes</div><div class="stat-value" style="color:#14b8a6">${App.formatNumber(this.campaignUnsubCount)}</div></div>
+                    <a class="stat-card stat-card-link" href="javascript:void(0)" onclick="Analytics.scrollToUnsubs()" style="border-left-color:#14b8a6"><div class="stat-label">Unsubscribes</div><div class="stat-value" style="color:#14b8a6" id="anUnsubCount">${App.formatNumber(this.campaignUnsubCount)}</div><div class="stat-sub">view records ↓</div></a>
                 </div>` : ''}
             </div>
 
@@ -273,6 +276,9 @@ const Analytics = {
                 </div>`}
             </div>
 
+            <!-- The selected campaign's unsubscribe records (Unsubscribes.mount) -->
+            ${selectedCamp ? '<div class="card" id="anUnsubs" style="margin-top:20px;scroll-margin-top:16px"></div>' : ''}
+
             <!-- Links Table (click analytics, newsletter mode only) -->
             ${isCold ? '' : `
             <div class="card" style="margin-top:20px">
@@ -295,6 +301,39 @@ const Analytics = {
         // Auto-load analytics for selected campaign
         if (this.selectedCampaignId) {
             this.loadCampaignAnalytics();
+        }
+        if (selectedCamp && typeof Unsubscribes !== 'undefined') {
+            Unsubscribes.mount('anUnsubs', this.selectedCampaignId).then(() => {
+                if (this._scrollToUnsubs) { this._scrollToUnsubs = false; this.scrollToUnsubs(); }
+            });
+        }
+    },
+
+    scrollToUnsubs() {
+        document.getElementById('anUnsubs')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    },
+
+    /** Pick a campaign from the comparison table and jump to its records. */
+    async openCampaignUnsubs(id) {
+        this._scrollToUnsubs = true;
+        await this.onCampaignChange(id);
+    },
+
+    /** A record removal or scan changed the log: refresh the two counts in place. */
+    async refreshUnsubCounts() {
+        const campId = this.selectedCampaignId;
+        try {
+            const st = await API.get(`/api/unsubscribes/stats?campaign_id=${campId || 0}`, true);
+            if (App.currentPage !== 'analytics' || campId !== this.selectedCampaignId) return;
+            this.unsubStats = { ...(this.unsubStats || {}), total: st.total || 0 };
+            this.campaignUnsubCount = st.campaign_count || 0;
+            if (campId) this.unsubByCampaign[campId] = this.campaignUnsubCount;
+            const t = document.getElementById('anUnsubTotal');
+            if (t) t.textContent = App.formatNumber(st.total || 0);
+            const c = document.getElementById('anUnsubCount');
+            if (c) c.textContent = App.formatNumber(this.campaignUnsubCount);
+        } catch {
+            // Counts stay as they were; the records panel itself is current.
         }
     },
 
@@ -453,7 +492,7 @@ const Analytics = {
                     ? `<td class="num">${App.formatNumber(replies)}</td><td class="num">${pct(replies, sent)}</td>`
                     : `<td class="num">${App.formatNumber(c.views || 0)}</td><td class="num">${pct(c.views || 0, sent)}</td><td class="num">${pct(c.clicks || 0, sent)}</td>`}
                 <td class="num">${App.formatNumber(c.bounces || 0)}</td><td class="num">${pct(c.bounces || 0, sent)}</td>
-                <td class="num">${App.formatNumber(unsubs)}</td>
+                <td class="num">${unsubs ? `<a class="cell-link" href="javascript:void(0)" onclick="Analytics.openCampaignUnsubs(${c.id})" title="Show these unsubscribes">${App.formatNumber(unsubs)}</a>` : '0'}</td>
             </tr>`;
         }).join('');
         return `<div class="table-wrapper an-compare" tabindex="0" role="region" aria-label="Campaign comparison table" style="margin-top:16px"><table>
@@ -961,3 +1000,7 @@ window.addEventListener('themeChanged', () => {
     }
 });
 
+
+document.addEventListener('unsubscribes:changed', () => {
+    if (App.currentPage === 'analytics') Analytics.refreshUnsubCounts();
+});

@@ -40,7 +40,7 @@ ListMonk Pro adapts instantly between two distinct marketing disciplines with a 
 - **Campaigns** — Full campaign lifecycle management: create, edit, start, pause, resume, cancel, archive, delete, HTML/text preview, and test sends.
 - **Templates** — Create, edit, and preview templates, with one-click default template assignment.
 - **Bounces** — View and filter bounces by campaign or type (`hard`/`soft`), delete records, and export CSVs.
-- **Unsubscribes** — Unified dashboard tracking both IMAP reply unsubscribes and direct link clicks with campaign grouping, per-campaign CSV export, and undo/reset capabilities.
+- **Unsubscribes** — Tracks both IMAP reply unsubscribes and direct link clicks per campaign: each campaign's records (with CSV export) sit under the campaign on Analytics; the scan monitor, export-all, undo/reset and records without a campaign are in Settings → Automation.
 
 ### Analytics & Reporting
 - **Overview Dashboard** — Summary metrics (subscribers, lists, campaigns) and interactive Chart.js visualizations.

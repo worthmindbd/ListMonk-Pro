@@ -11,6 +11,7 @@ from app.services.bounce_filters import (
     email_opened_campaign,
     exclude_openers_from_bounces,
 )
+from app.services.bulk_ops import run_bulk
 from app.services.hard_bounce_cache import get_all_hard_bounce_counts, get_hard_bounce_count
 from app.services.listmonk_client import ListMonkClient
 from app.services.opener_cache import get_cached_opener_emails, is_cached
@@ -225,3 +226,42 @@ async def fetch_all_filtered_bounces(
             campaign_id=campaign_id, source=source,
         )
     ]
+
+
+# Upstream deletes are per record; the same bounds the Bounces page's
+# filter-wide delete uses.
+CAMPAIGN_BOUNCE_DELETE_CONCURRENCY = 10
+CAMPAIGN_BOUNCE_DELETE_CHUNK = 200
+
+
+async def delete_campaign_bounces(client: ListMonkClient, campaign_id: int) -> dict:
+    """Delete every bounce record ListMonk holds for one campaign.
+
+    Used when a campaign is deleted with "also delete its bounce records":
+    ListMonk keeps a deleted campaign's bounces (``ON DELETE SET NULL``), and
+    once the campaign is gone they can no longer be found by campaign, so this
+    must run *before* the campaign is deleted.
+
+    Unfiltered on purpose: the opener exclusion only hides false positives
+    from the UI, but those records belong to the campaign too. Each record's
+    campaign is re-checked so a ListMonk that ignored the ``campaign_id``
+    filter could never turn this into a delete-all.
+
+    Returns ``{"deleted", "errors", "failed"}`` like the other bulk deletes.
+    """
+    bounce_ids: list[int] = []
+    async for b in client.iter_pages(client.get_bounces, per_page=LM_FETCH_SIZE,
+                                     campaign_id=campaign_id):
+        bid = b.get("id")
+        if bid and bounce_campaign_id(b) == campaign_id:
+            bounce_ids.append(bid)
+
+    deleted = 0
+    failed: list[dict] = []
+    for start in range(0, len(bounce_ids), CAMPAIGN_BOUNCE_DELETE_CHUNK):
+        chunk = bounce_ids[start:start + CAMPAIGN_BOUNCE_DELETE_CHUNK]
+        result = await run_bulk(chunk, client.delete_bounce,
+                                concurrency=CAMPAIGN_BOUNCE_DELETE_CONCURRENCY)
+        deleted += result["ok"]
+        failed.extend(result["failed"])
+    return {"deleted": deleted, "errors": len(failed), "failed": failed}

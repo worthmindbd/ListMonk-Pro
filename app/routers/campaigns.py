@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import time
 from datetime import date, timedelta
@@ -10,12 +11,15 @@ from app.services.campaign_scheduler import nudge_warmup
 from app.services.search_query import plain_search_term
 from app.services.bulk_ops import parse_ids, run_bulk
 from app.services.export_service import dict_list_to_csv, aiter_dicts_to_csv
-from app.services.bounce_list import fetch_filtered_bounces_page, iter_filtered_bounces
+from app.services.bounce_list import (
+    delete_campaign_bounces, fetch_filtered_bounces_page, iter_filtered_bounces,
+)
 from app.services.hard_bounce_cache import (
-    get_all_hard_bounce_counts, get_last_updated,
+    get_all_hard_bounce_counts, get_last_updated, schedule_hard_bounce_update,
 )
 
 router = APIRouter()
+logger = logging.getLogger("campaigns")
 
 # Pagination bounds. The UI never requests more than 500, and an unbounded
 # per_page turns a single request into a full-table scan in ListMonk.
@@ -467,16 +471,59 @@ async def archive_campaigns(data: dict):
     }
 
 
+def _bounce_failure_detail(errors: int) -> str:
+    return (f"{errors} bounce record(s) could not be deleted, so the campaign was kept: "
+            "once it is gone its bounces can no longer be found by campaign. Try again.")
+
+
 @router.delete("")
-async def delete_campaigns(ids: list[int] = Query(...)):
-    """Delete several campaigns in one request."""
+async def delete_campaigns(ids: list[int] = Query(...),
+                           delete_bounces: bool = Query(False)):
+    """Delete several campaigns in one request.
+
+    ``delete_bounces=true`` first deletes each campaign's bounce records
+    (ListMonk keeps them, unattributed, when a campaign is deleted). A
+    campaign whose bounces could not all be deleted is kept and reported in
+    ``kept`` / ``failed``, so the delete can be retried.
+    """
     try:
         parsed = parse_ids(ids)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if not parsed:
         raise HTTPException(status_code=400, detail="No campaign ids provided")
-    return await listmonk.delete_campaigns(parsed)
+    if not delete_bounces:
+        return await listmonk.delete_campaigns(parsed)
+
+    clean: list[int] = []
+    kept: list[int] = []
+    failed: list[dict] = []
+    bounces_deleted = 0
+    try:
+        for cid in parsed:
+            try:
+                res = await delete_campaign_bounces(listmonk, cid)
+            except Exception as exc:
+                logger.error(f"Could not delete bounces of campaign {cid}: {exc}")
+                kept.append(cid)
+                failed.append({"id": cid, "error": f"Bounce records could not be read: {exc}"})
+                continue
+            bounces_deleted += res["deleted"]
+            if res["errors"]:
+                kept.append(cid)
+                failed.append({"id": cid, "error": _bounce_failure_detail(res["errors"])})
+            else:
+                clean.append(cid)
+    finally:
+        schedule_hard_bounce_update()
+
+    if not clean:
+        raise HTTPException(status_code=502, detail=failed[0]["error"] if len(failed) == 1
+                            else f"None of the {len(kept)} campaigns were deleted: "
+                                 "their bounce records could not all be deleted. Try again.")
+    await listmonk.delete_campaigns(clean)
+    return {"deleted": len(clean), "kept": kept, "errors": len(failed), "failed": failed,
+            "bounces_deleted": bounces_deleted}
 
 
 @router.post("/{campaign_id}/test")
@@ -524,5 +571,16 @@ async def archive_campaign(campaign_id: int):
 
 
 @router.delete("/{campaign_id}")
-async def delete_campaign(campaign_id: int):
-    return await listmonk.delete_campaign(campaign_id)
+async def delete_campaign(campaign_id: int, delete_bounces: bool = Query(False)):
+    """Delete one campaign; ``delete_bounces=true`` deletes its bounce records
+    first and keeps the campaign (502) if any of them could not be deleted."""
+    if not delete_bounces:
+        return await listmonk.delete_campaign(campaign_id)
+    try:
+        bounces = await delete_campaign_bounces(listmonk, campaign_id)
+    finally:
+        schedule_hard_bounce_update()
+    if bounces["errors"]:
+        raise HTTPException(status_code=502, detail=_bounce_failure_detail(bounces["errors"]))
+    res = await listmonk.delete_campaign(campaign_id)
+    return {**(res if isinstance(res, dict) else {}), "bounces_deleted": bounces["deleted"]}

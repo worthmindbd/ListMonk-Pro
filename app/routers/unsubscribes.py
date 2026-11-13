@@ -118,6 +118,33 @@ async def get_campaign_groups():
     return {"data": sorted_groups}
 
 
+@router.get("/orphans")
+async def get_orphan_groups():
+    """Groups no campaign's Analytics view can show: records never attributed
+    to a campaign, and those of campaigns since deleted in ListMonk.
+
+    Unsubscribes are browsed per campaign on the Analytics page, so without
+    this list those records would be unreachable. ListMonk's campaign list is
+    read in full (one id set) rather than per group: a missing campaign is
+    then unambiguous. A ListMonk failure propagates (502) — guessing would
+    show live campaigns as deleted.
+    """
+    groups = (await get_campaign_groups())["data"]
+    live: set[int] = set()
+    if any(isinstance(g["campaign_id"], int) for g in groups):
+        async for c in listmonk.iter_pages(listmonk.get_campaigns, per_page=100):
+            if isinstance(c.get("id"), int):
+                live.add(c["id"])
+    orphans = []
+    for g in groups:
+        cid = g["campaign_id"]
+        if not isinstance(cid, int):
+            orphans.append({**g, "reason": "unattributed"})
+        elif cid not in live:
+            orphans.append({**g, "reason": "deleted"})
+    return {"data": orphans}
+
+
 # Records whose campaign could not be attributed carry no ``campaign_id``;
 # the grouped view lists them under this key, and every per-campaign route
 # accepts it so those records can be opened, exported and removed too.

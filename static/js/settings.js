@@ -107,6 +107,9 @@ const Settings = {
             this._previewWarmup();
             this._loadWarmupInsights();
         }
+        if (this.activeTab === 'automation' && typeof Unsubscribes !== 'undefined') {
+            this._mountUnsubscribes();
+        }
         if (this.activeTab === 'cleanup' && this.cleanup) {
             this._cleanupFreqChanged();
             if (this.cleanup.job?.running) this._startCleanupPoll();
@@ -1038,8 +1041,7 @@ const Settings = {
         const u = this.unsubSettings;
         const unsubCard = u ? `
             <div class="card" style="margin-bottom:20px">
-                <div class="card-header"><h2 class="card-title">Unsubscribe requests</h2>
-                    <a class="btn btn-sm" href="#/unsubscribes">Open Unsubscribes</a></div>
+                <div class="card-header"><h2 class="card-title">Unsubscribe requests</h2></div>
                 <p class="field-hint" style="margin-bottom:12px">Applies to "remove me" replies and to unsubscribe-link clicks found by the hourly scan.
                     The ${App.term('subscriber')} is always taken off every list.</p>
                 ${this._switchRow({
@@ -1049,12 +1051,23 @@ const Settings = {
                     desc: 'On: ListMonk will never mail them again, even after a re-import. Off: they are only unsubscribed and could be added back to a list later.',
                 })}
             </div>` : `<div class="card" style="margin-bottom:20px"><p class="field-hint">Unsubscribe settings could not be loaded.</p></div>`;
+        // Filled by Unsubscribes after the tab paints (see renderTab): the
+        // scan / export / undo controls, and the records no campaign's
+        // Analytics view can show.
+        const unsubExtra = `
+            <div class="card" id="settingsUnsubMonitor" style="margin-bottom:20px"><div class="loading-spinner">Loading unsubscribe monitor…</div></div>
+            <div class="card" id="settingsUnsubOrphans" style="margin-bottom:20px;display:none"></div>`;
 
         const replyCard = typeof Replies !== 'undefined'
             ? `<div id="settingsReplyAuto">${Replies.renderAutomation(true)}</div>
                <p class="field-hint" style="margin-top:8px">${App.isCold() ? '' : 'These rules belong to the Cold Email reply inbox (Replies & Leads). '}Open the inbox: <a href="#/replies">Replies &amp; Leads</a>.</p>`
             : '';
-        return unsubCard + replyCard;
+        return unsubCard + unsubExtra + replyCard;
+    },
+
+    _mountUnsubscribes() {
+        Unsubscribes.mountMonitor('settingsUnsubMonitor');
+        Unsubscribes.mountOrphans('settingsUnsubOrphans');
     },
 
     async toggleUnsubBlocklist(enabled) {
@@ -1368,3 +1381,12 @@ const Settings = {
         }
     },
 };
+
+// A scan, undo or record removal changes the monitor's counts and the
+// no-campaign groups shown on the Automation tab.
+document.addEventListener('unsubscribes:changed', () => {
+    if (App.currentPage === 'settings' && Settings.activeTab === 'automation') {
+        Unsubscribes.mountMonitor('settingsUnsubMonitor');
+        Unsubscribes.mountOrphans('settingsUnsubOrphans');
+    }
+});
