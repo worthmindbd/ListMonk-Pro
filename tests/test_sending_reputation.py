@@ -303,9 +303,9 @@ async def test_report_is_cached_until_refresh(fake_dns):
 
 YAHOO_RDNS = ("SMTP error from remote mail server after pipelined MAIL FROM:<sender@example.org>: "
               "550 5.7.25 Forward-confirmed reverse DNS check failed")
-MS_BLOCK = ("550 5.7.1 Unfortunately, messages from [66.212.16.31] weren't sent. Please contact your "
+MS_BLOCK = ("550 5.7.1 Unfortunately, messages from [93.184.216.36] weren't sent. Please contact your "
             "Internet service provider since part of their network is on our block list (S3150).")
-GMAIL_SPAM = ("550-5.7.1 [66.212.16.30 12] Gmail has detected that this message is likely "
+GMAIL_SPAM = ("550-5.7.1 [93.184.216.35 12] Gmail has detected that this message is likely "
               "unsolicited mail. To reduce the amount of spam sent to Gmail, this message has been blocked.")
 DMARC = "550 5.7.26 Unauthenticated email from example.com is not accepted due to domain's DMARC policy."
 
