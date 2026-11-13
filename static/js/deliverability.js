@@ -36,6 +36,8 @@ const Deliverability = {
         // applyPreset()/save() re-render after an await; if the user navigated
         // away in the meantime, painting over the new page would be wrong.
         if (App.currentPage !== 'deliverability') return;
+        const fresh = this._fresh === true;
+        this._fresh = false;
         this._seq = App.seq();
         this.isLoading = true;
         this.pending = {};
@@ -48,7 +50,7 @@ const Deliverability = {
             // The format card degrades on its own: a campaigns read failure
             // must not take the whole audit down with it.
             const [checklist, formats] = await Promise.all([
-                API.get('/api/deliverability/checklist', true),
+                API.get(`/api/deliverability/checklist${fresh ? '?refresh=true' : ''}`, true),
                 API.get('/api/deliverability/email-format', true)
                     .catch(err => ({ error: err?.message || 'Unknown error' })),
             ]);
@@ -56,6 +58,9 @@ const Deliverability = {
             this.formats = formats;
             this.checkedAt = new Date();
             if (App.stale(this._seq)) return;
+            // Before painting: the audit header draws its Refresh button
+            // disabled while loading, and used to stay disabled for good.
+            this.isLoading = false;
             this.renderPage();
         } catch (err) {
             console.error('Deliverability error:', err);
@@ -354,8 +359,15 @@ const Deliverability = {
             }
             case 'bounce_feedback':
                 return `<p class="deliv-check-note">${_dSvgIcon('info')}<span>Bounce mailboxes and provider webhooks are configured in ListMonk → Settings → Bounces.</span></p>`;
-            default:
-                return '';
+            default: {
+                // Server-provided next steps (sending reputation: removal
+                // requests, manual lookups). External, so a new tab.
+                const links = Array.isArray(check.links) ? check.links : [];
+                const safe = links.filter(l => /^https:\/\//.test(String(l.url || '')));
+                if (!safe.length) return '';
+                return `<p class="deliv-check-note is-warn">${_dSvgIcon('info')}<span>${safe.map(l =>
+                    `<a href="${App.escapeHtml(l.url)}" target="_blank" rel="noopener noreferrer">${App.escapeHtml(l.label)} ↗</a>`).join(' · ')}</span></p>`;
+            }
         }
     },
 
@@ -433,7 +445,10 @@ const Deliverability = {
                 return ext.includes('*') ? [{ label: '* wildcard allowed', tone: 'bad' }] : [];
             }
             default:
-                return [];
+                // Checks that describe their own facts (sending reputation).
+                return Array.isArray(check.chips)
+                    ? check.chips.map(c => ({ label: String(c.label ?? ''), tone: c.tone || undefined, wide: !!c.wide, title: String(c.label ?? '') }))
+                    : [];
         }
     },
 
@@ -719,6 +734,8 @@ const Deliverability = {
             const ok = await App.confirm('Discard unsaved changes?', 'Refreshing reloads the settings from Listmonk and drops the changes you have not saved yet.');
             if (!ok) return;
         }
+        // Also re-run the sending-reputation DNS checks (15-minute cache).
+        this._fresh = true;
         await this.render();
     },
 

@@ -64,6 +64,16 @@ def _isolate_state_files(tmp_path_factory, monkeypatch):
     from app.services import blocklist_registry
     monkeypatch.setattr(blocklist_registry, "REGISTRY_FILE", state / "manual_blocklist.json")
 
+    # Sending reputation does live DNS (PTR, DNSBL, SPF …). No test may reach
+    # the network: by default every lookup "times out", which the checks
+    # report as unknown/info. Tests that need answers replace _query again.
+    import dns.exception
+    from app.services import sending_reputation
+
+    async def _no_network(name, rdtype):
+        raise dns.exception.Timeout()
+    monkeypatch.setattr(sending_reputation, "_query", _no_network)
+
 
 @pytest.fixture(autouse=True)
 def _reset_module_caches():
@@ -106,6 +116,8 @@ def _reset_module_caches():
         email_cleanup.reset_job()
         email_cleanup._STATE_LOCK = asyncio.Lock()
         email_cleanup._RESULTS_LOCK = asyncio.Lock()
+        from app.services import sending_reputation
+        sending_reputation.invalidate()
 
     _reset()
     yield

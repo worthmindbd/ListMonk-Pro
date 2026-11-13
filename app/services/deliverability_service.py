@@ -7,7 +7,7 @@ between Newsletter Mode and Cold Email Mode.
 
 import logging
 import re
-from app.services import app_settings
+from app.services import app_settings, sending_reputation
 from app.services.listmonk_client import ListMonkClient
 from app.services.template_unsubscribe import campaign_templates, summarize_unsubscribe_links
 
@@ -31,6 +31,12 @@ CHECK_GROUPS = [
         "id": "hygiene",
         "label": "List hygiene",
         "blurb": "Whether dead addresses leave the queue or get retried forever.",
+    },
+    {
+        "id": "reputation",
+        "label": "Sending reputation",
+        "blurb": "What receiving servers check before they accept a message: the sending IP's name, "
+                 "blocklists, SPF, DKIM and DMARC, and whether they have been refusing your mail.",
     },
     {
         "id": "surface",
@@ -157,7 +163,8 @@ def hidden_text_blocks(body: str) -> list[int]:
     return found
 
 
-async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
+async def get_deliverability_checklist(listmonk: ListMonkClient,
+                                       refresh_reputation: bool = False) -> dict:
     """Fetch current Listmonk settings and run deliverability checks."""
     try:
         res = await listmonk.get_settings()
@@ -460,6 +467,14 @@ async def get_deliverability_checklist(listmonk: ListMonkClient) -> dict:
         "recommended": "explicit image/document types only",
         "impact": "Medium",
     })
+
+    # 11. Sending reputation (sending_reputation): the IP, DNS and receiver
+    # side of deliverability. Never fails the audit as a whole.
+    try:
+        reputation = await sending_reputation.get_report(listmonk, raw_settings, refresh=refresh_reputation)
+        checks.extend(sending_reputation.build_checks(reputation))
+    except Exception as e:
+        logger.warning(f"Sending reputation checks unavailable: {e}")
 
     # The tracking and drip-pacing rules are cold-outreach standards. In
     # Newsletter mode open/click tracking and a faster engine are the point

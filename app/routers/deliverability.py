@@ -17,6 +17,7 @@ from app.services.deliverability_service import (
     validate_settings_patch,
 )
 from app.services.email_format import FormatError, list_email_formats, set_email_format
+from app.services import sending_reputation
 from app.services.listmonk_client import listmonk
 from app.services.template_unsubscribe import describe_error, set_unsubscribe_links
 
@@ -24,11 +25,32 @@ logger = logging.getLogger("deliverability_router")
 router = APIRouter()
 
 
-@router.get("/checklist")
-async def deliverability_checklist():
-    """Run deliverability checks against current Listmonk settings."""
+@router.get("/reputation")
+async def sending_reputation_report(refresh: bool = False):
+    """Sending IPs, reverse DNS, blocklists, SPF/DKIM/DMARC and recent
+    sender-side rejections (cached 15 min; ``refresh=true`` re-checks), plus
+    the ``alerts`` the dashboard shows."""
     try:
-        result = await get_deliverability_checklist(listmonk)
+        report = await sending_reputation.get_report(listmonk, refresh=refresh)
+    except Exception as e:
+        logger.error(f"Sending reputation check failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Sending reputation check failed: {e}")
+    return {
+        "report": report,
+        "checks": sending_reputation.build_checks(report),
+        "alerts": sending_reputation.alerts(report),
+    }
+
+
+@router.get("/checklist")
+async def deliverability_checklist(refresh: bool = False):
+    """Run deliverability checks against current Listmonk settings.
+
+    ``refresh=true`` re-runs the sending-reputation DNS checks instead of
+    using their 15-minute cache (the page's "Re-check" button).
+    """
+    try:
+        result = await get_deliverability_checklist(listmonk, refresh_reputation=refresh)
     except Exception as e:
         logger.error(f"Deliverability check error: {e}", exc_info=True)
         raise HTTPException(status_code=502, detail=f"Deliverability check failed: {e}")

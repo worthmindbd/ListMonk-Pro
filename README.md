@@ -34,6 +34,7 @@ ListMonk Pro adapts instantly between two distinct marketing disciplines with a 
 ### Core Outreach & Management
 - **Replies & Prospect Feed** — Real-time monitoring of prospect responses, sentiment filtering, search, and one-click lead tagging.
 - **Deliverability & Safety** — Pre-flight audit checking tracking pixels, the List-Unsubscribe header, batch size, worker concurrency, and public archive/subscription exposure.
+- **Sending Reputation** — Checks what receiving servers check: reverse DNS of every sending IP (forward-confirmed, inside your domain), public blocklists (Spamhaus, Barracuda, SpamCop, Mailspike, PSBL — a list that refuses to answer is shown as not checkable, never as clean), SPF for the sending IP, DKIM and DMARC, plus a 7-day count of mail receivers refused as spam / blocklist / reverse DNS / authentication, per provider. Problems surface on the dashboard.
 - **Subscribers & Leads** — Search, filter by list, create, edit, delete, blocklist, bulk blocklist, and bulk delete.
 - **Lists & Lead Lists** — Create and manage mailing and lead lists with tags and single/double opt-in controls.
 - **Campaigns** — Full campaign lifecycle management: create, edit, start, pause, resume, cancel, archive, delete, HTML/text preview, and test sends.
@@ -159,6 +160,10 @@ BOUNCE_IMAP_USE_SSL=true
 # EMAIL_VALIDATION_DNS_TIMEOUT=5    # seconds per DNS lookup before an address is reported "unknown"
 # EMAIL_VALIDATION_CONCURRENCY=50   # addresses checked in parallel during a scan
 # EMAIL_VALIDATION_FALLBACK_DNS=1.1.1.1,8.8.8.8  # public DNS tried only for domains your resolver can't answer; empty = off
+
+# Sending Reputation (Optional)
+# SENDING_IPS=203.0.113.10        # IPs your mail leaves from; default = ListMonk's SMTP host addresses
+# DKIM_SELECTORS=mail,default     # DKIM selectors tried on the From domain
 
 # Persistent Data Storage Directory (Optional: defaults to /data in Docker, repo root in local dev)
 # DATA_DIR=/data

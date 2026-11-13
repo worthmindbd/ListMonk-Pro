@@ -103,6 +103,19 @@ class Settings:
     email_validation_fallback_dns: tuple[str, ...] = _env_ip_list(
         "EMAIL_VALIDATION_FALLBACK_DNS", "1.1.1.1,8.8.8.8")
 
+    # Sending reputation checks (Deliverability → Sending reputation). The IPs
+    # your mail leaves from; empty = derived from ListMonk's SMTP hosts, which
+    # is right when ListMonk relays through the server that delivers the mail.
+    # Set it when that server hands mail to another one (a smarthost).
+    sending_ips: tuple[str, ...] = _env_ip_list("SENDING_IPS", "")
+    # DKIM selectors to look for on the From domain (a selector is not
+    # discoverable from DNS, so common ones are tried).
+    dkim_selectors: tuple[str, ...] = tuple(
+        s for s in re.split(r"[,\s]+", os.getenv(
+            "DKIM_SELECTORS", "mail,default,dkim,k1,s1,s2,selector1,selector2,google").strip())
+        if re.fullmatch(r"[A-Za-z0-9._-]{1,63}", s)
+    )
+
     @property
     def imap_configured(self) -> bool:
         return bool(self.imap_host and self.imap_user and self.imap_pass)

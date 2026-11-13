@@ -56,6 +56,7 @@ ListMonk-Pro/
 │       ├── link_unsubscribe.py    # ListMonk direct link unsubscribe scanner & campaign attributor
 │       ├── listmonk_client.py     # Async HTTP client for ListMonk REST API (with paginate_all helper)
 │       ├── opener_cache.py        # In-memory campaign opener email cache with TTL & inflight deduplication
+│       ├── sending_reputation.py  # Sending IPs (SMTP hosts or SENDING_IPS), reverse DNS (FCrDNS + alignment), DNSBLs (test-entry verified), SPF evaluator, DKIM/DMARC, 7-day sender-side rejections; audit rows + dashboard alerts
 │       ├── send_stats.py          # Always-on per-day send counter (delta-counted from running stats, shared poll with warm-up) + in-memory stall tracking of running campaigns
 │       ├── search_query.py        # Free-text search builders: escaped ILIKE for subscribers (SQL), plain_search_term for lists/campaigns (plain text)
 │       ├── reply_i18n.py          # Non-English reply vocabulary (ack / refusal / interest / dead-address) merged into the classifier, plus opt-out phrases merged into the unsubscribe scanner
@@ -113,6 +114,7 @@ ListMonk-Pro/
 │   ├── test_email_validation.py   # Validator (syntax, DNS verdicts, flags, cache), scan, cleanup safety rails, schedule maths, API
 │   ├── test_send_stats_and_ui_fixes.py # Daily send counter, unattributed unsubscribe group, unblock, template preview
 │   ├── test_ui_review_round2.py   # Unsaved campaign/template previews, reply timeline, auto-unblock switch/history, validate-before-import
+│   ├── test_sending_reputation.py # Reputation: rDNS mismatch, DNSBL listed / refusing lists, SPF evaluation, DKIM/DMARC, rejections per provider, classifier sender tags, cache, API
 │   ├── test_send_pacing_fixes.py  # Live sending incident: stall detection, window rate 1 = 2/window, batch vs window, deleted-campaign "sent today", hidden template text
 │   ├── test_fifth_review_fixes.py # Regressions for the fifth review (plain-text search, IP octets vs status codes, DSN gate, keyword boundaries, blocklist registry, subject matching, mode-aware audit, auth cross-site)
 │   ├── conftest.py                # Resets module-level caches between tests
@@ -507,7 +509,8 @@ All background tasks run as managed `asyncio.create_task` loops in `app/main.py`
 | | `/api/replies/{id}/status` | PUT | Update reply status (unread, lead, replied, archived) |
 | | `/api/replies/{id}/blocklist` | POST | Blocklist the ListMonk subscriber behind a reply (resolved server-side) |
 | | `/api/replies/{id}` | DELETE | Delete / dismiss single reply record |
-| **Deliverability** | `/api/deliverability/checklist` | GET | Audit Listmonk settings against deliverability rules (10 checks: tracking, individual tracking, unsubscribe header, batch size, concurrency, public archive, bounce feedback loop, hard-bounce action, send cadence, upload allow-list). The one-click `List-Unsubscribe` header is **required** (Gmail/Yahoo bulk-sender rules) and both presets keep it on |
+| **Deliverability** | `/api/deliverability/reputation` | GET | Sending reputation report (`report`), its audit rows (`checks`) and the dashboard `alerts`; cached 15 min, `refresh=true` re-checks |
+| | `/api/deliverability/checklist` | GET | (`refresh=true` re-runs the reputation DNS checks — the page's Refresh) Audit Listmonk settings against deliverability rules (10 checks: tracking, individual tracking, unsubscribe header, batch size, concurrency, public archive, bounce feedback loop, hard-bounce action, send cadence, upload allow-list). The one-click `List-Unsubscribe` header is **required** (Gmail/Yahoo bulk-sender rules) and both presets keep it on |
 | | `/api/deliverability/apply-preset` | POST | 1-click apply 'cold_email' or 'newsletter' preset (merged onto current settings via `apply_settings`) |
 | | `/api/deliverability/settings` | PUT | Change individual settings from the page's row controls. Only keys in `deliverability_service.EDITABLE_SETTINGS` are accepted (strictly typed, no coercion → 400); the virtual `bounce.actions.hard` key is merged into `bounce.actions`. Returns the refreshed checklist (retried briefly while ListMonk reloads) |
 | | `/api/deliverability/email-format` | GET | Draft/scheduled/paused/running campaigns with their format (`html`, `plain`, or locked `text`/`visual`), template and why a switch is blocked (running → "pause first") |
@@ -529,10 +532,31 @@ helpers (`UnsubscribeURL`, `TrackLink`, …) are left in their bare shorthand, t
 ListMonk's pre-compile rewrite resolves. ListMonk compiles templates only at send time, so
 every switch renders the campaign preview and rolls back on a compile error (`422`).
 
-The audit has 14 checks: the ten above plus `unsubscribe_link` (footer link state read from
+The audit has 21 checks: the ten above plus `unsubscribe_link` (footer link state read from
 the campaign templates; `info` when templates are unreadable or none has a link),
-`public_subscription_page`, `sliding_window_rate` and `hidden_text`. The templates are
-fetched once per audit (`template_unsubscribe.campaign_templates`).
+`public_subscription_page`, `sliding_window_rate`, `hidden_text`, and the seven
+**Sending reputation** rows (group `reputation`, `sending_reputation.build_checks`):
+`reverse_dns`, `ptr_alignment`, `ip_blocklists`, `spf`, `dkim`, `dmarc`, `sender_rejections`.
+The templates are fetched once per audit (`template_unsubscribe.campaign_templates`).
+
+**Sending reputation** (`app/services/sending_reputation.py`): the audit used to score 100 %
+next to an IP whose PTR named another domain and an IP on Barracuda. Rules:
+- Sending IPs = `SENDING_IPS`, else the public A records of ListMonk's *enabled* SMTP hosts. A
+  known ESP host (SES, SendGrid … `ESP_HOST_SUFFIXES`) makes the IP rows `info` ("managed by").
+- A DNSBL counts only if it answers its RFC 5782 test entry (`127.0.0.2`); a `127.255.255.x`
+  answer is the operator refusing (Spamhaus vs public resolvers) → `unknown`, **never clean**.
+- SPF is evaluated for the IP (ip4/ip6/a/mx/include/redirect/exists/all, 10-lookup limit,
+  macros skipped, `ptr` ignored). DKIM: `DKIM_SELECTORS` are tried. DMARC falls back to the
+  organisational domain (last two labels).
+- `sender_rejections` reads soft bounces of the last 7 days whose `meta.classify_reason` is a
+  sender tag (`reputation_policy`, `blacklist`, `reverse_dns`, `auth_failed`; see
+  `bounce_ingest.classify_bounce`, which matches receiver error wording only — never bare
+  `dkim`/`spf`, because a DSN returns the original headers). Blocklist / rDNS / auth → fail;
+  spam-policy only → warn, fail at ≥ 5 % of the period's sends (min 3).
+- DNS goes through the single seam `sending_reputation._query` (on top of
+  `email_validation._resolve`); `tests/conftest.py` makes it time out for every test and
+  calls `invalidate()` (15-min report cache). Rows carry `chips` / `links` that the
+  Deliverability page renders generically.
 
 **ListMonk's sending engine, as it really behaves (v6, `internal/manager/pipe.go`)** — the
 audit and the cold preset are built on these facts, verified on a live incident:

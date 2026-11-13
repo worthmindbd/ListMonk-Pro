@@ -180,6 +180,19 @@ HARD_PATTERN = re.compile(
 ENHANCED_CODE_RE = re.compile(r"(?<![\d.])([245])\.\d{1,3}\.\d{1,3}\b(?!\.\d)")
 
 
+# Sending-infrastructure rejections (the mailbox is fine; the *sender* failed a
+# check). Matched on the receiver's error wording only, never on bare words such
+# as "dkim" or "spf": a DSN carries the returned message's own headers
+# (DKIM-Signature, Received-SPF), which would match every bounce.
+_BLOCKLIST_EXTRA_RE = re.compile(
+    r"block ?list|blocked using|listed (?:at|on|in) |barracudacentral|spamcop|\bs3150\b")
+_REVERSE_DNS_RE = re.compile(
+    r"(?<![\d.])5\.7\.25\b|reverse[ -]dns|\bptr record|forward[ -]confirmed|\bfcrdns\b|no ptr\b")
+_AUTH_FAILED_RE = re.compile(
+    r"(?<![\d.])5\.7\.2[3-7]\b|dmarc policy|spf (?:check|validation|fail)|dkim (?:check|validation|fail)"
+    r"|unauthenticated (?:e-?mail|mail|message)|not authenticated")
+
+
 def classify_bounce(body: str, subject: str = "") -> dict:
     """
     Classify a bounce DSN body/subject as hard or soft.
@@ -214,13 +227,18 @@ def classify_bounce(body: str, subject: str = "") -> dict:
         reason_tag = "soft: mailbox_full"
     elif "quota" in lowered:
         reason_tag = "soft: quota_exceeded"
-    elif any(kw in lowered for kw in ("spamhaus", "blacklist", "blocklist", "rbl", "dnsbl")):
+    elif any(kw in lowered for kw in ("spamhaus", "blacklist", "blocklist", "rbl", "dnsbl")) \
+            or _BLOCKLIST_EXTRA_RE.search(lowered):
         reason_tag = "soft: blacklist"
+    elif _REVERSE_DNS_RE.search(lowered):
+        reason_tag = "soft: reverse_dns"
+    elif _AUTH_FAILED_RE.search(lowered):
+        reason_tag = "soft: auth_failed"
     elif "relay access denied" in lowered or "access denied" in lowered:
         # 5.7.x policy/relay rejection: the mailbox may be perfectly valid, the
         # receiving server just refuses to relay for us. Never blocklist on it.
         reason_tag = "soft: relay_denied"
-    elif any(kw in lowered for kw in ("reputation", "5.7.1")):
+    elif any(kw in lowered for kw in ("reputation", "5.7.1", "unsolicited")):
         reason_tag = "soft: reputation_policy"
     elif any(kw in lowered for kw in ("greylist", "try again", "try later", "temporary")):
         reason_tag = "soft: transient"

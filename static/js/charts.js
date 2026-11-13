@@ -342,13 +342,15 @@ const Dashboard = {
         effort; nothing here may fail the dashboard. */
     async _attention(isCold) {
         const quiet = (p) => p.then(v => v).catch(() => null);
-        const [unread, sched, warm, cleanup, running, progress] = await Promise.all([
+        const [unread, sched, warm, cleanup, running, progress, reputation] = await Promise.all([
             isCold ? quiet(API.get('/api/replies?status=unread&per_page=1', true)) : null,
             quiet(API.get('/api/scheduler', true)),
             quiet(API.get('/api/warmup', true)),
             quiet(API.get('/api/email-validation/cleanup', true)),
             quiet(API.get('/api/campaigns?status=running&per_page=1', true)),
             quiet(API.get('/api/sends/progress', true)),
+            // Cached 15 min server-side: blocklists, reverse DNS, rejections.
+            quiet(API.get('/api/deliverability/reputation', true)),
         ]);
         this.lastProgress = progress;
         const items = [];
@@ -359,6 +361,9 @@ const Dashboard = {
                 tone: 'danger', href: '#/deliverability',
                 text: `${c.name || `Campaign #${c.id}`} is running but has sent nothing for ${this._fmtSpan(c.idle_seconds)}: ListMonk's send queue looks stuck (a paused or deleted campaign can hold it; restarting ListMonk clears it)`,
             });
+        }
+        for (const a of (reputation?.alerts || [])) {
+            items.push({ tone: a.tone === 'danger' ? 'danger' : 'warning', href: '#/deliverability', text: a.text });
         }
         const unreadN = unread?.total || 0;
         if (unreadN) items.push({ tone: 'success', href: '#/replies?status=unread', text: `${App.formatNumber(unreadN)} unread repl${unreadN === 1 ? 'y' : 'ies'}` });
