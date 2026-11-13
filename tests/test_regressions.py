@@ -62,18 +62,6 @@ def test_get_stats_handles_naive_timestamps(tmp_path, monkeypatch):
 
 # ── Campaign prune / reattribution safety ────────────────────────────────────
 
-def test_prune_keeps_records_without_campaign():
-    from app.services.imap_unsubscribe import _prune_existing_records
-
-    records = [
-        {"email": "a@x.com", "campaign_id": 1},
-        {"email": "b@x.com", "campaign_id": 999},   # campaign deleted
-        {"email": "c@x.com", "campaign_id": None},  # no matching campaign
-    ]
-    pruned = _prune_existing_records(records, {1, 2})
-    assert [r["email"] for r in pruned] == ["a@x.com", "c@x.com"]
-
-
 def test_reattribute_does_not_remove_when_campaign_list_incomplete():
     from app.services.imap_unsubscribe import _reattribute_existing_records
 

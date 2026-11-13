@@ -28,6 +28,7 @@ unsubscribe_log.json.bak
 unsubscribe_settings.json
 unsubscribe_processed.json
 unsubscribe_examined.json
+unsubscribe_link_seen.json
 reply_log.json
 reply_log.json.bak
 reply_settings.json

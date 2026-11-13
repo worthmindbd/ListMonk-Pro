@@ -6,7 +6,7 @@ patched (``email_cleanup._now``) or passed in — never slept.
 """
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -129,6 +129,13 @@ def client():
 
 def fixed_now(monkeypatch, dt):
     monkeypatch.setattr(ec, "_now", lambda: dt)
+
+
+async def scan_then_wait(monkeypatch, lm, hours=21):
+    """Scan, then move the clock past DNS_CONFIRM_AFTER: a dead domain is only
+    blocklisted by a run that long after the scan that first saw it."""
+    await ec.run_job(lm, "scan")
+    fixed_now(monkeypatch, datetime.now(timezone.utc) + timedelta(hours=hours))
 
 
 # ── Syntax ───────────────────────────────────────────────────────────────────
@@ -697,7 +704,7 @@ def seed_state(**over):
 
 async def test_cleanup_blocklists_dead_addresses_only(monkeypatch):
     lm = FakeListMonk(mixed_book(monkeypatch))
-    await ec.run_job(lm, "scan")          # a DNS-dead domain must be seen by two scans
+    await scan_then_wait(monkeypatch, lm)  # a dead domain must stay dead for a day
     summary = await ec.run_job(lm, "cleanup")
 
     # 2 = dead domain, 5 = bad syntax. Role (4), disposable (6), unknown (3) stay.
@@ -725,6 +732,7 @@ async def test_cleanup_waits_for_a_second_scan_before_blocklisting_a_dead_domain
     assert "gone@dead.test" in ec.load_results()        # kept for the next run
 
     lm = FakeListMonk([sub(1, "gone@dead.test")])
+    fixed_now(monkeypatch, datetime.now(timezone.utc) + timedelta(hours=21))
     second = await ec.run_job(lm, "cleanup")
     assert lm.all_blocklisted() == [1]
     assert second["pending_confirmation"] == 0
@@ -738,7 +746,7 @@ async def test_cleanup_honours_the_criteria_toggles(monkeypatch):
 
     seed_state(clean_invalid=True, clean_hard_bounces=False)
     lm = FakeListMonk(book, bounces)
-    await ec.run_job(lm, "scan")          # a DNS-dead domain must be seen by two scans
+    await scan_then_wait(monkeypatch, lm)  # a dead domain must stay dead for a day
     await ec.run_job(lm, "cleanup")
     assert lm.all_blocklisted() == [1]
 
@@ -783,14 +791,14 @@ async def test_cleanup_is_held_when_it_would_remove_too_much(monkeypatch):
 
 async def test_cleanup_at_the_threshold_still_runs(monkeypatch):
     lm = FakeListMonk(crowd(monkeypatch, dead=12, alive=48))     # exactly 20 %
-    await ec.run_job(lm, "scan")          # a DNS-dead domain must be seen by two scans
+    await scan_then_wait(monkeypatch, lm)  # a dead domain must stay dead for a day
     summary = await ec.run_job(lm, "cleanup")
     assert summary["status"] == "ok" and summary["blocklisted"] == 12
 
 
 async def test_small_lists_are_not_subject_to_the_hold(monkeypatch):
     lm = FakeListMonk(crowd(monkeypatch, dead=3, alive=2))       # 60 % but only 5 checked
-    await ec.run_job(lm, "scan")          # a DNS-dead domain must be seen by two scans
+    await scan_then_wait(monkeypatch, lm)  # a dead domain must stay dead for a day
     summary = await ec.run_job(lm, "cleanup")
     assert summary["status"] == "ok" and summary["blocklisted"] == 3
 
@@ -800,7 +808,7 @@ async def test_blocklisting_happens_in_chunks_after_every_page_was_read(monkeypa
     monkeypatch.setattr(ec, "CLEAN_CHUNK", 4)
     monkeypatch.setattr(ec, "HOLD_MIN_SAMPLE", 10_000)           # disable the hold
     lm = FakeListMonk(crowd(monkeypatch, dead=10, alive=0))
-    await ec.run_job(lm, "scan")          # a DNS-dead domain must be seen by two scans
+    await scan_then_wait(monkeypatch, lm)  # a dead domain must stay dead for a day
     await ec.run_job(lm, "cleanup")
 
     assert [len(c) for c in lm.blocklisted] == [4, 4, 2]
@@ -810,7 +818,7 @@ async def test_blocklisting_happens_in_chunks_after_every_page_was_read(monkeypa
 
 async def test_partial_blocklist_failure_is_reported_not_swallowed(monkeypatch):
     lm = FakeListMonk(crowd(monkeypatch, dead=3, alive=0), fail_blocklist=True)
-    await ec.run_job(lm, "scan")          # a DNS-dead domain must be seen by two scans
+    await scan_then_wait(monkeypatch, lm)  # a dead domain must stay dead for a day
     summary = await ec.run_job(lm, "cleanup")
     assert summary["status"] == "failed"
     assert summary["blocklisted"] == 0 and summary["failed_blocklist"] == 3

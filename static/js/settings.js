@@ -869,6 +869,7 @@ const Settings = {
                     <ul style="padding-left:20px;margin:8px 0">
                         <li>Each address is checked for a valid format and for a domain that exists and <strong>can receive mail</strong> (MX / Null MX records). No email is ever sent.</li>
                         <li>A <strong>DNS timeout or error never counts as dead</strong>: those addresses are only listed as "Unknown". Before any run the app confirms DNS works, otherwise it stops without changing anything.</li>
+                        <li>A domain that does not exist or has no mail server is only cleaned once it has been dead for <strong>at least 20 hours</strong> and a fresh lookup still says so: a domain can be down for a day (registrar hold, a broken DNS zone), and a blocklisting is permanent. Malformed addresses and hard bounces are cleaned on the first run; hard bounces from before you unblocked someone are ignored.</li>
                         <li>If a run would blocklist <strong>more than ${this._n(c.hold_percent || 20)}%</strong> of your subscribers, it is <strong>held for review</strong>: nothing is blocklisted and you decide on the Email Validation page. That size usually means a data problem, not dead addresses.</li>
                         <li>It cannot confirm that a specific mailbox exists (that would need an SMTP probe, which is unreliable and can hurt your sending IP). Addresses that pass here can still bounce.</li>
                     </ul>

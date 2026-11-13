@@ -33,6 +33,7 @@ unsubscribe_log.json*
 unsubscribe_settings.json
 unsubscribe_processed.json
 unsubscribe_examined.json
+unsubscribe_link_seen.json
 reply_log.json*
 reply_settings.json
 reply_processed.json

@@ -79,6 +79,8 @@ async def find_blocklisted_engaged(client: ListMonkClient) -> list[dict]:
     # Validation actions, auto-blocklist, cleanup): a decision, not a bounce
     # side effect, whatever bounce records the contact also carries.
     deliberate = blocklist_registry.load()
+    # Blocklist-mode CSV imports are deliberate too, recorded by address.
+    suppressed |= blocklist_registry.load_emails()
     if not suppressed and not deliberate:
         return subs
     kept = [

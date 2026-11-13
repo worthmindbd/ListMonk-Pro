@@ -46,6 +46,7 @@ def _isolate_state_files(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(unsubscribe_log, "SETTINGS_FILE", state / "unsubscribe_settings.json")
     monkeypatch.setattr(unsubscribe_log, "PROCESSED_FILE", state / "unsubscribe_processed.json")
     monkeypatch.setattr(unsubscribe_log, "EXAMINED_FILE", state / "unsubscribe_examined.json")
+    monkeypatch.setattr(unsubscribe_log, "LINK_SEEN_FILE", state / "unsubscribe_link_seen.json")
     monkeypatch.setattr(reply_log, "LOG_FILE", state / "reply_log.json")
     monkeypatch.setattr(reply_log, "SETTINGS_FILE", state / "reply_settings.json")
     monkeypatch.setattr(reply_log, "PROCESSED_FILE", state / "reply_processed.json")

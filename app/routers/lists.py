@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Query, HTTPException
 from app.services import blocklist_registry, email_cleanup
 from app.services.listmonk_client import listmonk
@@ -5,6 +7,7 @@ from app.services.search_query import plain_search_term
 from app.services.bulk_ops import parse_ids, run_bulk
 
 router = APIRouter()
+logger = logging.getLogger("lists")
 
 # Pagination bounds (the UI requests at most 100).
 MAX_PAGE = 100
@@ -15,17 +18,28 @@ DELETE_CHUNK_SIZE = 100
 MAX_SUBSCRIBER_PAGES = 1000
 
 
-async def _collect_list_subscribers(list_id: int) -> tuple[list[int], list[int]]:
-    """Return ``(delete_ids, dismiss_ids)`` for ``list_id``.
+async def _collect_list_subscribers(list_id: int) -> tuple[list[int], list[int], list[int]]:
+    """Return ``(delete_ids, dismiss_ids, suppress_ids)`` for ``list_id``.
 
-    All pages are read before any deletion because ListMonk paginates
-    ``/api/subscribers`` by SQL OFFSET. Blocklisted subscribers (by ListMonk
-    status or ``blocklist_registry``) are excluded from ``delete_ids`` so they
-    stay on the blacklist after the list is removed.
+    All pages are read before any change because ListMonk paginates
+    ``/api/subscribers`` by SQL OFFSET. Only a subscriber whose *sole* list is
+    this one is deleted:
+
+    * blocklisted (ListMonk status or ``blocklist_registry``): kept, so they
+      stay on the blocklist;
+    * also on another list: kept — deleting the record silently removed them
+      from those lists too;
+    * opted out of this list (``unsubscribed``) and on no other list: kept and
+      blocklisted (``suppress_ids``). Deleting them erased the only record of
+      the opt-out, so a later re-import mailed them again.
+
+    ``dismiss_ids`` are the subscribers whose Email Validation findings go
+    (deleted or blocklisted ones); those kept on other lists keep theirs.
     """
     manual_blocked = blocklist_registry.load()
     delete_ids: list[int] = []
     dismiss_ids: list[int] = []
+    suppress_ids: list[int] = []
     seen: set[int] = set()
 
     page = 1
@@ -46,9 +60,18 @@ async def _collect_list_subscribers(list_id: int) -> tuple[list[int], list[int]]
             if not isinstance(sid, int) or isinstance(sid, bool) or sid < 1 or sid in seen:
                 continue
             seen.add(sid)
-            dismiss_ids.append(sid)
             status = str(row.get("status") or "").strip().lower()
-            if status != "blocklisted" and sid not in manual_blocked:
+            if status == "blocklisted" or sid in manual_blocked:
+                dismiss_ids.append(sid)
+                continue
+            memberships = [l for l in (row.get("lists") or []) if isinstance(l, dict)]
+            if any(l.get("id") != list_id for l in memberships):
+                continue  # still on another list: only unlinked from this one
+            here = next((l for l in memberships if l.get("id") == list_id), {})
+            dismiss_ids.append(sid)
+            if (here.get("subscription_status") or "") == "unsubscribed":
+                suppress_ids.append(sid)
+            else:
                 delete_ids.append(sid)
 
         total = data.get("total")
@@ -59,24 +82,34 @@ async def _collect_list_subscribers(list_id: int) -> tuple[list[int], list[int]]
         if len(rows) < SUBSCRIBER_PAGE_SIZE and total is None:
             break
         page += 1
+    else:
+        logger.warning(
+            "List %s: stopped reading subscribers after %d pages; the rest are "
+            "only unlinked from the deleted list", list_id, MAX_SUBSCRIBER_PAGES,
+        )
 
-    return delete_ids, dismiss_ids
+    return delete_ids, dismiss_ids, suppress_ids
 
 
 async def _delete_list_and_subscribers(list_id: int) -> dict:
-    """Delete ``list_id`` and all of its non-blocklisted subscribers.
+    """Delete ``list_id`` and the subscribers that belonged to it alone.
 
     Subscribers are collected before the list is deleted (once the list is
-    gone, ListMonk drops its ``subscriber_lists`` rows). Blocklisted
-    subscribers are never deleted so they remain on ListMonk's blocklist, only
-    unlinked from the deleted list. Any stored Email Validation findings for
-    the list's subscribers are dismissed.
+    gone, ListMonk drops its ``subscriber_lists`` rows). See
+    :func:`_collect_list_subscribers` for who is deleted, kept or blocklisted.
+    Any stored Email Validation findings of deleted / blocklisted subscribers
+    are dismissed.
     """
-    delete_ids, dismiss_ids = await _collect_list_subscribers(list_id)
+    delete_ids, dismiss_ids, suppress_ids = await _collect_list_subscribers(list_id)
     result = await listmonk.delete_list(list_id)
 
     deleted_ids: list[int] = []
     try:
+        for i in range(0, len(suppress_ids), DELETE_CHUNK_SIZE):
+            chunk = suppress_ids[i:i + DELETE_CHUNK_SIZE]
+            await listmonk.blocklist_subscribers(chunk)
+            # Deliberate: an opt-out must never be undone by auto-unblock.
+            blocklist_registry.mark(chunk)
         for i in range(0, len(delete_ids), DELETE_CHUNK_SIZE):
             chunk = delete_ids[i:i + DELETE_CHUNK_SIZE]
             await listmonk.delete_subscribers(chunk)

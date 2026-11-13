@@ -126,7 +126,8 @@ LISTMONK_URL=https://your-listmonk-instance.com
 LISTMONK_USER=listmonk
 LISTMONK_API_KEY=your-api-key-here
 
-# Dashboard Login Credentials (MUST be changed from defaults)
+# Dashboard Login Credentials. MUST be changed: login is refused while they
+# are still a known default (admin/changeme, admin/admin, admin/password).
 DASHBOARD_USER=admin
 DASHBOARD_PASS=changeme
 

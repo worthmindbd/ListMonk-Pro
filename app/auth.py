@@ -120,6 +120,21 @@ def client_ip_from_request(request: Request) -> str:
     return peer
 
 
+def _write_private_file(path: Path, text: str) -> None:
+    """Write ``text`` to a file that is owner-only (0600) from its first byte.
+
+    ``write_text`` followed by ``chmod`` left the session signing key readable
+    by every local user (umask 022 → 0644) for the moment in between.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)  # an existing file keeps its old mode otherwise
+        os.write(fd, text.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _load_or_create_secret_key() -> str:
     """Load SESSION_SECRET from env, persisted key file in DATA_DIR, or generate a new one."""
     key = os.getenv("SESSION_SECRET", "")
@@ -144,11 +159,7 @@ def _load_or_create_secret_key() -> str:
 
     # Persist to DATA_DIR so sessions survive restarts across Docker & dev
     try:
-        key_file.write_text(key, encoding="utf-8")
-        try:
-            key_file.chmod(0o600)
-        except OSError:
-            pass
+        _write_private_file(key_file, key)
         os.environ["SESSION_SECRET"] = key
         logger.info("Generated and persisted SESSION_SECRET to %s", key_file)
         return key
@@ -362,23 +373,33 @@ _KNOWN_DEFAULT_CREDS = {
 }
 
 
-def warn_if_default_credentials() -> None:
-    """Log a warning at startup when credentials match known defaults."""
+def credentials_are_default() -> bool:
+    """True when DASHBOARD_USER/DASHBOARD_PASS are a well-known default pair.
+
+    ``.env.example`` ships ``admin``/``changeme``; an install that went live
+    without changing it had a dashboard (with ListMonk admin rights) behind a
+    published password. Login is refused until they are changed.
+    """
     user = os.getenv("DASHBOARD_USER", "")
     passwd = os.getenv("DASHBOARD_PASS", "")
-    if (user, passwd) in _KNOWN_DEFAULT_CREDS:
-        logger.warning(
-            "⚠️  DASHBOARD_USER/DASHBOARD_PASS match known default credentials "
-            "(%s/****). Change them immediately to prevent unauthorized access.",
-            user,
+    return (user.strip().lower(), passwd) in _KNOWN_DEFAULT_CREDS
+
+
+def warn_if_default_credentials() -> None:
+    """Log at startup when credentials match known defaults (login is refused)."""
+    if credentials_are_default():
+        logger.error(
+            "DASHBOARD_USER/DASHBOARD_PASS match known default credentials. "
+            "Login is DISABLED until you change them in .env and restart."
         )
 
 
 def check_credentials(username: str, password: str) -> bool:
     """Validate login credentials against DASHBOARD_USER / DASHBOARD_PASS env vars.
 
-    Returns False when either env var is unset, so a misconfigured deployment
-    is locked rather than silently accepting default credentials.
+    Returns False when either env var is unset, or when they are still a
+    well-known default pair, so a misconfigured deployment is locked rather
+    than reachable with a published password.
     """
     valid_user = os.getenv("DASHBOARD_USER", "")
     valid_pass = os.getenv("DASHBOARD_PASS", "")
@@ -386,6 +407,12 @@ def check_credentials(username: str, password: str) -> bool:
         logger.error(
             "DASHBOARD_USER and DASHBOARD_PASS must be set in .env. "
             "Login is disabled until credentials are configured."
+        )
+        return False
+    if credentials_are_default():
+        logger.error(
+            "Login refused: DASHBOARD_USER/DASHBOARD_PASS are still a known default. "
+            "Change them in .env and restart."
         )
         return False
     # Both sides are always evaluated so a wrong username does not return

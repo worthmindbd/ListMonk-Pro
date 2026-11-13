@@ -6,6 +6,7 @@ from app.services.export_service import aiter_dicts_to_csv
 from app.services.bulk_ops import parse_ids
 from app.services.search_query import build_ilike_search
 from app.services import blocklist_registry, email_cleanup
+from app.services.unsubscribe_log import add_link_seen
 
 router = APIRouter()
 
@@ -195,7 +196,12 @@ async def modify_list_memberships(data: dict):
         # ListMonk requires a status for "add"; the UI always sends one, a
         # bare API call gets the same mailable default the importer uses.
         payload["status"] = "confirmed"
-    return await listmonk.modify_list_memberships(payload)
+    result = await listmonk.modify_list_memberships(payload)
+    if action == "unsubscribe":
+        # Made here, not by a link click: tell the link scanner so it does not
+        # log these as link unsubscribes and cascade them over every list.
+        await add_link_seen({sid: target_list_ids for sid in ids})
+    return result
 
 
 @router.put("/blocklist")
@@ -221,8 +227,9 @@ async def update_subscriber(subscriber_id: int, data: dict):
     if status == "blocklisted":
         blocklist_registry.mark([subscriber_id])
     elif status == "enabled":
-        # Re-enabled by hand: the earlier deliberate blocklisting is over.
-        blocklist_registry.unmark([subscriber_id])
+        # Re-enabled by hand: the earlier deliberate blocklisting is over, and
+        # bounces from before this decision must not re-blocklist them.
+        blocklist_registry.record_unblock([subscriber_id], [data.get("email")])
     return result
 
 
@@ -259,8 +266,10 @@ async def unblock_subscriber(subscriber_id: int):
         ],
     }
     result = await listmonk.update_subscriber(subscriber_id, payload)
-    # The deliberate blocklisting is over; auto-unblock rules no longer apply.
-    blocklist_registry.unmark([subscriber_id])
+    # The deliberate blocklisting is over; auto-unblock rules no longer apply,
+    # and the scheduled cleanup must not blocklist them again over a hard
+    # bounce recorded before this decision (the bounce records are kept).
+    blocklist_registry.record_unblock([subscriber_id], [current.get("email")])
     return result
 
 

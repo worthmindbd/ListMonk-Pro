@@ -43,6 +43,17 @@ MAX_PROCESSED_EMAILS = 50_000
 EXAMINED_FILE = settings.data_path("unsubscribe_examined.json")
 MAX_EXAMINED_IDS = 50_000
 
+# Link scanner memory: subscriber id -> the list ids that were already
+# "unsubscribed" when the scanner last handled (or baselined) that subscriber.
+# ListMonk does not record WHY a subscription is unsubscribed, so the scanner
+# only acts on a list that became unsubscribed since: a re-imported contact's
+# old unsubscribed rows are not a new click (and must not cascade over the new
+# list), while a re-subscribed contact who clicks again is. Unsubscribes this
+# app makes itself (PUT /api/subscribers/lists) are recorded here up front so
+# they are never mistaken for a link click and cascaded to every list.
+LINK_SEEN_FILE = settings.data_path("unsubscribe_link_seen.json")
+MAX_LINK_SEEN = 50_000
+
 _DEFAULT_SETTINGS = {
     "blocklist_enabled": False,
 }
@@ -241,6 +252,66 @@ async def mark_examined_ids(ids, create: bool = False) -> None:
         if len(current) > MAX_EXAMINED_IDS:
             current = current[-MAX_EXAMINED_IDS:]
         _atomic_write_json(EXAMINED_FILE, current, indent=None, ensure_ascii=True)
+
+
+def _valid_id(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def load_link_seen() -> dict[int, set[int]]:
+    """Subscriber id -> list ids already handled as unsubscribed (see LINK_SEEN_FILE)."""
+    try:
+        data = json.loads(LINK_SEEN_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, IsADirectoryError, PermissionError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[int, set[int]] = {}
+    for key, lists in data.items():
+        try:
+            sid = int(key)
+        except (TypeError, ValueError):
+            continue
+        if sid > 0 and isinstance(lists, list):
+            out[sid] = {lid for lid in lists if _valid_id(lid)}
+    return out
+
+
+def _save_link_seen(seen: dict[int, set[int]]) -> None:
+    # Insertion order is kept (dicts are ordered): trimming drops the entries
+    # written longest ago.
+    items = list(seen.items())[-MAX_LINK_SEEN:]
+    _atomic_write_json(
+        LINK_SEEN_FILE, {str(sid): sorted(lists) for sid, lists in items},
+        indent=None, ensure_ascii=True,
+    )
+
+
+async def add_link_seen(updates: dict) -> None:
+    """Union list ids into the handled set of each subscriber."""
+    clean = {
+        sid: {lid for lid in (lists or []) if _valid_id(lid)}
+        for sid, lists in (updates or {}).items() if _valid_id(sid)
+    }
+    if not clean:
+        return
+    async with _log_lock:
+        seen = load_link_seen()
+        for sid, lists in clean.items():
+            merged = seen.pop(sid, set()) | lists
+            seen[sid] = merged  # re-inserted: most recent last
+        _save_link_seen(seen)
+
+
+async def forget_link_seen(subscriber_ids) -> None:
+    """Drop subscribers from the handled set (after "Undo All" restored them)."""
+    drop = {sid for sid in (subscriber_ids or []) if _valid_id(sid)}
+    if not drop:
+        return
+    async with _log_lock:
+        seen = load_link_seen()
+        if drop & seen.keys():
+            _save_link_seen({sid: v for sid, v in seen.items() if sid not in drop})
 
 
 def load_settings() -> dict:

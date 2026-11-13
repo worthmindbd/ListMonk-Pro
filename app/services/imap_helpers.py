@@ -6,7 +6,7 @@ import email.policy
 import hashlib
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 
 logger = logging.getLogger("imap_helpers")
@@ -29,6 +29,52 @@ def safe_email_for_query(email_addr: str) -> str | None:
 def imap_date(dt: datetime) -> str:
     """Format a datetime as an IMAP SINCE date with English month names."""
     return f"{dt.day:02d}-{_ENG_MONTHS[dt.month - 1]}-{dt.year}"
+
+
+# ─── Campaign attribution helpers ────────────────────────────────────────────
+#
+# Bounces, replies and unsubscribes are attributed to "the newest campaign that
+# targeted the subscriber's lists". A campaign that never sent cannot be that
+# campaign: matching on ``created_at`` alone let a freshly created draft for a
+# list collect every later bounce and unsubscribe from that list.
+
+_UNSENT_STATUSES = {"draft", "scheduled"}
+
+
+def _parse_dt(value) -> datetime | None:
+    if not value or not isinstance(value, str):
+        return None
+    for candidate in (value, value[:10]):
+        try:
+            parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
+def campaign_has_sent(camp: dict) -> bool:
+    """False for a campaign that cannot have delivered anything yet.
+
+    Drafts and scheduled campaigns, and a campaign cancelled before it ever
+    started. A record without a ``status`` (older payloads, partial fixtures)
+    is given the benefit of the doubt.
+    """
+    status = str(camp.get("status") or "").lower()
+    if status in _UNSENT_STATUSES:
+        return False
+    if status == "cancelled" and not camp.get("started_at") and not (camp.get("sent") or 0):
+        return False
+    return True
+
+
+def campaign_send_dt(camp: dict) -> datetime | None:
+    """When a campaign started sending (``started_at``), else its ``created_at``.
+
+    A campaign drafted on Monday and started on Friday cannot have caused a
+    bounce on Wednesday; ``created_at`` alone said it could.
+    """
+    return _parse_dt(camp.get("started_at")) or _parse_dt(camp.get("created_at"))
 
 
 # ─── Idempotency keys ────────────────────────────────────────────────────────

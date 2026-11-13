@@ -44,7 +44,9 @@ def parse_ids(raw, limit: int = MAX_BULK_IDS) -> list[int]:
             raise ValueError(f"Invalid id: {value!r}")
         try:
             item = int(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError: JSON "1e999" parses to float('inf'), and
+            # int(inf) used to escape as a 500 instead of a 400.
             raise ValueError(f"Invalid id: {value!r}")
         if isinstance(value, float) and item != value:
             raise ValueError(f"Invalid id: {value!r}")

@@ -10,9 +10,11 @@ import logging
 import time
 from datetime import datetime, timezone
 
+from app.services.imap_helpers import campaign_has_sent, campaign_send_dt
 from app.services.listmonk_client import ListMonkClient
 from app.services.unsubscribe_log import (
     append_log, load_settings, load_processed_emails, mark_processed,
+    load_link_seen, add_link_seen,
 )
 
 logger = logging.getLogger("link_unsubscribe")
@@ -24,6 +26,37 @@ MAX_LIST_PAGES = 50  # Safety cap: 5000 lists
 CAMPAIGN_PAGE_SIZE = 100
 MAX_CAMPAIGN_PAGES = 20  # Safety cap: 2000 campaigns
 CAMPAIGN_HISTORY_TTL = 900  # 15 minutes; campaign creation is rare
+
+# Subscribers with a bounce record. Used when ListMonk's own bounce rules
+# "unsubscribe" bounced addresses: those subscriptions are marked unsubscribed
+# exactly like a link click, and the scanner used to log them as link
+# unsubscribes, cascade them over every list and (with the toggle on)
+# blocklist them.
+QUERY_NOT_BOUNCED = "subscribers.id NOT IN (SELECT subscriber_id FROM bounces)"
+
+
+async def _bounce_rules_unsubscribe(client: ListMonkClient) -> bool:
+    """Do ListMonk's bounce actions unsubscribe anyone?
+
+    Unreadable settings count as yes: skipping a bounced subscriber for one
+    scan only delays a log entry, while treating a bounce as an opt-out can
+    blocklist a live contact.
+    """
+    try:
+        res = await client.get_settings()
+        data = res.get("data") if isinstance(res, dict) else None
+    except Exception as e:
+        logger.warning(f"[LINK] ListMonk settings unreadable, ignoring bounced subscribers: {e}")
+        return True
+    if not isinstance(data, dict):
+        return True
+    actions = data.get("bounce.actions")
+    if not isinstance(actions, dict):
+        return False
+    return any(
+        isinstance(rule, dict) and rule.get("action") == "unsubscribe"
+        for rule in actions.values()
+    )
 
 _link_scan_lock = asyncio.Lock()
 _link_scan_running = False
@@ -79,7 +112,13 @@ def _pick_campaign_for_list_ids(campaigns: list, list_ids: set[int]) -> dict:
     """
     now = datetime.now(timezone.utc)
     fallback_list_id = min(list_ids) if list_ids else None
+    best, best_date = None, None
     for camp in campaigns:
+        # A draft / scheduled campaign carries no unsubscribe link anyone could
+        # have clicked: creating one for a list used to collect every later
+        # unsubscribe from that list.
+        if not campaign_has_sent(camp):
+            continue
         camp_list_ids = [l.get("id") for l in (camp.get("lists") or [])]
         # Intersect campaign's target lists with subscriber's unsubscribed lists.
         # If the API omits lists, fall back to time-based matching only.
@@ -94,27 +133,22 @@ def _pick_campaign_for_list_ids(campaigns: list, list_ids: set[int]) -> dict:
             if matched is None:
                 continue
 
-        created = camp.get("created_at", "")
-        if not created:
+        # When it started sending (not when it was drafted): the newest
+        # campaign the subscriber actually received wins.
+        camp_date = campaign_send_dt(camp)
+        if camp_date is None or camp_date > now:
             continue
-        try:
-            clean_iso = created.replace("Z", "+00:00")
-            camp_date = datetime.fromisoformat(clean_iso)
-            if camp_date.tzinfo is None:
-                camp_date = camp_date.replace(tzinfo=timezone.utc)
-        except (ValueError, TypeError):
-            try:
-                camp_date = datetime.fromisoformat(created[:10]).replace(tzinfo=timezone.utc)
-            except (ValueError, TypeError):
-                continue
-        if camp_date <= now:
-            return {
+        if best_date is None or camp_date > best_date:
+            best_date = camp_date
+            best = {
                 "campaign_id": camp.get("id"),
                 "campaign_name": camp.get("name", ""),
                 "campaign_key": f"{camp_date.year}-{camp_date.month:02d}",
                 "matched_list_id": matched if matched is not None else fallback_list_id,
             }
 
+    if best is not None:
+        return best
     return {
         "campaign_id": None,
         "campaign_name": "No matching campaign",
@@ -234,6 +268,7 @@ async def _scan_link_unsubscribes_impl(client: ListMonkClient) -> dict:
                 "message": f"Failed to fetch lists: {e}"}
 
     list_id_to_name = {lst.get("id"): lst.get("name", "") for lst in all_lists if lst.get("id")}
+    subscriber_query = QUERY_NOT_BOUNCED if await _bounce_rules_unsubscribe(client) else ""
 
     # Phase 1: collect unique unsubscribed subscribers across all lists.
     # sub_map: subscriber_id -> {"sub": sub_obj, "unsub_list_ids": set[int]}
@@ -253,6 +288,7 @@ async def _scan_link_unsubscribes_impl(client: ListMonkClient) -> dict:
                     subscription_status="unsubscribed",
                     page=page,
                     per_page=PER_PAGE,
+                    query=subscriber_query,
                 )
                 subscribers = (result.get("data") or {}).get("results") or []
             except Exception as e:
@@ -295,27 +331,50 @@ async def _scan_link_unsubscribes_impl(client: ListMonkClient) -> dict:
         logger.warning(f"Could not fetch campaigns: {e}")
         campaigns = []
 
-    # Phase 3: process each unique subscriber
+    # Phase 3: process each unique subscriber. A subscriber is acted on only
+    # for lists that became unsubscribed since the scanner last saw them
+    # (LINK_SEEN_FILE): old unsubscribed rows of a re-imported contact are not
+    # a new click, and lists this app unsubscribed through its own API are
+    # pre-registered there.
     new_records = []
     new_found = 0
     processed = 0
+    link_seen = load_link_seen()
+    seen_updates: dict[int, set] = {}
 
     for sid, entry in sub_map.items():
         sub = entry["sub"]
         unsub_list_ids = entry["unsub_list_ids"]
         email = (sub.get("email") or "").lower()
-        if not email or email in processed_emails:
+        if not email:
+            continue
+        seen = link_seen.get(sid)
+        if seen is None and email in processed_emails:
+            # Handled before this memory existed (or by the IMAP scanner):
+            # what is unsubscribed now is the baseline, not a new click.
+            seen_updates[sid] = set(unsub_list_ids)
+            continue
+        fresh_lists = set(unsub_list_ids) - (seen or set())
+        if not fresh_lists:
             continue
 
         new_found += 1
-        sub_lists = [l["id"] for l in sub.get("lists", [])]
+        sub_list_objs = [l for l in (sub.get("lists") or []) if isinstance(l, dict) and l.get("id")]
+        sub_lists = [l["id"] for l in sub_list_objs]
+        # Lists still active get the cascade. Undo restores those plus the
+        # lists this click unsubscribed, never ones the person left earlier.
+        active_lists = [
+            l["id"] for l in sub_list_objs
+            if (l.get("subscription_status") or "") != "unsubscribed"
+        ]
+        lists_removed = [lid for lid in sub_lists if lid in active_lists or lid in fresh_lists]
 
         try:
-            if sub_lists:
+            if active_lists:
                 await client.modify_list_memberships({
                     "ids": [sid],
                     "action": "unsubscribe",
-                    "target_list_ids": sub_lists,
+                    "target_list_ids": active_lists,
                     "status": "unsubscribed",
                 })
         except Exception as e:
@@ -333,7 +392,7 @@ async def _scan_link_unsubscribes_impl(client: ListMonkClient) -> dict:
                 logger.error(f"Failed to blocklist {email}: {e}")
                 # Partial success — still log the unsubscribe
 
-        campaign = _pick_campaign_for_list_ids(campaigns, unsub_list_ids)
+        campaign = _pick_campaign_for_list_ids(campaigns, fresh_lists)
         primary_list_id = campaign.get("matched_list_id")
         list_name = list_id_to_name.get(primary_list_id, "")
 
@@ -347,7 +406,7 @@ async def _scan_link_unsubscribes_impl(client: ListMonkClient) -> dict:
             "campaign_name": campaign.get("campaign_name", "No matching campaign"),
             "campaign_key": campaign.get("campaign_key", _current_campaign_key()),
             "subscriber_id": sid,
-            "lists_removed": sub_lists,
+            "lists_removed": lists_removed,
             # Whether THIS engine blocklisted the subscriber: "Undo All" only
             # lifts a blocklisting it caused.
             "blocklisted": blocklisted_now,
@@ -355,6 +414,8 @@ async def _scan_link_unsubscribes_impl(client: ListMonkClient) -> dict:
         }
         new_records.append(record)
         processed_emails.add(email)
+        # Every list is unsubscribed now: all of them are "seen".
+        seen_updates[sid] = set(sub_lists) | set(unsub_list_ids)
         processed += 1
         action = "Unsubscribed + Blocklisted" if blocklist_enabled else "Unsubscribed"
         logger.info(f"[LINK] {action}: {email} (list: {list_name})")
@@ -362,6 +423,8 @@ async def _scan_link_unsubscribes_impl(client: ListMonkClient) -> dict:
     if new_records:
         await append_log(new_records)
         await mark_processed(r["email"] for r in new_records)
+    if seen_updates:
+        await add_link_seen(seen_updates)
 
     return {
         "scanned_lists": scanned_lists,

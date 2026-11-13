@@ -33,11 +33,13 @@ logger = logging.getLogger("bounce_ingest")
 
 from app.services.imap_helpers import (
     safe_email_for_query, imap_date, extract_email_body, render_container_text,
+    campaign_has_sent, campaign_send_dt,
     # The idempotency-key helpers live in imap_helpers (the unsubscribe and
     # reply scanners key their state on them too); the private aliases keep
     # this module's established names for its callers.
     message_state_id as _message_state_id,
     fetch_state_id as _fetch_state_id,
+    fetch_state_ids as _fetch_state_ids,
 )
 
 
@@ -337,10 +339,16 @@ def _extract_bounced_recipient(msg: email.message.EmailMessage, body: str) -> Op
     # delivery stamps the *bounce mailbox itself* into X-Original-To, which
     # used to win over the real recipient and discard the DSN as
     # "no_subscriber".
+    #
+    # X-Original-To is not consulted at all: on a DSN it names the address the
+    # notice was *delivered to* — our own envelope sender — never the failed
+    # recipient. Excluding the two IMAP logins was not enough: a bounce
+    # address that reaches the mailbox through an alias ("bounces@" delivered
+    # into "info@") was taken as the recipient, the DSN discarded as
+    # "no_subscriber" and recorded as handled, so every bounce was lost.
     own_addrs = _own_addresses()
 
-    for header in ("X-Failed-Recipients", "X-Original-To",
-                   "Original-Recipient", "Final-Recipient"):
+    for header in ("X-Failed-Recipients", "Original-Recipient", "Final-Recipient"):
         val = msg.get(header, "")
         if val:
             if ";" in val:
@@ -536,20 +544,32 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
 
     async with _INGEST_LOCK:
         _ingest_running = True
-        conn = await asyncio.to_thread(connect_bounce_imap_rw)
-        if not conn:
+        try:
+            return await _ingest_locked(client)
+        finally:
+            # Released whatever happens, cancellation included: the flag used
+            # to be set outside any try/finally, so a task cancelled while
+            # connecting or fetching campaigns (client disconnect, shutdown)
+            # left it set and every later run answered "already in progress".
             _ingest_running = False
-            return {"scanned": 0, "ingested": 0, "skipped": 0, "errors": 0,
-                    "message": "Bounce IMAP not configured or connection failed"}
 
-        scanned = 0
-        ingested = 0
-        hard_count = 0
-        soft_count = 0
-        skipped = 0
-        errors = 0
-        skipped_reasons: dict = {}
 
+async def _ingest_locked(client: ListMonkClient) -> dict:
+    """Body of :func:`ingest_bounce_mailbox`; the caller holds ``_INGEST_LOCK``."""
+    conn = await asyncio.to_thread(connect_bounce_imap_rw)
+    if not conn:
+        return {"scanned": 0, "ingested": 0, "skipped": 0, "errors": 0,
+                "message": "Bounce IMAP not configured or connection failed"}
+
+    scanned = 0
+    ingested = 0
+    hard_count = 0
+    soft_count = 0
+    skipped = 0
+    errors = 0
+    skipped_reasons: dict = {}
+
+    try:
         # Campaign history covering the whole DSN scan window, fetched once for
         # the fallback attribution.
         scan_since = datetime.now(timezone.utc) - timedelta(days=BOUNCE_SCAN_DAYS)
@@ -570,144 +590,144 @@ async def ingest_bounce_mailbox(client: ListMonkClient) -> dict:
             recent_campaigns = []
             campaigns_ok = False
 
-        try:
-            await asyncio.to_thread(conn.select, "INBOX", readonly=False)
-            since = imap_date(scan_since)
-            processed_ids = load_processed_ids()
-            processed_set = set(processed_ids)
-            handled_ids: list[str] = []
+        await asyncio.to_thread(conn.select, "INBOX", readonly=False)
+        since = imap_date(scan_since)
+        processed_ids = load_processed_ids()
+        processed_set = set(processed_ids)
+        handled_ids: list[str] = []
 
-            status, msg_ids = await asyncio.to_thread(
-                conn.search, None, f"(SINCE {since})"
-            )
-            if status != "OK" or not msg_ids or not msg_ids[0]:
-                return {"scanned": 0, "ingested": 0, "skipped": 0, "errors": 0,
-                        "message": f"No bounce emails since {since}"}
+        status, msg_ids = await asyncio.to_thread(
+            conn.search, None, f"(SINCE {since})"
+        )
+        if status != "OK" or not msg_ids or not msg_ids[0]:
+            return {"scanned": 0, "ingested": 0, "skipped": 0, "errors": 0,
+                    "message": f"No bounce emails since {since}"}
 
-            candidates = [m for m in msg_ids[0].split() if m]
-            logger.info(
-                f"[BounceIngest] {len(candidates)} DSN(s) in the last "
-                f"{BOUNCE_SCAN_DAYS} days ({len(processed_set)} already processed)"
-            )
+        candidates = [m for m in msg_ids[0].split() if m]
+        logger.info(
+            f"[BounceIngest] {len(candidates)} DSN(s) in the last "
+            f"{BOUNCE_SCAN_DAYS} days ({len(processed_set)} already processed)"
+        )
 
-            async def _flush_handled() -> None:
-                """Persist the handled outcomes collected so far.
+        async def _flush_handled() -> None:
+            """Persist the handled outcomes collected so far.
 
-                Called every PROCESSED_FLUSH_BATCH messages and once more at
-                the end of the scan, so a mid-scan crash cannot re-ingest
-                already-created bounces as duplicates on the next run.
-                """
-                if not handled_ids:
-                    return
-                await asyncio.to_thread(mark_processed_ids, handled_ids)
-                handled_ids.clear()
+            Called every PROCESSED_FLUSH_BATCH messages and once more at
+            the end of the scan, so a mid-scan crash cannot re-ingest
+            already-created bounces as duplicates on the next run.
+            """
+            if not handled_ids:
+                return
+            await asyncio.to_thread(mark_processed_ids, handled_ids)
+            handled_ids.clear()
 
-            async def _finish(msg_id: bytes, state_id: str) -> None:
-                """Record a terminal outcome so this DSN is never re-processed.
+        async def _finish(msg_id: bytes, state_id: str) -> None:
+            """Record a terminal outcome so this DSN is never re-processed.
 
-                The batch flush runs before the \\Seen marking, so persistence
-                leads the (cosmetic) flag wherever the code path allows.
-                """
-                if state_id:
-                    handled_ids.append(state_id)
-                    processed_set.add(state_id)
-                    if len(handled_ids) >= PROCESSED_FLUSH_BATCH:
-                        await _flush_handled()
-                try:
-                    await asyncio.to_thread(conn.store, msg_id, "+FLAGS", "\\Seen")
-                except Exception as e:
-                    logger.warning(f"Could not mark {msg_id!r} as seen: {e}")
-
-            for msg_id in candidates:
-                try:
-                    # Cheap header fetch first: a DSN that a human already
-                    # opened (so it is no longer UNSEEN) must still be ingested
-                    # exactly once, and one already handled must not be
-                    # re-downloaded.
-                    state_id = await asyncio.to_thread(_fetch_state_id, conn, msg_id)
-                    if not state_id:
-                        # Without an idempotency key the DSN can neither be
-                        # recorded as handled nor recognised on a later scan,
-                        # so never create a bounce for it. Leave it unprocessed
-                        # (and unseen) for the next scan to retry.
-                        errors += 1
-                        logger.warning(
-                            "[BounceIngest] no state id derivable for message "
-                            f"{msg_id!r}; leaving it for the next scan"
-                        )
-                        continue
-                    if state_id in processed_set:
-                        continue
-
-                    status, data = await asyncio.to_thread(conn.fetch, msg_id, "(RFC822)")
-                    if status != "OK" or not data or not data[0]:
-                        errors += 1
-                        continue
-
-                    raw = data[0][1]
-                    msg = email.message_from_bytes(raw, policy=email.policy.default)
-                    subject = msg.get("Subject", "")
-                    body = _extract_body(msg)
-                    scanned += 1
-
-                    if not looks_like_dsn(msg, subject, body):
-                        # An out-of-office notice, a ticket acknowledgement or
-                        # a person writing to the bounce address: not a
-                        # delivery failure, so never a bounce record.
-                        outcome, detail = "skipped", "not_a_dsn"
-                    else:
-                        outcome, detail = await ingest_parsed_dsn(
-                            client, msg, subject, body, recent_campaigns, campaigns_ok,
-                            ingested_by="bounce_ingest",
-                        )
-
-                    if outcome == "ingested":
-                        ingested += 1
-                        if detail == "hard":
-                            hard_count += 1
-                        else:
-                            soft_count += 1
-                        await _finish(msg_id, state_id)
-                    elif outcome == "skipped":
-                        skipped += 1
-                        skipped_reasons[detail] = skipped_reasons.get(detail, 0) + 1
-                        await _finish(msg_id, state_id)
-                    elif outcome == "retry":
-                        # Subscriber lookup or create_bounce failed: do NOT
-                        # mark seen — let a retry pick it up next scan.
-                        errors += 1
-                    elif outcome == "retry_no_campaign":
-                        # Reason counted, message left unprocessed so a later
-                        # scan (with campaign history) can attribute it.
-                        skipped_reasons[detail] = skipped_reasons.get(detail, 0) + 1
-
-                except Exception as e:
-                    logger.error(f"error processing message {msg_id}: {e}")
-                    errors += 1
-
-            # Persist any remaining terminal outcomes (earlier ones were
-            # flushed in batches mid-scan) so the next scan skips them
-            # without downloading.
-            await _flush_handled()
-
-        finally:
-            _ingest_running = False
+            The batch flush runs before the \\Seen marking, so persistence
+            leads the (cosmetic) flag wherever the code path allows.
+            """
+            if state_id:
+                handled_ids.append(state_id)
+                processed_set.add(state_id)
+                if len(handled_ids) >= PROCESSED_FLUSH_BATCH:
+                    await _flush_handled()
             try:
-                await asyncio.to_thread(conn.logout)
-            except Exception:
-                pass
+                await asyncio.to_thread(conn.store, msg_id, "+FLAGS", "\\Seen")
+            except Exception as e:
+                logger.warning(f"Could not mark {msg_id!r} as seen: {e}")
 
-        return {
-            "scanned": scanned,
-            "ingested": ingested,
-            "hard": hard_count,
-            "soft": soft_count,
-            "skipped": skipped,
-            "skipped_reasons": skipped_reasons,
-            "errors": errors,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "message": f"Ingested {ingested} ({hard_count} hard, {soft_count} soft), skipped {skipped}, errors {errors}",
-        }
+        # Cheap header peek first, batched (one FETCH per 200 messages instead
+        # of a round trip per message across the whole 30-day window): a DSN
+        # that a human already opened must still be ingested exactly once, and
+        # one already handled must not be re-downloaded.
+        state_ids = await asyncio.to_thread(_fetch_state_ids, conn, candidates)
+
+        for msg_id in candidates:
+            try:
+                state_id = state_ids.get(msg_id, "")
+                if not state_id:
+                    # Without an idempotency key the DSN can neither be
+                    # recorded as handled nor recognised on a later scan,
+                    # so never create a bounce for it. Leave it unprocessed
+                    # (and unseen) for the next scan to retry.
+                    errors += 1
+                    logger.warning(
+                        "[BounceIngest] no state id derivable for message "
+                        f"{msg_id!r}; leaving it for the next scan"
+                    )
+                    continue
+                if state_id in processed_set:
+                    continue
+
+                status, data = await asyncio.to_thread(conn.fetch, msg_id, "(RFC822)")
+                if status != "OK" or not data or not data[0]:
+                    errors += 1
+                    continue
+
+                raw = data[0][1]
+                msg = email.message_from_bytes(raw, policy=email.policy.default)
+                subject = msg.get("Subject", "")
+                body = _extract_body(msg)
+                scanned += 1
+
+                if not looks_like_dsn(msg, subject, body):
+                    # An out-of-office notice, a ticket acknowledgement or
+                    # a person writing to the bounce address: not a
+                    # delivery failure, so never a bounce record.
+                    outcome, detail = "skipped", "not_a_dsn"
+                else:
+                    outcome, detail = await ingest_parsed_dsn(
+                        client, msg, subject, body, recent_campaigns, campaigns_ok,
+                        ingested_by="bounce_ingest",
+                    )
+
+                if outcome == "ingested":
+                    ingested += 1
+                    if detail == "hard":
+                        hard_count += 1
+                    else:
+                        soft_count += 1
+                    await _finish(msg_id, state_id)
+                elif outcome == "skipped":
+                    skipped += 1
+                    skipped_reasons[detail] = skipped_reasons.get(detail, 0) + 1
+                    await _finish(msg_id, state_id)
+                elif outcome == "retry":
+                    # Subscriber lookup or create_bounce failed: do NOT
+                    # mark seen — let a retry pick it up next scan.
+                    errors += 1
+                elif outcome == "retry_no_campaign":
+                    # Reason counted, message left unprocessed so a later
+                    # scan (with campaign history) can attribute it.
+                    skipped_reasons[detail] = skipped_reasons.get(detail, 0) + 1
+
+            except Exception as e:
+                logger.error(f"error processing message {msg_id}: {e}")
+                errors += 1
+
+        # Persist any remaining terminal outcomes (earlier ones were
+        # flushed in batches mid-scan) so the next scan skips them
+        # without downloading.
+        await _flush_handled()
+
+    finally:
+        try:
+            await asyncio.to_thread(conn.logout)
+        except Exception:
+            pass
+
+    return {
+        "scanned": scanned,
+        "ingested": ingested,
+        "hard": hard_count,
+        "soft": soft_count,
+        "skipped": skipped,
+        "skipped_reasons": skipped_reasons,
+        "errors": errors,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "message": f"Ingested {ingested} ({hard_count} hard, {soft_count} soft), skipped {skipped}, errors {errors}",
+    }
 
 
 def _pick_campaign(
@@ -731,17 +751,21 @@ def _pick_campaign(
 
     # Fall back to current time when bounce date is unavailable
     cutoff = bounce_date if bounce_date is not None else datetime.now(timezone.utc)
+    best, best_date = None, None
     for camp in recent_campaigns:
+        # A draft / scheduled campaign never sent the message that bounced.
+        if not campaign_has_sent(camp):
+            continue
         camp_list_ids = [l.get("id") for l in (camp.get("lists") or [])]
         if not camp_list_ids:
             continue
         if not any(lid in subscriber_list_ids for lid in camp_list_ids):
             continue
-        camp_date = _parse_campaign_dt(camp.get("created_at", ""))
-        if camp_date is not None and camp_date <= cutoff:
-            return camp
+        camp_date = campaign_send_dt(camp)
+        if camp_date is not None and camp_date <= cutoff and (best_date is None or camp_date > best_date):
+            best, best_date = camp, camp_date
 
-    return None
+    return best
 
 
 async def ingest_parsed_dsn(

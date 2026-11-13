@@ -67,6 +67,11 @@ HOLD_FRACTION = 0.20
 HOLD_MIN_SAMPLE = 50
 # After a failed scheduled run, wait this long before trying again.
 RETRY_AFTER_FAILURE = timedelta(hours=1)
+# A dead-domain finding is acted on only once it has been dead for this long
+# (first seen by an earlier scan) AND a fresh, uncached lookup still says so.
+# "Seen by two scans" alone was met by a Scan click followed by Run cleanup a
+# minute later — both reading the same cached answer.
+DNS_CONFIRM_AFTER = timedelta(hours=20)
 
 FREQUENCIES = ("daily", "weekly", "monthly")
 DEFAULT_TIMEZONE = "UTC"
@@ -494,10 +499,27 @@ async def _collect_hard_bounced(client) -> tuple[set[int], set[str]]:
     """
     ids: set[int] = set()
     emails: set[str] = set()
+    # Re-enabled by hand (Unblock / Edit): a bounce from before that decision
+    # no longer counts. The bounce records are kept, so without this the next
+    # scheduled cleanup blocklisted the person the user had just unblocked.
+    unblocked = blocklist_registry.load_unblocked()
+
+    def _before_unblock(b: dict, sid: Optional[int]) -> bool:
+        at = unblocked.get(sid) if sid is not None else None
+        if at is None:
+            return False
+        created = b.get("created_at")
+        try:
+            dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+        except ValueError:
+            return True  # undated: the human decision wins
+        return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)) <= at
 
     async def fold(chunk: list[dict]) -> None:
         for b in await filter_bounces_excluding_openers(client, chunk):
             sid = _safe_int(b.get("subscriber_id"))
+            if _before_unblock(b, sid):
+                continue
             if sid is not None:
                 ids.add(sid)
             email = ev.normalise(b.get("email") or "")
@@ -535,21 +557,30 @@ def _is_candidate(item: dict, cfg: dict) -> bool:
 DNS_INVALID_REASONS = frozenset({ev.REASON_NO_DOMAIN, ev.REASON_NO_MX, ev.REASON_NULL_MX})
 
 
-def _is_confirmed(item: dict, cfg: dict, dns_dead_before: set[int]) -> bool:
-    """May a candidate be blocklisted in THIS run?
+def _dns_only(item: dict) -> bool:
+    return bool(set(item.get("reasons") or []) & DNS_INVALID_REASONS)
+
+
+def _is_confirmed(item: dict, cfg: dict, now: datetime) -> bool:
+    """May a candidate be blocklisted in THIS run (before the fresh re-check)?
 
     A malformed address and a hard bounce are facts. "The domain does not
     exist / has no mail server" is one DNS answer: a domain in a registrar
     hold or with a botched zone for a day answers the same, and a blocklisting
-    is permanent. So a DNS-only finding has to be seen by two scans (it is
-    already in the stored results as DNS-dead) before the cleanup acts on it.
+    is permanent. So a DNS-only finding must have been dead since at least
+    ``DNS_CONFIRM_AFTER`` ago (``dns_dead_since``, carried over from scan to
+    scan); the caller then re-checks the domain without the cache.
     """
     reasons = set(item["reasons"])
     if cfg["clean_invalid"] and ev.REASON_SYNTAX in reasons:
         return True
     if cfg["clean_hard_bounces"] and ev.REASON_HARD_BOUNCE in reasons:
         return True
-    return item["subscriber_id"] in dns_dead_before
+    since = item.get("dns_dead_since")
+    try:
+        return bool(since) and now - datetime.fromisoformat(since) >= DNS_CONFIRM_AFTER
+    except (TypeError, ValueError):
+        return False
 
 
 def _summary(kind: str, status: str, message: str, started: datetime,
@@ -604,10 +635,13 @@ async def _run(client, kind: str, list_id: Optional[int], started: datetime,
     async with _RESULTS_LOCK:
         stored_before = load_results()
     known_ids = {it["subscriber_id"] for it in stored_before.values()}
-    # Subscribers an EARLIER scan already found DNS-dead (see _is_confirmed).
-    dns_dead_before = {
-        it["subscriber_id"] for it in stored_before.values()
-        if it.get("verdict") == "invalid" and set(it.get("reasons") or []) & DNS_INVALID_REASONS
+    # Since when an EARLIER scan has found each subscriber DNS-dead (see
+    # _is_confirmed). Results stored before the field existed count from their
+    # check time.
+    dns_dead_since_before = {
+        it["subscriber_id"]: it.get("dns_dead_since") or it.get("checked_at")
+        for it in stored_before.values()
+        if it.get("verdict") == "invalid" and _dns_only(it)
     }
     rechecked: set[int] = set()
     flagged: dict[str, dict] = {}
@@ -656,6 +690,9 @@ async def _run(client, kind: str, list_id: Optional[int], started: datetime,
                     "detail": res["detail"],
                     "checked_at": now_iso,
                 }
+                if res["verdict"] == "invalid" and _dns_only(res):
+                    flagged[res["email"]]["dns_dead_since"] = (
+                        dns_dead_since_before.get(sid) or now_iso)
         if isinstance(total, int) and page * PAGE_SIZE >= total:
             completed = True
             break
@@ -685,13 +722,15 @@ async def _run(client, kind: str, list_id: Optional[int], started: datetime,
 
     # ── cleanup: decide, hold or blocklist ──
     eligible = [it for it in flagged.values() if _is_candidate(it, cfg)]
-    candidates = [it for it in eligible if _is_confirmed(it, cfg, dns_dead_before)]
+    run_now = _now()
+    candidates = [it for it in eligible if _is_confirmed(it, cfg, run_now)]
     pending = len(eligible) - len(candidates)
     summary["candidates"] = len(candidates)
     summary["pending_confirmation"] = pending
     wait_note = (
-        f" {pending} address(es) with a dead domain were seen for the first time; "
-        "they are blocklisted if the next scan still finds them dead." if pending else "")
+        f" {pending} address(es) with a dead domain are not confirmed yet; they are "
+        f"blocklisted once a scan at least {int(DNS_CONFIRM_AFTER.total_seconds() // 3600)} "
+        "hours after the first one still finds them dead." if pending else "")
     # Judged on everything that looks dead, confirmed or not: a resolver or
     # data problem must raise the alarm on the first run, not the second.
     if (summary["checked"] >= HOLD_MIN_SAMPLE
@@ -708,6 +747,30 @@ async def _run(client, kind: str, list_id: Optional[int], started: datetime,
     if not candidates:
         summary["message"] = "Nothing to clean." + wait_note
         return summary
+
+    # Dead-domain candidates stand on a DNS answer: ask again now, without
+    # the cache, and keep only the domains that are still dead.
+    fact_reasons = {ev.REASON_SYNTAX} if cfg["clean_invalid"] else set()
+    if cfg["clean_hard_bounces"]:
+        fact_reasons.add(ev.REASON_HARD_BOUNCE)
+    dns_based = [it for it in candidates
+                 if not set(it["reasons"]) & fact_reasons and it.get("domain")]
+    dns_domains = sorted({it["domain"] for it in dns_based})
+    if dns_domains:
+        _job["phase"] = "re-checking"
+        fresh = dict(zip(dns_domains, await asyncio.gather(
+            *(ev.recheck_domain(d) for d in dns_domains))))
+        # Only the DNS-based candidates: a hard bounce or a malformed address
+        # on the same domain is a fact whatever the domain answers now.
+        revived = [it for it in dns_based if fresh[it["domain"]]["status"] != "invalid"]
+        if revived:
+            candidates = [it for it in candidates if it not in revived]
+            summary["candidates"] = len(candidates)
+            wait_note += (f" {len(revived)} address(es) whose domain answered again on a "
+                          "fresh check were left alone.")
+        if not candidates:
+            summary["message"] = "Nothing to clean." + wait_note
+            return summary
 
     _job["phase"] = "blocklisting"
     by_id = {it["subscriber_id"]: it for it in candidates}

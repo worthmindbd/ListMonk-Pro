@@ -31,7 +31,7 @@ from app.services.unsubscribe_log import (
 )
 from app.services.imap_helpers import (
     safe_email_for_query, imap_date, extract_email_body,
-    fetch_state_ids, message_state_id,
+    fetch_state_ids, message_state_id, campaign_has_sent, campaign_send_dt,
     strip_campaign_echo, campaign_echo_index_for,
     automated_header_kind,
 )
@@ -272,10 +272,19 @@ def _extract_reply_only(full_body: str) -> str:
 
 
 def _extract_sender_email(msg: email.message.EmailMessage) -> Optional[str]:
-    """Extract the sender's email address from the From header."""
-    from_header = msg.get("From", "")
-    match = re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", from_header)
-    return match.group(0).lower() if match else None
+    """Extract the sender's email address from the From header.
+
+    The header is parsed as an address (``parseaddr``), never searched with a
+    regex: an address in the *display name* ("victim@corp.com"
+    <attacker@evil.com>, or "Smith (john@old-corp.com)" <jsmith@corp.com>)
+    used to win, so a reply unsubscribed — and possibly blocklisted — someone
+    other than its sender.
+    """
+    _, addr = email.utils.parseaddr(str(msg.get("From") or ""))
+    addr = addr.strip().lower()
+    if "@" not in addr or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", addr):
+        return None
+    return addr
 
 
 def _clean_subject(subject: str) -> str:
@@ -330,7 +339,11 @@ def _match_campaign(
     best_date = None
 
     for camp in campaigns:
-        camp_date = _parse_campaign_dt(camp.get("created_at", ""))
+        # A draft / scheduled campaign never reached the sender, so it can be
+        # neither what they replied to nor what they unsubscribed from.
+        if not campaign_has_sent(camp):
+            continue
+        camp_date = campaign_send_dt(camp)
         if camp_date is None:
             continue
 
@@ -413,19 +426,6 @@ def _has_active_subscription(subscriber: dict) -> bool:
         (lst.get("subscription_status") or "") != "unsubscribed"
         for lst in subscriber.get("lists") or [] if isinstance(lst, dict)
     )
-
-
-def _prune_existing_records(records: list[dict], valid_cids: set) -> list[dict]:
-    """Drop records attributed to campaigns that no longer exist in ListMonk.
-
-    Records without a campaign_id (e.g. "No matching campaign" link records)
-    are kept — a missing attribution is not evidence of a deleted campaign.
-    Callers must only invoke this with a *complete* campaign id set.
-    """
-    return [
-        r for r in records
-        if r.get("campaign_id") is None or r.get("campaign_id") in valid_cids
-    ]
 
 
 def _oldest_pending_record_dt(records: list[dict]) -> Optional[datetime]:
@@ -525,15 +525,18 @@ def _reattribute_existing_records(
     records that were stored with the old date-only matcher.
 
     - If a record matches a different campaign, update it in place.
-    - If a record matches no campaign, mark it for removal (caller filters)
-      — only when `allow_removal` is set, i.e. the campaign list is complete.
+    - If a record matches no campaign it is kept as it is; with the complete
+      campaign list (`allow_removal`) it is marked settled so it is not
+      re-examined. Records are never removed: each is an opt-out's audit trail.
     - Skips records already marked with `reattributed_at`, records without
       `lists_removed`, and non-email records.
 
-    Returns (changed_count, removed_count).
+    Returns (changed_count, settled_count): records whose campaign changed,
+    and records newly stamped ``reattributed_at`` (the caller saves when
+    either is non-zero, so a settled record is not re-examined every scan).
     """
     changed = 0
-    removed = 0
+    settled = 0
     for r in records:
         if r.get("source") != "email":
             continue
@@ -564,11 +567,16 @@ def _reattribute_existing_records(
                 r["matched_list_id"] = new_match.get("matched_list_id")
                 changed += 1
             r["reattributed_at"] = datetime.now(timezone.utc).isoformat()
+            settled += 1
         elif allow_removal:
-            r["_remove"] = True
-            removed += 1
+            # Nothing matches even with the complete history: the record keeps
+            # its stored attribution (it is still a real opt-out, and Undo
+            # works from it) and is not looked at again. It used to be
+            # deleted from the log here.
+            r["reattributed_at"] = datetime.now(timezone.utc).isoformat()
+            settled += 1
 
-    return changed, removed
+    return changed, settled
 
 
 async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
@@ -583,7 +591,14 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
 
     async with _scan_lock:
         _scan_running = True
-        conn = await asyncio.to_thread(connect_imap)
+        try:
+            conn = await asyncio.to_thread(connect_imap)
+        except BaseException:
+            # Cancelled (client disconnect, shutdown) or failed while
+            # connecting: the try/finally below does not cover this await, and
+            # a flag left set answered "Scan already in progress" until restart.
+            _scan_running = False
+            raise
         if not conn:
             _scan_running = False
             return {"scanned": 0, "matched": 0, "processed": 0, "errors": 0,
@@ -645,39 +660,29 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
             # Backfill + prune must be atomic with respect to other writers
             # (link scanner, reset/delete endpoints) so no records are lost.
             async with _log_lock:
-                # Load log once and reuse across backfill, pruning, and dedup.
+                # Load log once and reuse across backfill and dedup.
                 existing_log = load_log()
 
                 if campaigns_list and covers_cutoff:
                     try:
-                        changed, removed = _reattribute_existing_records(
+                        changed, settled = _reattribute_existing_records(
                             existing_log, campaigns_list,
                             allow_removal=campaigns_complete,
                         )
-                        if changed or removed:
-                            existing_log = [r for r in existing_log if not r.get("_remove")]
+                        if changed or settled:
                             save_log(existing_log)
                             logger.info(
-                                f"[IMAP] Backfill: re-attributed {changed}, "
-                                f"removed {removed} unattributable records"
+                                f"[IMAP] Backfill: re-attributed {changed} of "
+                                f"{settled} settled records"
                             )
                     except Exception as e:
                         logger.warning(f"[IMAP] Backfill reattribution failed (non-fatal): {e}")
 
-                # Prune records whose campaign no longer exists in ListMonk.
-                # Requires a *complete* campaign list, and never drops records
-                # without a campaign_id ("No matching campaign").
-                if campaigns_list and campaigns_complete:
-                    try:
-                        valid_cids = {c.get("id") for c in campaigns_list}
-                        pruned = _prune_existing_records(existing_log, valid_cids)
-                        removed_count = len(existing_log) - len(pruned)
-                        if removed_count:
-                            existing_log = pruned
-                            save_log(existing_log)
-                            logger.info(f"[IMAP] Pruned {removed_count} records for deleted campaigns")
-                    except Exception as e:
-                        logger.warning(f"[IMAP] Campaign prune failed (non-fatal): {e}")
+                # Records of campaigns since deleted in ListMonk are KEPT:
+                # they are an opt-out's audit trail and what "Undo All" works
+                # from, and Settings → Automation lists them as "deleted
+                # campaign" (GET /api/unsubscribes/orphans). The scan used to
+                # prune them every hour, emptying that view.
 
                 # Dedup sources (message ids from the log, emails from the
                 # persistent processed set that survives log deletion/clearing).
@@ -879,7 +884,18 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
 
                         subscriber = subscribers[0]
                         sub_id = subscriber["id"]
-                        sub_lists = [lst["id"] for lst in subscriber.get("lists", [])]
+                        sub_list_objs = [
+                            lst for lst in subscriber.get("lists") or []
+                            if isinstance(lst, dict) and lst.get("id")
+                        ]
+                        sub_lists = [lst["id"] for lst in sub_list_objs]
+                        # The lists this request actually changes. Lists the
+                        # person had already left are not "removed" by it, so
+                        # "Undo All" must not re-confirm them.
+                        active_lists = [
+                            lst["id"] for lst in sub_list_objs
+                            if (lst.get("subscription_status") or "") != "unsubscribed"
+                        ]
 
                         # A sender the engine already handled is skipped only
                         # while that still holds (no active subscription left).
@@ -891,15 +907,21 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                             examined_now.append(state_id)
                             continue
 
-                        # Only process if subscriber belongs to a campaign's
-                        # target list — otherwise skip entirely.
+                        # Attribute to the campaign that targeted one of the
+                        # subscriber's lists. Attribution is bookkeeping, never
+                        # a precondition: an opt-out from a known subscriber is
+                        # honoured even when no campaign matches (their list
+                        # was only targeted by campaigns beyond the fetched
+                        # history, or they were moved off the list they were
+                        # mailed on). Skipping those used to mark the request
+                        # examined and lose it for good.
                         campaign = _match_campaign(
                             campaigns_list, email_date, set(sub_lists)
                         )
-                        if not campaign:
-                            logger.info(f"[IMAP] No list-matched campaign for '{subject}' from {sender_email}; skipping")
-                            examined_now.append(state_id)
-                            continue
+                        # The copy the reply most likely quotes, for the echo
+                        # backstop below: the list-matched campaign, else the
+                        # newest campaign sent before the reply.
+                        echo_match = campaign or _match_campaign(campaigns_list, email_date, None)
 
                         # Backstop for quote headers the stripper does not
                         # know: if the keyword survives only in lines that
@@ -909,7 +931,7 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                         # client used to unsubscribe (and blocklist) the lead.
                         raw_campaign = next(
                             (c for c in campaigns_list
-                             if c.get("id") == campaign["campaign_id"]), None,
+                             if echo_match and c.get("id") == echo_match["campaign_id"]), None,
                         )
                         echo_index = await campaign_echo_index_for(
                             client, raw_campaign, echo_cache,
@@ -923,12 +945,12 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                             examined_now.append(state_id)
                             continue
 
-                        # Unsubscribe from all lists
-                        if sub_lists:
+                        # Unsubscribe from every list still active
+                        if active_lists:
                             await client.modify_list_memberships({
                                 "ids": [sub_id],
                                 "action": "unsubscribe",
-                                "target_list_ids": sub_lists,
+                                "target_list_ids": active_lists,
                                 "status": "unsubscribed",
                             })
 
@@ -939,6 +961,11 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                             await client.blocklist_subscriber(sub_id)
                             logger.info(f"[IMAP] Blocklisted: {sender_email}")
 
+                        if campaign is None:
+                            logger.info(
+                                f"[IMAP] No list-matched campaign for '{subject}' from "
+                                f"{sender_email}; unsubscribed and logged without a campaign"
+                            )
                         record = {
                             "email": sender_email,
                             "name": subscriber.get("name", ""),
@@ -947,23 +974,27 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                             "subject": subject,
                             "message_id": msg_message_id,
                             "campaign_key": f"{email_date.year}-{email_date.month:02d}",
-                            "campaign_id": campaign["campaign_id"],
-                            "campaign_name": campaign["campaign_name"],
-                            "matched_list_id": campaign.get("matched_list_id"),
+                            "campaign_id": campaign["campaign_id"] if campaign else None,
+                            "campaign_name": campaign["campaign_name"] if campaign else "No matching campaign",
+                            "matched_list_id": campaign.get("matched_list_id") if campaign else None,
                             "subscriber_id": sub_id,
-                            "lists_removed": sub_lists,
+                            "lists_removed": active_lists,
                             # Whether THIS engine blocklisted the subscriber:
                             # "Undo All" only lifts a blocklisting it caused.
                             "blocklisted": blocklisted_now,
                             "timestamp": datetime.now(timezone.utc).isoformat(),
+                            # Attributed by the current list-aware matcher: the
+                            # one-time backfill below must leave it alone (it
+                            # would otherwise drop a campaign-less record).
+                            "reattributed_at": datetime.now(timezone.utc).isoformat(),
                         }
                         new_records.append(record)
                         examined_now.append(state_id)
                         seen_after_persist.append(msg_id)
                         handled_this_scan.add(sender_email)  # Prevent duplicates in same scan
                         processed += 1
-                        action = "Unsubscribed + Blocklisted" if scan_settings.get("blocklist_enabled") else "Unsubscribed"
-                        logger.info(f"{action}: {sender_email} (campaign: {campaign['campaign_name']})")
+                        action = "Unsubscribed + Blocklisted" if blocklisted_now else "Unsubscribed"
+                        logger.info(f"{action}: {sender_email} (campaign: {record['campaign_name']})")
 
                     except Exception as e:
                         errors += 1

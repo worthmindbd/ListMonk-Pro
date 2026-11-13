@@ -3,7 +3,7 @@ from fastapi.responses import StreamingResponse
 from typing import Optional, Tuple
 from app.services.csv_converter import detect_columns, convert_csv, preview_conversion
 from app.services.listmonk_client import listmonk
-from app.services import email_validation
+from app.services import blocklist_registry, email_validation
 import asyncio
 import csv
 import json
@@ -309,12 +309,29 @@ async def convert_and_import(
         "listmonk_import.csv",
         import_params,
     )
+    if import_params["mode"] == "blocklist":
+        # A deliberate blocklisting: auto-unblock must never reverse it. The
+        # import runs in ListMonk's background, so no ids exist yet — the
+        # addresses are recorded instead.
+        blocklist_registry.mark_emails(_csv_emails(csv_content))
     return {
         "conversion_stats": stats,
         "validation": validation,
         "import_params": import_params,
         "import_result": import_result,
     }
+
+
+def _csv_emails(csv_content: str) -> list[str]:
+    """The ``email`` column of a converted CSV."""
+    rows = list(csv.reader(io.StringIO(csv_content)))
+    if not rows:
+        return []
+    try:
+        col = [h.strip().lower() for h in rows[0]].index("email")
+    except ValueError:
+        col = 0
+    return [r[col] for r in rows[1:] if len(r) > col and r[col]]
 
 
 # Addresses listed back to the UI when rows are dropped (the rest are counted).

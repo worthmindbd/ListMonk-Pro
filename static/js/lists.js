@@ -270,7 +270,7 @@ const Lists = {
     },
 
     async remove(id) {
-        if (await App.confirm('Delete List', 'Are you sure you want to delete this list? All subscribers in this list (except blocklisted ones) will also be deleted.')) {
+        if (await App.confirm('Delete List', 'Delete this list? Subscribers who are only on this list are deleted too. Anyone also on another list just leaves this one, people who unsubscribed from it are blocklisted (so the opt-out is kept) and blocklisted subscribers stay blocklisted.')) {
             try {
                 await API.del(`/api/lists/${id}`);
                 this._invalidateListCaches([id]);
@@ -288,7 +288,7 @@ const Lists = {
         const ids = this._selectedIds();
         if (!ids.length) return;
         if (!await App.confirm('Delete Lists',
-                `Permanently delete ${ids.length} selected list(s)? All subscribers in those lists (except blocklisted ones) will also be deleted.`)) return;
+                `Permanently delete ${ids.length} selected list(s)? Subscribers who are only on these lists are deleted too. Anyone also on another list just leaves them, people who unsubscribed are blocklisted (so the opt-out is kept) and blocklisted subscribers stay blocklisted.`)) return;
         try {
             const params = ids.map(id => `ids=${id}`).join('&');
             const result = await API.del(`/api/lists?${params}`, API.LONG_TIMEOUT);

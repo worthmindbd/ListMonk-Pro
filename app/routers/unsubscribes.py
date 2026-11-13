@@ -9,7 +9,7 @@ from app.services.imap_unsubscribe import (
 )
 from app.services.unsubscribe_log import (
     load_log, save_log, load_settings, save_settings,
-    unmark_processed, _log_lock,
+    unmark_processed, forget_link_seen, _log_lock,
 )
 from app.services.link_unsubscribe import scan_link_unsubscribes
 from app.services import blocklist_registry
@@ -457,7 +457,6 @@ async def reset_all_unsubscribes():
 
                 # Step 2: Re-enable subscriber (remove blocklist)
                 current_lists = [lst["id"] for lst in subscriber.get("lists", [])]
-                blocklist_registry.unmark([sub_id])
                 await listmonk.update_subscriber(sub_id, {
                     "email": subscriber["email"],
                     "name": subscriber.get("name", ""),
@@ -465,6 +464,10 @@ async def reset_all_unsubscribes():
                     "lists": current_lists,
                     "attribs": subscriber.get("attribs", {}),
                 })
+                # Only once the re-enable went through: a failed update leaves
+                # the subscriber blocklisted, so the deliberate-blocklist
+                # marker must stay too.
+                blocklist_registry.unmark([sub_id])
 
                 # Step 3: Re-subscribe to removed lists
                 if lists_removed:
@@ -528,6 +531,9 @@ async def reset_all_unsubscribes():
     restored_emails = [records[i].get("email", "") for i in ok_indices]
     if restored_emails:
         await unmark_processed(restored_emails)
+        # Their lists are confirmed again, so a later click on one of them is
+        # a new unsubscribe the link scanner must see.
+        await forget_link_seen(records[i].get("subscriber_id") for i in ok_indices)
 
     return {
         "message": f"Reset complete: {restored_count} restored, {failed} failed (kept in log for retry)",

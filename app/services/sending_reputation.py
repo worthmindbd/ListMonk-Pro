@@ -424,8 +424,21 @@ async def check_dkim(domain: str) -> dict:
     return {"found": found, "checked": selectors, "error": errors == len(selectors) and bool(selectors)}
 
 
+# Second-level labels that are a public suffix under a two-letter country code
+# (co.uk, com.au, org.nz, ac.jp, ne.jp …). Without a bundled Public Suffix
+# List this covers the registries that actually hand out such names; taking
+# the last two labels made the organisational domain of mail.acme.co.uk
+# "co.uk", so its DMARC record was looked up in the wrong place.
+_CC_SECOND_LEVEL = {
+    "co", "com", "net", "org", "gov", "edu", "ac", "ltd", "plc", "nhs", "sch",
+    "ne", "or", "go", "gr", "ed", "lg", "id", "nom", "gen", "biz", "info", "mil",
+}
+
+
 def _org_domain(domain: str) -> str:
     parts = domain.split(".")
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in _CC_SECOND_LEVEL:
+        return ".".join(parts[-3:])
     return ".".join(parts[-2:]) if len(parts) > 2 else domain
 
 

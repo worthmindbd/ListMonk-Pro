@@ -134,14 +134,18 @@ class ListMonkClient:
         subscription_status: str,
         page: int = 1,
         per_page: int = 100,
+        query: str = "",
     ) -> dict:
-        """Get subscribers for a list filtered by their subscription status."""
+        """Get subscribers for a list filtered by their subscription status
+        (and optionally a ListMonk SQL ``query`` built by the caller)."""
         params = {
             "list_id": list_id,
             "subscription_status": subscription_status,
             "page": page,
             "per_page": per_page,
         }
+        if query:
+            params["query"] = query
         return await self._request("GET", "/api/subscribers", params=params)
 
     async def get_subscriber(self, subscriber_id: int) -> dict:

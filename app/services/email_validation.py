@@ -357,6 +357,24 @@ async def check_domain(domain: str) -> dict:
     return dict(await asyncio.shield(task))
 
 
+async def recheck_domain(domain: str) -> dict:
+    """A fresh DNS verdict for ``domain``, bypassing (and then refreshing) the cache.
+
+    A destructive decision must rest on a lookup made *now*: the cache keeps a
+    "domain does not exist" answer for an hour, so a second scan inside that
+    hour only re-read the first scan's answer.
+    """
+    try:
+        result = await _lookup(domain)
+    except Exception as e:
+        logger.warning(f"DNS re-check for {domain} failed: {e!r}")
+        result = _result("unknown", REASON_DNS_UNAVAILABLE,
+                         f"DNS lookup failed ({type(e).__name__})")
+    ttl = UNKNOWN_TTL if result["status"] == "unknown" else DOMAIN_TTL
+    _domain_cache[domain] = (time.monotonic() + ttl, result)
+    return dict(result)
+
+
 HEALTH_PROBE_DOMAINS = ("gmail.com", "outlook.com")
 
 

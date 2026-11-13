@@ -20,7 +20,7 @@ from app.config import settings
 from app.services import blocklist_registry
 from app.services.listmonk_client import ListMonkClient
 from app.services.imap_helpers import (
-    safe_email_for_query, extract_email_body, imap_date, fetch_state_id,
+    safe_email_for_query, extract_email_body, imap_date, fetch_state_ids,
     automated_header_kind, is_bulk_mail, strip_campaign_echo,
     campaign_echo_index, campaign_echo_index_for,
 )
@@ -48,6 +48,10 @@ logger = logging.getLogger("imap_reply_tracker")
 # the campaign that actually targeted the sender, not just the newest one.
 MAX_CAMPAIGN_PAGES = 20
 CAMPAIGN_PAGE_SIZE = 100
+# Newest messages of the scan window looked at per scan (see the fetch below).
+# Must stay well under reply_log.MAX_PROCESSED_IDS (5000), or ids of messages
+# still in the window would be evicted and their replies recorded twice.
+MAX_SCAN_MESSAGES = 2000
 
 # Serialises reply scans so the 15-minute background loop and a manual
 # "Scan Mailbox" click cannot process (and log) the same message twice.
@@ -1021,7 +1025,7 @@ def lookup_header_verdicts(mail, wanted_ids: set[str]) -> dict[str, Optional[str
     """Read automation headers of stored replies the scan window no longer reaches.
 
     :func:`collect_header_backfills` only sees the messages of the current scan
-    window (``days_back`` days, newest 200), so a reply stored two weeks ago
+    window (``days_back`` days, newest MAX_SCAN_MESSAGES), so a reply stored two weeks ago
     stayed un-judged forever even though its message still sits in the mailbox.
     Those are looked up one by one through ``SEARCH HEADER Message-ID`` — which
     ignores dates — and only their headers are fetched (``BODY.PEEK``, never
@@ -1518,16 +1522,20 @@ async def _scan_and_track_replies_impl(
                 return []
 
             msg_nums = search_data[0].split()
-            # Most recent 200 messages
-            msg_nums = msg_nums[-200:]
+            # The newest MAX_SCAN_MESSAGES of the window. A cap of 200 meant a
+            # busy inbox (or a few days of failed scans) pushed older replies
+            # out of reach for good; with the batched peek below, already
+            # processed messages cost one header FETCH per 200, not a download.
+            msg_nums = msg_nums[-MAX_SCAN_MESSAGES:]
+            # Identity-header peek first: the scan runs every 15 minutes over
+            # the same window, and downloading every full message (attachments
+            # included) each time re-fetched mail processed long ago. Only
+            # unprocessed messages, and processed ones awaiting a body repair,
+            # are downloaded.
+            state_ids = fetch_state_ids(mail, msg_nums)
             messages = []
             for num in msg_nums:
-                # Identity-header peek first: the scan runs every 15 minutes
-                # over the same window, and downloading all 200 full messages
-                # (attachments included) each time re-fetched mail that was
-                # processed long ago. Only unprocessed messages, and processed
-                # ones awaiting a body repair, are downloaded.
-                state_id = fetch_state_id(mail, num)
+                state_id = state_ids.get(num, "")
                 if state_id and state_id in processed_ids and state_id not in repair_ids:
                     continue
                 status, data = mail.fetch(num, "(RFC822)")
@@ -1587,7 +1595,7 @@ async def _scan_and_track_replies_impl(
     try:
         wanted = _header_backfill_ids(load_log())
         backfills = collect_header_backfills(messages, wanted)
-        # Records older than the scan window (or beyond its 200-message cap)
+        # Records older than the scan window (or beyond its MAX_SCAN_MESSAGES cap)
         # are not among ``messages``; look those up by Message-ID. Once every
         # record carries a verdict this set is empty and costs no connection.
         leftover = wanted - backfills.keys()

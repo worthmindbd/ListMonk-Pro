@@ -31,6 +31,7 @@ from app.auth import (
     verify_session, create_session, clear_session, check_credentials,
     is_login_rate_limited, record_login_failure, clear_login_failures,
     client_ip_from_request, warn_if_default_credentials, revoke_session,
+    credentials_are_default,
     COOKIE_NAME,
 )
 from app.services.task_utils import shutdown as shutdown_tasks
@@ -486,6 +487,15 @@ async def login(request: Request):
     if not isinstance(username, str) or not isinstance(password, str):
         record_login_failure(client_ip)
         raise HTTPException(status_code=400, detail="username and password must be strings")
+
+    if credentials_are_default():
+        # Not a wrong password: the deployment itself must be fixed, so say so
+        # instead of answering "invalid username or password" forever.
+        raise HTTPException(
+            status_code=403,
+            detail="Login is disabled: DASHBOARD_USER/DASHBOARD_PASS are still the "
+                   "default values. Change them in .env and restart the dashboard.",
+        )
 
     if not check_credentials(username, password):
         record_login_failure(client_ip)
