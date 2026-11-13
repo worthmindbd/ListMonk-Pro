@@ -4225,10 +4225,11 @@ td .tag {
 
 /* ==========================================================================
    Deliverability Audit
-   A report surface, not a banner: the score reads as an instrument (numeral +
-   one tick per scored check), the audit groups checks under a label rail, and
-   only a failing check is allowed to raise its voice. Every row carries the
-   control for its setting; edits collect in a sticky save bar.
+   A report surface, not a banner. The hero reads as an instrument (score
+   ring + tallies + presets); below it a sticky section menu picks the group
+   shown in the panel, so 21 checks never sit in one wall of rows. Only a
+   failing or warning row raises its voice (tint + edge rail). Every row
+   carries the control for its setting; edits collect in a sticky save bar.
    ========================================================================== */
 
 .sr-only {
@@ -4243,19 +4244,22 @@ td .tag {
     border: 0;
 }
 
-/* ── Summary ───────────────────────────────────────────────── */
-.deliv-summary {
-    display: grid;
-    grid-template-columns: minmax(250px, 330px) minmax(0, 1fr);
-    gap: 34px;
-    padding: 28px;
-    align-items: start;
+/* Status tones, one place per theme. Light values clear WCAG AA (4.5:1) for
+   11–12px text on the pale tinted fills used below. */
+:root {
+    --deliv-pass: #34d399;
+    --deliv-warn: #fbbf24;
+    --deliv-fail: #ff5c8a;
+    --deliv-info: var(--primary-soft);
+    --deliv-inset: rgba(4, 8, 18, 0.28);
 }
 
-.deliv-summary-body {
-    border-left: 1px solid var(--glass-border);
-    padding-left: 34px;
-    min-width: 0;
+[data-theme="light"] {
+    --deliv-pass: #047857;
+    --deliv-warn: #a35a00;
+    --deliv-fail: #b3123a;
+    --deliv-info: var(--primary);
+    --deliv-inset: rgba(241, 245, 249, 0.7);
 }
 
 .deliv-eyebrow {
@@ -4266,16 +4270,111 @@ td .tag {
     color: var(--text-muted);
 }
 
-.deliv-score-line {
+/* ── Hero ──────────────────────────────────────────────────── */
+.deliv-hero {
+    --ring-a: var(--primary-soft);
+    --ring-b: var(--primary);
+    --ring-glow: var(--primary-glow);
+    padding: 0;
+    overflow: hidden;
+    isolation: isolate;
+}
+
+.deliv-hero.is-optimal {
+    --ring-a: var(--primary-soft);
+    --ring-b: #10b981;
+    --ring-glow: rgba(16, 185, 129, 0.35);
+}
+
+.deliv-hero.is-good {
+    --ring-a: #fcd34d;
+    --ring-b: #f59e0b;
+    --ring-glow: rgba(245, 158, 11, 0.3);
+}
+
+.deliv-hero.is-poor {
+    --ring-a: #ff8fb0;
+    --ring-b: var(--ruby);
+    --ring-glow: var(--ruby-glow);
+}
+
+/* Soft halo behind the gauge: the one decorative flourish on the page. */
+.deliv-hero::after {
+    content: '';
+    position: absolute;
+    z-index: -1;
+    top: -140px;
+    left: -100px;
+    width: 460px;
+    height: 400px;
+    background: radial-gradient(closest-side, var(--ring-glow), transparent);
+    opacity: 0.55;
+    pointer-events: none;
+}
+
+.deliv-hero-main {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 34px;
+    align-items: center;
+    padding: 30px 30px 28px;
+}
+
+.deliv-ring {
+    position: relative;
+    width: 148px;
+    height: 148px;
+    flex-shrink: 0;
+}
+
+.deliv-ring svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+}
+
+.deliv-ring-track {
+    fill: none;
+    stroke: var(--glass-border-hover);
+    stroke-width: 9;
+    opacity: 0.6;
+}
+
+.deliv-ring-arc {
+    fill: none;
+    stroke: url(#delivRingGrad);
+    stroke-width: 9;
+    stroke-linecap: round;
+    filter: drop-shadow(0 0 8px var(--ring-glow));
+}
+
+.deliv-ring-stop-a { stop-color: var(--ring-a); }
+.deliv-ring-stop-b { stop-color: var(--ring-b); }
+
+@media (prefers-reduced-motion: no-preference) {
+    .deliv-ring-arc {
+        animation: delivRingIn 0.9s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    @keyframes delivRingIn {
+        from { stroke-dasharray: 0 400; }
+    }
+}
+
+.deliv-ring-value {
+    position: absolute;
+    inset: 0;
     display: flex;
-    align-items: baseline;
-    gap: 9px;
-    margin-top: 6px;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
 }
 
 .deliv-score-value {
     font-family: var(--font-display);
-    font-size: 3.1rem;
+    font-size: 2.9rem;
     font-weight: 600;
     line-height: 1;
     letter-spacing: -0.045em;
@@ -4284,61 +4383,22 @@ td .tag {
 }
 
 .deliv-score-max {
-    font-size: 0.95rem;
-    font-weight: 600;
-    color: var(--text-muted);
-    font-variant-numeric: tabular-nums;
-}
-
-/* One tick per scored check: the meter is the score's evidence, so a 100 with
-   nine ticks cannot be faked by a rounded percentage. */
-.deliv-meter {
-    display: flex;
-    gap: 3px;
-    height: 6px;
-    margin-top: 16px;
-}
-
-.deliv-tick {
-    flex: 1;
-    border-radius: 2px;
-    background: var(--text-muted);
-    opacity: 0.35;
-}
-
-.deliv-tick.is-pass {
-    background: #34d399;
-    opacity: 0.85;
-}
-
-.deliv-tick.is-warn {
-    background: #fbbf24;
-    opacity: 1;
-}
-
-.deliv-tick.is-fail {
-    background: #ff5c8a;
-    opacity: 1;
-}
-
-.deliv-score-caption {
-    margin-top: 12px;
-    font-size: 0.79rem;
-    color: var(--text-muted);
-    line-height: 1.5;
-}
-
-.deliv-score-caption strong {
-    color: var(--text-secondary);
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-}
-
-.deliv-score-note {
-    display: block;
-    margin-top: 2px;
     font-size: 0.74rem;
-    opacity: 0.85;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.deliv-hero-copy {
+    min-width: 0;
+}
+
+.deliv-hero-top {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 12px;
 }
 
 .deliv-profile-pill {
@@ -4363,207 +4423,731 @@ td .tag {
     flex-shrink: 0;
 }
 
+.deliv-profile-pill.matched {
+    border-color: color-mix(in srgb, var(--deliv-pass) 32%, transparent);
+    background: color-mix(in srgb, var(--deliv-pass) 10%, transparent);
+    color: var(--deliv-pass);
+}
+
 .deliv-profile-pill.matched .deliv-profile-dot {
-    background: #34d399;
-    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
+    background: var(--deliv-pass);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--deliv-pass) 18%, transparent);
 }
 
 .deliv-profile-pill.unmatched {
-    border-color: rgba(245, 158, 11, 0.3);
+    border-color: color-mix(in srgb, var(--deliv-warn) 32%, transparent);
     background: var(--warning-bg);
-    color: #fbbf24;
+    color: var(--deliv-warn);
 }
 
 .deliv-profile-pill.unmatched .deliv-profile-dot {
-    background: #fbbf24;
-    box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.16);
+    background: var(--deliv-warn);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--deliv-warn) 18%, transparent);
+}
+
+.deliv-profile-pill.is-mode {
+    border-color: rgba(139, 133, 255, 0.32);
+    background: var(--primary-subdued);
+    color: var(--deliv-info);
+}
+
+.deliv-profile-pill.is-mode .deliv-profile-dot {
+    background: var(--deliv-info);
 }
 
 .deliv-verdict {
-    margin: 14px 0 0;
-    font-size: 1.22rem;
+    margin: 12px 0 0;
+    font-family: var(--font-display);
+    font-size: 1.5rem;
     font-weight: 600;
-    letter-spacing: -0.02em;
-    line-height: 1.3;
+    letter-spacing: -0.025em;
+    line-height: 1.2;
     color: var(--text-primary);
 }
 
 .deliv-verdict-note {
     margin-top: 8px;
-    max-width: 62ch;
+    max-width: 64ch;
     font-size: 0.85rem;
     line-height: 1.6;
     color: var(--text-secondary);
 }
 
-.deliv-verdict-list {
-    margin-top: 8px;
-    font-size: 0.79rem;
-    color: var(--text-muted);
-    line-height: 1.5;
+.deliv-issues {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 14px;
 }
 
-.deliv-preset-row {
-    display: flex;
+.deliv-issue-chip,
+.deliv-issue-more {
+    display: inline-flex;
     align-items: center;
+    gap: 7px;
+    padding: 5px 11px;
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-pill);
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: var(--transition-ui);
+}
+
+.deliv-issue-more {
+    color: var(--text-muted);
+}
+
+.deliv-issue-chip:hover,
+.deliv-issue-more:hover {
+    border-color: var(--glass-border-hover);
+    background: var(--bg-surface-hover);
+}
+
+.deliv-issue-chip:focus-visible,
+.deliv-issue-more:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+}
+
+.deliv-issue-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--deliv-warn);
+}
+
+.deliv-issue-chip.is-fail .deliv-issue-dot {
+    background: var(--deliv-fail);
+}
+
+.deliv-hero-meta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+    align-self: start;
+    text-align: right;
+}
+
+.deliv-hero-meta .btn {
+    margin-top: 6px;
+}
+
+.deliv-live {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 0.74rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.deliv-live-dot {
+    position: relative;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--deliv-pass);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .deliv-live-dot::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        background: var(--deliv-pass);
+        animation: delivPulse 2.4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+    }
+
+    @keyframes delivPulse {
+        0% { transform: scale(1); opacity: 0.6; }
+        70%, 100% { transform: scale(2.8); opacity: 0; }
+    }
+}
+
+.deliv-checked {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+/* Tallies: the score's evidence, so a 100 cannot be read without its count. */
+.deliv-stats {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    border-top: 1px solid var(--glass-border);
+}
+
+.deliv-stat {
+    display: flex;
+    align-items: baseline;
     gap: 10px;
-    flex-wrap: wrap;
-    margin-top: 20px;
+    padding: 16px 30px;
+    min-width: 0;
+}
+
+.deliv-stat + .deliv-stat {
+    border-left: 1px solid var(--glass-border);
+}
+
+.deliv-stat-num {
+    font-family: var(--font-display);
+    font-size: 1.55rem;
+    font-weight: 600;
+    line-height: 1;
+    letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
+}
+
+.deliv-stat.is-pass .deliv-stat-num { color: var(--deliv-pass); }
+.deliv-stat.is-warn .deliv-stat-num { color: var(--deliv-warn); }
+.deliv-stat.is-fail .deliv-stat-num { color: var(--deliv-fail); }
+.deliv-stat.is-info .deliv-stat-num { color: var(--deliv-info); }
+.deliv-stat.is-zero .deliv-stat-num { color: var(--text-muted); opacity: 0.7; }
+
+.deliv-stat-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* ── Presets ───────────────────────────────────────────────── */
+.deliv-presets {
+    display: grid;
+    grid-template-columns: minmax(200px, 250px) minmax(0, 1fr);
+    gap: 26px;
+    align-items: center;
+    padding: 20px 30px 22px;
+    border-top: 1px solid var(--glass-border);
+    background: var(--deliv-inset);
 }
 
 .deliv-preset-hint {
-    margin-top: 10px;
-    max-width: 62ch;
+    margin-top: 6px;
+    font-size: 0.74rem;
+    line-height: 1.55;
+    color: var(--text-muted);
+}
+
+.deliv-preset-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.deliv-preset {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 16px;
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    background: var(--bg-surface);
+    transition: var(--transition-ui);
+}
+
+.deliv-preset:hover {
+    border-color: var(--glass-border-hover);
+}
+
+.deliv-preset.is-active {
+    border-color: color-mix(in srgb, var(--deliv-pass) 38%, transparent);
+    background: linear-gradient(135deg, color-mix(in srgb, var(--deliv-pass) 10%, transparent), transparent 70%), var(--bg-surface);
+}
+
+.deliv-preset-icon {
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    flex-shrink: 0;
+    border-radius: 10px;
+    border: 1px solid rgba(139, 133, 255, 0.25);
+    background: var(--primary-subdued);
+    color: var(--deliv-info);
+}
+
+.deliv-preset-icon svg {
+    width: 16px;
+    height: 16px;
+}
+
+.deliv-preset.is-active .deliv-preset-icon {
+    border-color: color-mix(in srgb, var(--deliv-pass) 35%, transparent);
+    background: color-mix(in srgb, var(--deliv-pass) 12%, transparent);
+    color: var(--deliv-pass);
+}
+
+.deliv-preset-body {
+    flex: 1;
+    min-width: 0;
+}
+
+.deliv-preset-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.86rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.deliv-preset-body p {
+    margin-top: 3px;
     font-size: 0.74rem;
     line-height: 1.5;
     color: var(--text-muted);
 }
 
-/* ── Audit listing ─────────────────────────────────────────── */
-.deliv-audit {
+.deliv-preset-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 8px 1px 6px;
+    border-radius: var(--radius-pill);
+    background: color-mix(in srgb, var(--deliv-pass) 14%, transparent);
+    color: var(--deliv-pass);
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.deliv-preset-badge svg {
+    width: 11px;
+    height: 11px;
+}
+
+.deliv-preset .btn {
+    flex-shrink: 0;
+}
+
+/* ── Two-pane body: section menu + panel ───────────────────── */
+.deliv-layout {
+    display: grid;
+    grid-template-columns: 264px minmax(0, 1fr);
+    gap: 24px;
+    align-items: start;
     margin-top: 24px;
 }
 
-.deliv-audit-head {
-    align-items: flex-start;
-    flex-wrap: wrap;
-    gap: 14px;
-    padding-bottom: 16px;
-    border-bottom: 1px solid var(--glass-border);
+.deliv-nav {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    min-width: 0;
 }
 
-.deliv-sub {
-    margin-top: 4px;
-    font-size: 0.79rem;
-    color: var(--text-muted);
+.deliv-nav-inner {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 10px;
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-lg);
+    background: var(--bg-surface);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    box-shadow: var(--glass-shadow);
 }
 
-.deliv-tally {
-    display: inline-flex;
-    align-items: center;
-    gap: 14px;
-    font-size: 0.78rem;
-    color: var(--text-muted);
-}
-
-.deliv-tally b {
+.deliv-nav-title {
+    padding: 14px 10px 6px;
+    font-size: 0.63rem;
     font-weight: 700;
-    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.deliv-nav-item {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 7px 8px;
+    border: 0;
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 0.84rem;
+    font-weight: 500;
+    text-align: left;
+    cursor: pointer;
+    transition: var(--transition-ui);
+}
+
+.deliv-nav-item:hover {
+    background: var(--bg-surface-hover);
     color: var(--text-primary);
 }
 
-.deliv-tally b.is-pass {
-    color: #34d399;
+.deliv-nav-item:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 1px;
 }
 
-.deliv-tally b.is-attention {
-    color: #fbbf24;
-}
-
-.deliv-group {
-    display: grid;
-    grid-template-columns: 190px minmax(0, 1fr);
-    gap: 30px;
-    padding: 20px 0;
-}
-
-.deliv-group + .deliv-group {
-    border-top: 1px solid var(--glass-border);
-}
-
-.deliv-group-count {
-    display: inline-block;
-    margin-top: 9px;
-    font-size: 0.7rem;
+.deliv-nav-item.is-active {
+    background: linear-gradient(135deg, rgba(83, 58, 253, 0.24), rgba(83, 58, 253, 0.08));
+    box-shadow: inset 0 0 0 1px rgba(139, 133, 255, 0.3);
+    color: var(--text-primary);
     font-weight: 600;
-    letter-spacing: 0.05em;
+}
+
+.deliv-nav-icon {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
+    border-radius: 8px;
+    background: var(--bg-surface-hover);
+    color: var(--text-muted);
+    transition: var(--transition-ui);
+}
+
+.deliv-nav-icon svg {
+    width: 15px;
+    height: 15px;
+}
+
+.deliv-nav-item.is-active .deliv-nav-icon {
+    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-deep) 100%);
+    color: #ffffff;
+    box-shadow: 0 4px 12px var(--primary-glow);
+}
+
+.deliv-nav-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.deliv-nav-count {
+    flex-shrink: 0;
+    min-width: 2.2em;
+    padding: 2px 7px;
+    border-radius: var(--radius-pill);
+    background: var(--bg-input);
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-align: center;
     font-variant-numeric: tabular-nums;
     color: var(--text-muted);
 }
 
-.deliv-group-count.has-attention {
-    color: #fbbf24;
+.deliv-nav-count.is-pass { color: var(--deliv-pass); }
+
+.deliv-nav-count.is-warn {
+    background: color-mix(in srgb, var(--deliv-warn) 14%, transparent);
+    color: var(--deliv-warn);
 }
 
-.deliv-group-label {
-    font-size: 0.83rem;
-    font-weight: 600;
-    letter-spacing: -0.01em;
-    color: var(--text-primary);
+.deliv-nav-count.is-fail {
+    background: color-mix(in srgb, var(--deliv-fail) 14%, transparent);
+    color: var(--deliv-fail);
 }
 
-.deliv-group-blurb {
-    margin-top: 6px;
-    font-size: 0.75rem;
+.deliv-nav-dirty {
+    display: none;
+    width: 7px;
+    height: 7px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    background: var(--primary-soft);
+    box-shadow: 0 0 0 3px var(--primary-subdued);
+}
+
+.deliv-nav-item.is-dirty .deliv-nav-dirty {
+    display: block;
+}
+
+.deliv-nav-help {
+    margin: 10px 2px 0;
+    padding: 12px 8px 4px;
+    border-top: 1px solid var(--glass-border);
+    font-size: 0.72rem;
     line-height: 1.55;
     color: var(--text-muted);
 }
 
-.deliv-checks {
-    list-style: none;
+.deliv-nav-help b {
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.deliv-panel {
     display: flex;
     flex-direction: column;
+    gap: 20px;
+    min-width: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .deliv-panel > .deliv-panel-card {
+        animation: delivPanelIn 0.32s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    @keyframes delivPanelIn {
+        from { opacity: 0; transform: translateY(6px); }
+        to { opacity: 1; transform: none; }
+    }
+}
+
+.deliv-panel-card {
+    padding: 0;
+    overflow: hidden;
+}
+
+.deliv-panel-head {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 22px 24px;
+    border-bottom: 1px solid var(--glass-border);
+}
+
+.deliv-panel-icon {
+    display: grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    flex-shrink: 0;
+    border-radius: 12px;
+    border: 1px solid rgba(139, 133, 255, 0.28);
+    background: linear-gradient(135deg, rgba(83, 58, 253, 0.26), rgba(83, 58, 253, 0.08));
+    color: var(--deliv-info);
+}
+
+.deliv-panel-icon svg {
+    width: 19px;
+    height: 19px;
+}
+
+.deliv-panel-icon.is-warn {
+    border-color: color-mix(in srgb, var(--deliv-warn) 35%, transparent);
+    background: color-mix(in srgb, var(--deliv-warn) 12%, transparent);
+    color: var(--deliv-warn);
+}
+
+.deliv-panel-icon.is-fail {
+    border-color: color-mix(in srgb, var(--deliv-fail) 35%, transparent);
+    background: color-mix(in srgb, var(--deliv-fail) 12%, transparent);
+    color: var(--deliv-fail);
+}
+
+.deliv-panel-titles {
+    flex: 1;
+    min-width: 0;
+}
+
+.deliv-panel-title {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: 1.14rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    color: var(--text-primary);
+}
+
+.deliv-panel-blurb {
+    margin-top: 3px;
+    max-width: 72ch;
+    font-size: 0.8rem;
+    line-height: 1.55;
+    color: var(--text-muted);
+}
+
+.deliv-panel-tally {
+    display: grid;
+    justify-items: end;
+    gap: 3px;
+    flex-shrink: 0;
+    text-align: right;
+}
+
+.deliv-panel-tally-num {
+    font-family: var(--font-display);
+    font-size: 1.45rem;
+    font-weight: 600;
+    line-height: 1;
+    letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
+}
+
+.deliv-panel-tally-num small {
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--text-muted);
+}
+
+.deliv-panel-tally.is-warn .deliv-panel-tally-num { color: var(--deliv-warn); }
+.deliv-panel-tally.is-fail .deliv-panel-tally-num { color: var(--deliv-fail); }
+
+.deliv-panel-tally-label {
+    font-size: 0.64rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.deliv-panel-bar {
+    display: block;
+    width: 86px;
+    height: 4px;
+    margin-top: 3px;
+    border-radius: var(--radius-pill);
+    background: var(--glass-border-hover);
+    overflow: hidden;
+}
+
+.deliv-panel-bar i {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--deliv-pass);
+}
+
+.deliv-panel-tally.is-warn .deliv-panel-bar i { background: var(--deliv-warn); }
+.deliv-panel-tally.is-fail .deliv-panel-bar i { background: var(--deliv-fail); }
+
+/* ── Check rows ────────────────────────────────────────────── */
+.deliv-checks {
+    list-style: none;
+    margin: 0;
+    padding: 0;
     min-width: 0;
 }
 
 .deliv-check {
+    position: relative;
     display: grid;
-    grid-template-columns: 18px minmax(0, 1fr) minmax(250px, 300px);
+    grid-template-columns: 30px minmax(0, 1fr) minmax(250px, 290px);
     gap: 14px 18px;
-    padding: 16px 12px;
-    margin: 0 -12px;
-    border-radius: var(--radius-md);
+    padding: 18px 24px;
     align-items: start;
-    transition: background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1),
-        box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-/* A staged (unsaved) row gets a quiet indigo wash + edge so the operator can
-   see what the save bar is about to write. */
-.deliv-check.is-dirty {
-    background: var(--primary-subdued);
-    box-shadow: inset 2px 0 0 var(--primary);
+    transition: background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .deliv-check + .deliv-check {
     border-top: 1px solid var(--glass-border);
 }
 
-.deliv-check.is-dirty + .deliv-check,
-.deliv-check + .deliv-check.is-dirty {
-    border-top-color: transparent;
+/* Edge rail: only rows that need a decision (or hold an unsaved edit) get one. */
+.deliv-check::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 14px;
+    bottom: 14px;
+    width: 3px;
+    border-radius: 0 3px 3px 0;
+    background: transparent;
 }
 
-/* Passing checks stay grey: nine green ticks in a column is decoration, not
-   information. Colour is spent on the rows that need a decision. */
+.deliv-check.is-warn {
+    background: linear-gradient(90deg, color-mix(in srgb, var(--deliv-warn) 7%, transparent), transparent 65%);
+}
+
+.deliv-check.is-warn::before { background: var(--deliv-warn); }
+
+.deliv-check.is-fail {
+    background: linear-gradient(90deg, color-mix(in srgb, var(--deliv-fail) 8%, transparent), transparent 65%);
+}
+
+.deliv-check.is-fail::before { background: var(--deliv-fail); }
+
+/* A staged (unsaved) row gets a quiet indigo wash + rail so the operator can
+   see what the save bar is about to write. */
+.deliv-check.is-dirty {
+    background: var(--primary-subdued);
+}
+
+.deliv-check.is-dirty::before {
+    background: var(--primary);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .deliv-check.is-flash {
+        animation: delivFlash 1.6s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    @keyframes delivFlash {
+        0%, 30% { box-shadow: inset 0 0 0 2px var(--primary-soft); }
+        100% { box-shadow: inset 0 0 0 2px transparent; }
+    }
+}
+
 .deliv-check-mark {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 18px;
-    height: 18px;
-    margin-top: 1px;
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    border: 1px solid var(--glass-border);
+    background: var(--bg-input);
     color: var(--text-muted);
-    opacity: 0.7;
 }
 
 .deliv-check-mark svg {
-    width: 15px;
-    height: 15px;
+    width: 14px;
+    height: 14px;
+}
+
+.deliv-check.is-pass .deliv-check-mark {
+    border-color: color-mix(in srgb, var(--deliv-pass) 26%, transparent);
+    background: color-mix(in srgb, var(--deliv-pass) 8%, transparent);
+    color: var(--deliv-pass);
 }
 
 .deliv-check.is-warn .deliv-check-mark {
-    color: #fbbf24;
-    opacity: 1;
+    border-color: color-mix(in srgb, var(--deliv-warn) 40%, transparent);
+    background: color-mix(in srgb, var(--deliv-warn) 15%, transparent);
+    color: var(--deliv-warn);
 }
 
 .deliv-check.is-fail .deliv-check-mark {
-    color: #ff5c8a;
-    opacity: 1;
+    border-color: color-mix(in srgb, var(--deliv-fail) 40%, transparent);
+    background: color-mix(in srgb, var(--deliv-fail) 15%, transparent);
+    color: var(--deliv-fail);
+}
+
+.deliv-check.is-info .deliv-check-mark {
+    color: var(--deliv-info);
 }
 
 .deliv-check-main {
     min-width: 0;
+    padding-top: 4px;
+}
+
+.deliv-check-group {
+    display: block;
+    margin-bottom: 4px;
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-muted);
 }
 
 .deliv-check-title {
@@ -4590,17 +5174,17 @@ td .tag {
 }
 
 .deliv-check-name {
-    font-size: 0.87rem;
+    font-size: 0.9rem;
     font-weight: 600;
     color: var(--text-primary);
     letter-spacing: -0.01em;
 }
 
 .deliv-check-desc {
-    margin-top: 4px;
+    margin-top: 5px;
     max-width: 68ch;
-    font-size: 0.78rem;
-    line-height: 1.55;
+    font-size: 0.79rem;
+    line-height: 1.6;
     color: var(--text-muted);
 }
 
@@ -4627,34 +5211,34 @@ td .tag {
     padding: 3px 9px;
     border-radius: var(--radius-pill);
     border: 1px solid var(--glass-border);
-    background: var(--bg-surface-hover);
+    background: var(--bg-input);
     color: var(--text-secondary);
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
 }
 
 .deliv-chip.is-wide {
-    max-width: 230px;
+    max-width: 260px;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
 .deliv-chip.is-bad {
     background: var(--danger-bg);
-    border-color: rgba(234, 34, 97, 0.32);
-    color: #ff5c8a;
+    border-color: color-mix(in srgb, var(--deliv-fail) 32%, transparent);
+    color: var(--deliv-fail);
 }
 
 .deliv-chip.is-warn {
     background: var(--warning-bg);
-    border-color: rgba(245, 158, 11, 0.32);
-    color: #fbbf24;
+    border-color: color-mix(in srgb, var(--deliv-warn) 32%, transparent);
+    color: var(--deliv-warn);
 }
 
 .deliv-chip.is-target {
     background: var(--success-bg);
-    border-color: rgba(16, 185, 129, 0.32);
-    color: #34d399;
+    border-color: color-mix(in srgb, var(--deliv-pass) 32%, transparent);
+    color: var(--deliv-pass);
 }
 
 .deliv-check-sev {
@@ -4669,21 +5253,24 @@ td .tag {
 }
 
 .deliv-check-sev.is-fail {
-    border-color: rgba(234, 34, 97, 0.32);
-    color: #ff5c8a;
+    border-color: color-mix(in srgb, var(--deliv-fail) 32%, transparent);
+    color: var(--deliv-fail);
 }
 
 .deliv-check-sev.is-warn {
-    border-color: rgba(245, 158, 11, 0.32);
-    color: #fbbf24;
+    border-color: color-mix(in srgb, var(--deliv-warn) 32%, transparent);
+    color: var(--deliv-warn);
 }
 
 .deliv-check-note {
     display: flex;
     align-items: flex-start;
-    gap: 7px;
+    gap: 8px;
     margin-top: 10px;
     max-width: 68ch;
+    padding: 9px 12px;
+    border-radius: var(--radius-md);
+    background: var(--deliv-inset);
     font-size: 0.76rem;
     line-height: 1.55;
     color: var(--text-secondary);
@@ -4692,11 +5279,16 @@ td .tag {
 .deliv-check-note svg {
     flex-shrink: 0;
     margin-top: 2px;
-    color: var(--primary-soft);
+    color: var(--deliv-info);
 }
 
 .deliv-check-note.is-warn svg {
-    color: #fbbf24;
+    color: var(--deliv-warn);
+}
+
+.deliv-check-note a {
+    color: var(--deliv-info);
+    font-weight: 600;
 }
 
 /* ── Row controls ──────────────────────────────────────────── */
@@ -4712,16 +5304,20 @@ td .tag {
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    min-height: 36px;
+    min-height: 40px;
     padding: 6px 8px 6px 12px;
     border: 1px solid var(--glass-border);
     border-radius: var(--radius-md);
     background: var(--bg-input);
-    transition: border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .deliv-field:hover {
     border-color: var(--glass-border-hover);
+}
+
+.deliv-field:focus-within {
+    border-color: rgba(139, 133, 255, 0.45);
 }
 
 .deliv-field-toggle {
@@ -4810,17 +5406,28 @@ td .tag {
 }
 
 .deliv-field .deliv-input.is-invalid {
-    border-color: #ff5c8a;
+    border-color: var(--deliv-fail);
     box-shadow: 0 0 0 3px var(--ruby-bg);
 }
 
 .deliv-readonly {
     align-self: flex-end;
-    font-size: 0.7rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border: 1px dashed var(--glass-border-hover);
+    border-radius: var(--radius-pill);
+    font-size: 0.66rem;
     font-weight: 600;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--text-muted);
+}
+
+.deliv-readonly svg {
+    width: 11px;
+    height: 11px;
 }
 
 /* ── Template coverage (footer unsubscribe link) ───────────── */
@@ -4849,6 +5456,7 @@ td .tag {
     margin-top: 8px;
     border: 1px solid var(--glass-border);
     border-radius: var(--radius-md);
+    background: var(--deliv-inset);
     overflow: hidden;
 }
 
@@ -4889,14 +5497,58 @@ td .tag {
     color: var(--text-muted);
 }
 
-.deliv-tpl-state.is-on { color: #34d399; }
+.deliv-tpl-state.is-on { color: var(--deliv-pass); }
 .deliv-tpl-state.is-off,
-.deliv-tpl-state.is-mixed { color: #fbbf24; }
+.deliv-tpl-state.is-mixed { color: var(--deliv-warn); }
 
 .deliv-tpl-foot {
     margin-top: 8px;
     font-size: 0.72rem;
     line-height: 1.55;
+    color: var(--text-muted);
+}
+
+/* ── "Why it matters" (group footnotes) ────────────────────── */
+.deliv-why {
+    padding: 20px 24px 24px;
+    border-top: 1px solid var(--glass-border);
+    background: var(--deliv-inset);
+}
+
+.deliv-why-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.deliv-why-title svg {
+    color: var(--deliv-info);
+}
+
+.deliv-why-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 14px 28px;
+    margin-top: 12px;
+}
+
+.deliv-note h3 {
+    margin: 0 0 6px;
+    font-size: 0.88rem;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    line-height: 1.35;
+    color: var(--text-primary);
+}
+
+.deliv-note p {
+    font-size: 0.78rem;
+    line-height: 1.62;
     color: var(--text-muted);
 }
 
@@ -4961,13 +5613,6 @@ td .tag {
     }
 }
 
-.deliv-legend {
-    padding-top: 16px;
-    border-top: 1px solid var(--glass-border);
-    font-size: 0.75rem;
-    color: var(--text-muted);
-}
-
 .deliv-error-notice {
     margin-bottom: 20px;
 }
@@ -4981,28 +5626,73 @@ td .tag {
 }
 
 /* ── Email format (HTML design ↔ plain text per campaign) ──── */
-.deliv-format {
-    margin-top: 24px;
+.deliv-format-compare {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    padding: 18px 24px 0;
 }
 
-.deliv-format-head {
-    padding-bottom: 14px;
-    border-bottom: 1px solid var(--glass-border);
+.deliv-format-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 14px;
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    background: var(--deliv-inset);
 }
 
-.deliv-format-head .deliv-sub {
-    max-width: 78ch;
-    line-height: 1.55;
+.deliv-format-option.is-recommended {
+    border-color: rgba(139, 133, 255, 0.3);
 }
 
-.deliv-format-head .deliv-sub b {
-    color: var(--text-secondary);
+.deliv-format-option-icon {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+    border-radius: 9px;
+    background: var(--primary-subdued);
+    color: var(--deliv-info);
+}
+
+.deliv-format-option b {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 8px;
+    font-size: 0.83rem;
     font-weight: 600;
+    color: var(--text-primary);
+}
+
+.deliv-format-option em {
+    padding: 1px 8px;
+    border-radius: var(--radius-pill);
+    background: color-mix(in srgb, var(--deliv-pass) 13%, transparent);
+    color: var(--deliv-pass);
+    font-style: normal;
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.deliv-format-option p {
+    margin-top: 3px;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    color: var(--text-muted);
 }
 
 .deliv-format-list {
     list-style: none;
-    border-bottom: 1px solid var(--glass-border);
+    margin: 16px 24px 0;
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
 }
 
 .deliv-format-row {
@@ -5010,7 +5700,12 @@ td .tag {
     align-items: center;
     justify-content: space-between;
     gap: 18px;
-    padding: 14px 0;
+    padding: 14px 16px;
+    transition: background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.deliv-format-row:hover {
+    background: var(--bg-surface-hover);
 }
 
 .deliv-format-row + .deliv-format-row {
@@ -5048,7 +5743,7 @@ td .tag {
 }
 
 .deliv-format-reason {
-    color: #fbbf24;
+    color: var(--deliv-warn);
 }
 
 .deliv-format-empty,
@@ -5059,12 +5754,12 @@ td .tag {
 }
 
 .deliv-format-empty {
-    padding: 18px 0 4px;
+    margin: 16px 24px 0;
 }
 
 .deliv-format-foot {
-    max-width: 78ch;
-    padding-top: 14px;
+    max-width: 82ch;
+    padding: 14px 24px 22px;
 }
 
 .deliv-format-static {
@@ -5076,8 +5771,9 @@ td .tag {
     color: var(--text-muted);
 }
 
-/* Two-option segmented switch. The active option carries the brand colour;
-   the track reuses the input surface so it reads as one control. */
+/* Two-option segmented switch (also used by the Bounces page's type filter).
+   The active option carries the brand colour; the track reuses the input
+   surface so it reads as one control. */
 .deliv-seg {
     display: inline-flex;
     flex-shrink: 0;
@@ -5126,53 +5822,6 @@ td .tag {
     outline-offset: 2px;
 }
 
-/* ── Field notes ───────────────────────────────────────────── */
-.deliv-notes {
-    margin-top: 24px;
-}
-
-.deliv-notes-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    margin-top: 6px;
-}
-
-.deliv-note {
-    padding: 18px 26px;
-    border-left: 1px solid var(--glass-border);
-}
-
-.deliv-note:first-child {
-    padding-left: 0;
-    border-left: 0;
-}
-
-.deliv-note:last-child {
-    padding-right: 0;
-}
-
-.deliv-note-index {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 0.7rem;
-    letter-spacing: 0.1em;
-    color: var(--text-muted);
-}
-
-.deliv-note h3 {
-    margin: 10px 0 7px;
-    font-size: 0.92rem;
-    font-weight: 600;
-    letter-spacing: -0.015em;
-    line-height: 1.35;
-    color: var(--text-primary);
-}
-
-.deliv-note p {
-    font-size: 0.8rem;
-    line-height: 1.62;
-    color: var(--text-muted);
-}
-
 /* ── Loading skeleton (matches the loaded layout, so nothing jumps) ── */
 .deliv-skel {
     display: block;
@@ -5180,18 +5829,20 @@ td .tag {
     background: var(--bg-surface-hover);
 }
 
+.deliv-skel-ring { width: 148px; height: 148px; border-radius: 50%; }
 .deliv-skel-eyebrow { width: 118px; height: 10px; }
-.deliv-skel-score { width: 146px; height: 46px; margin-top: 14px; border-radius: 10px; }
-.deliv-skel-meter { width: 100%; height: 6px; margin-top: 18px; }
-.deliv-skel-heading { width: 46%; height: 17px; }
+.deliv-skel-heading { width: 46%; height: 22px; margin-top: 14px; }
 .deliv-skel-copy { width: 100%; height: 11px; margin-top: 14px; }
 .deliv-skel-copy.short { width: 68%; }
+.deliv-skel-nav { height: 40px; border-radius: var(--radius-md); }
+.deliv-skel-nav + .deliv-skel-nav { margin-top: 6px; }
+.deliv-skel-panel { padding: 8px 24px; }
 
 .deliv-skel-row {
     display: grid;
-    grid-template-columns: 18px minmax(0, 1fr) 118px;
-    gap: 14px;
-    padding: 14px 0;
+    grid-template-columns: 30px minmax(0, 1fr) 160px;
+    gap: 16px;
+    padding: 18px 0;
     align-items: center;
 }
 
@@ -5199,9 +5850,9 @@ td .tag {
     border-top: 1px solid var(--glass-border);
 }
 
-.deliv-skel-mark { width: 15px; height: 15px; border-radius: 50%; }
+.deliv-skel-mark { width: 30px; height: 30px; border-radius: 50%; }
 .deliv-skel-line { height: 12px; }
-.deliv-skel-chip { height: 22px; border-radius: var(--radius-pill); }
+.deliv-skel-chip { height: 36px; border-radius: var(--radius-md); }
 
 @media (prefers-reduced-motion: no-preference) {
     .deliv-skel {
@@ -5218,110 +5869,184 @@ td .tag {
 }
 
 /* ── Light theme ───────────────────────────────────────────── */
-/* Light tokens need darker accents than the dark theme: the tints below are
-   pale fills, so #d97706 / #059669 / #dc2626 only reached 2.9–4.0:1 there.
-   These values clear WCAG AA (4.5:1) for 11–12px chip text. */
-[data-theme="light"] .deliv-tick.is-pass { background: #047857; }
-[data-theme="light"] .deliv-tick.is-warn { background: #d97706; }
-[data-theme="light"] .deliv-tick.is-fail { background: #dc2626; }
-[data-theme="light"] .deliv-profile-pill.matched .deliv-profile-dot { background: #047857; }
-[data-theme="light"] .deliv-profile-pill.unmatched { color: #a35a00; }
-[data-theme="light"] .deliv-profile-pill.unmatched .deliv-profile-dot { background: #a35a00; }
-[data-theme="light"] .deliv-tally b.is-pass { color: #047857; }
-[data-theme="light"] .deliv-tally b.is-attention { color: #a35a00; }
-[data-theme="light"] .deliv-group-count.has-attention { color: #a35a00; }
-[data-theme="light"] .deliv-check.is-warn .deliv-check-mark { color: #a35a00; }
-[data-theme="light"] .deliv-check.is-fail .deliv-check-mark { color: #b3123a; }
-[data-theme="light"] .deliv-chip.is-bad { color: #b3123a; }
-[data-theme="light"] .deliv-chip.is-warn { color: #a35a00; }
-[data-theme="light"] .deliv-chip.is-target { color: #047857; }
-[data-theme="light"] .deliv-check-sev.is-fail { color: #b3123a; }
-[data-theme="light"] .deliv-check-sev.is-warn { color: #a35a00; }
-[data-theme="light"] .deliv-tpl-state.is-on { color: #047857; }
-[data-theme="light"] .deliv-format-reason { color: #a35a00; }
-[data-theme="light"] .deliv-tpl-state.is-off,
-[data-theme="light"] .deliv-tpl-state.is-mixed { color: #a35a00; }
+/* Tones come from --deliv-* above; only brand-tinted text needs a nudge. */
 [data-theme="light"] .deliv-toggle-state,
 [data-theme="light"] .deliv-tpl-details summary { color: var(--primary); }
 [data-theme="light"] .deliv-field:has(input:not(:checked)) .deliv-toggle-state { color: var(--text-muted); }
-[data-theme="light"] .deliv-field .deliv-input.is-invalid { border-color: #b3123a; }
+[data-theme="light"] .deliv-hero::after { opacity: 0.3; }
+[data-theme="light"] .deliv-nav-item.is-active {
+    background: linear-gradient(135deg, rgba(83, 58, 253, 0.12), rgba(83, 58, 253, 0.04));
+    box-shadow: inset 0 0 0 1px rgba(83, 58, 253, 0.22);
+}
+[data-theme="light"] .deliv-panel-icon {
+    background: linear-gradient(135deg, rgba(83, 58, 253, 0.14), rgba(83, 58, 253, 0.04));
+}
 
 /* ── Responsive ────────────────────────────────────────────── */
-/* 1150px, not 900px: the sidebar takes 260px, so a 1150px viewport only leaves
-   ~830px of content — not enough for the rail + three columns + value chips.
-   Collapsing here keeps the full desktop layout on a real desktop. */
-@media (max-width: 1150px) {
-    .deliv-summary {
-        grid-template-columns: minmax(0, 1fr);
-        gap: 26px;
-    }
-    .deliv-summary-body {
-        border-left: 0;
-        padding-left: 0;
-        padding-top: 26px;
-        border-top: 1px solid var(--glass-border);
-    }
-    .deliv-group {
-        grid-template-columns: minmax(0, 1fr);
-        gap: 14px;
-    }
-    .deliv-group-rail {
-        display: flex;
-        align-items: baseline;
-        flex-wrap: wrap;
-        gap: 4px 12px;
-    }
-    .deliv-group-blurb {
-        flex-basis: 100%;
-        margin-top: 0;
-    }
-    .deliv-group-count {
-        margin-top: 0;
-    }
+/* The sidebar takes 260px and the section menu 260px more, so below ~1280px
+   the row's control column moves under the description instead of
+   squeezing it to a few words per line. */
+@media (max-width: 1280px) {
     .deliv-check {
-        grid-template-columns: 18px minmax(0, 1fr);
+        grid-template-columns: 30px minmax(0, 1fr);
         row-gap: 12px;
     }
     .deliv-check-controls {
         grid-column: 2;
-        max-width: 420px;
+        max-width: 440px;
     }
-    .deliv-notes-grid {
+    .deliv-readonly {
+        align-self: flex-start;
+    }
+    .deliv-presets {
         grid-template-columns: minmax(0, 1fr);
-    }
-    .deliv-note,
-    .deliv-note:first-child,
-    .deliv-note:last-child {
-        padding: 18px 0 0;
-        border-left: 0;
-    }
-    .deliv-note + .deliv-note {
-        margin-top: 18px;
-        border-top: 1px solid var(--glass-border);
+        gap: 14px;
     }
     .deliv-skel-row {
-        grid-template-columns: 18px minmax(0, 1fr);
+        grid-template-columns: 30px minmax(0, 1fr);
     }
     .deliv-skel-chip {
         display: none;
     }
 }
 
+/* The menu becomes a horizontal, scrollable strip above the panel. */
+@media (max-width: 1100px) {
+    .deliv-hero-main {
+        grid-template-columns: auto minmax(0, 1fr);
+    }
+    .deliv-hero-meta {
+        grid-column: 1 / -1;
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px 14px;
+        padding-top: 18px;
+        border-top: 1px solid var(--glass-border);
+        text-align: left;
+    }
+    .deliv-hero-meta .btn {
+        margin: 0 0 0 auto;
+    }
+    .deliv-layout {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 16px;
+    }
+    .deliv-nav {
+        position: static;
+    }
+    .deliv-nav-inner {
+        flex-direction: row;
+        gap: 4px;
+        padding: 6px;
+        overflow-x: auto;
+        scrollbar-width: none;
+    }
+    .deliv-nav-inner::-webkit-scrollbar { display: none; }
+    .deliv-nav-title,
+    .deliv-nav-help {
+        display: none;
+    }
+    .deliv-nav-item {
+        width: auto;
+        flex-shrink: 0;
+        padding: 6px 10px 6px 6px;
+    }
+    .deliv-nav-icon {
+        width: 26px;
+        height: 26px;
+    }
+    .deliv-nav-label {
+        overflow: visible;
+    }
+}
+
 @media (max-width: 768px) {
-    .deliv-summary {
-        padding: 22px;
+    .deliv-hero-main {
+        grid-template-columns: minmax(0, 1fr);
+        justify-items: center;
+        gap: 22px;
+        padding: 26px 20px 22px;
+        text-align: center;
+    }
+    .deliv-hero-top,
+    .deliv-issues {
+        justify-content: center;
+    }
+    .deliv-verdict {
+        font-size: 1.28rem;
+    }
+    .deliv-hero-meta {
+        width: 100%;
+        justify-content: center;
+    }
+    .deliv-hero-meta .btn {
+        margin: 0;
+    }
+    .deliv-ring {
+        width: 128px;
+        height: 128px;
     }
     .deliv-score-value {
-        font-size: 2.6rem;
+        font-size: 2.5rem;
     }
-    .deliv-audit-head .page-actions {
-        margin-left: 0;
-        width: 100%;
-        justify-content: space-between;
+    .deliv-stats {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .deliv-stat {
+        padding: 14px 20px;
+    }
+    .deliv-stat:nth-child(3) {
+        border-left: 0;
+    }
+    .deliv-stat:nth-child(n + 3) {
+        border-top: 1px solid var(--glass-border);
+    }
+    .deliv-presets {
+        padding: 18px 20px 20px;
+    }
+    .deliv-preset-grid,
+    .deliv-format-compare {
+        grid-template-columns: minmax(0, 1fr);
+    }
+    .deliv-panel-head {
+        flex-wrap: wrap;
+        align-items: flex-start;
+        padding: 18px 18px;
+    }
+    .deliv-panel-titles {
+        flex-basis: calc(100% - 58px);
+    }
+    .deliv-panel-tally {
+        flex-direction: row;
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        padding-left: 58px;
+    }
+    .deliv-panel-bar {
+        align-self: center;
+    }
+    .deliv-check {
+        padding: 16px 18px;
     }
     .deliv-check-controls {
         grid-column: 1 / -1;
         max-width: none;
+    }
+    .deliv-why {
+        padding: 18px;
+    }
+    .deliv-format-compare {
+        padding: 16px 18px 0;
+    }
+    .deliv-format-list,
+    .deliv-format-empty {
+        margin-left: 18px;
+        margin-right: 18px;
+    }
+    .deliv-format-foot {
+        padding: 14px 18px 20px;
     }
     .deliv-format-row {
         flex-direction: column;

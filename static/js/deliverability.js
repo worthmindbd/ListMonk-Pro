@@ -2,19 +2,26 @@
  * Deliverability & Safety Module for ListMonk Pro.
  * Pre-flight audit, scorecard, 1-click presets — and a control on every row.
  *
- * The audit renders as check groups (the taxonomy is served by the API's
- * `groups` field). Each row carries the control that changes its setting:
- * edits are staged locally and written together from the sticky save bar,
- * because every ListMonk settings write reloads the ListMonk app. A passing
- * check stays quiet so colour is only spent on the rows that need a decision.
+ * Layout: a hero (score ring, verdict, tallies, presets) above a two-pane
+ * body. The left pane is a section menu — "Needs attention", "All checks",
+ * one entry per audit group (the taxonomy is served by the API's `groups`
+ * field) and "Email format" — and the right pane shows the chosen section as
+ * its own card. The section rides in the hash (`#/deliverability?section=…`).
+ *
+ * Each row carries the control that changes its setting: edits are staged
+ * locally and written together from the sticky save bar, because every
+ * ListMonk settings write reloads the ListMonk app. Staged edits survive a
+ * section switch (controls render from `pending`), and the menu marks the
+ * sections that hold one. A passing check stays quiet so colour is only spent
+ * on the rows that need a decision.
  *
  * Two unsubscribe controls exist on purpose: the List-Unsubscribe *header*
  * (a ListMonk setting, invisible in the message body) and the footer *link*
  * (markup in the campaign templates, toggled via /unsubscribe-link).
  *
- * The "Email format" card switches each campaign between its HTML design and
- * a plain-text version. Unlike the settings rows it applies immediately: it
- * only swaps a template (no ListMonk reload) and is undone by switching back.
+ * The "Email format" section switches each campaign between its HTML design
+ * and a plain-text version. Unlike the settings rows it applies immediately:
+ * it only swaps a template (no ListMonk reload) and is undone by switching back.
  */
 const Deliverability = {
     checklistData: null,
@@ -31,11 +38,19 @@ const Deliverability = {
     switchingFormat: null,
     // Keys whose input currently holds an unparseable value (blocks Save).
     invalid: new Set(),
+    // Section shown in the right pane ('attention', 'all', a group id, 'format').
+    section: null,
 
-    async render() {
+    /**
+     * `keepSection` is passed by the page's own re-renders (refresh, preset):
+     * App.routeQuery() still holds the query of the original navigation, so
+     * reading it again would undo a section chosen since.
+     */
+    async render({ keepSection = false } = {}) {
         // applyPreset()/save() re-render after an await; if the user navigated
         // away in the meantime, painting over the new page would be wrong.
         if (App.currentPage !== 'deliverability') return;
+        if (!keepSection) this.section = App.routeQuery().get('section') || null;
         const fresh = this._fresh === true;
         this._fresh = false;
         this._seq = App.seq();
@@ -58,8 +73,8 @@ const Deliverability = {
             this.formats = formats;
             this.checkedAt = new Date();
             if (App.stale(this._seq)) return;
-            // Before painting: the audit header draws its Refresh button
-            // disabled while loading, and used to stay disabled for good.
+            // Before painting: the hero draws its Refresh button disabled
+            // while loading, and used to stay disabled for good.
             this.isLoading = false;
             this.renderPage();
         } catch (err) {
@@ -72,28 +87,29 @@ const Deliverability = {
     },
 
     loadingHtml() {
-        const block = `<div class="deliv-skel-row"><span class="deliv-skel deliv-skel-mark"></span><span class="deliv-skel deliv-skel-line"></span><span class="deliv-skel deliv-skel-chip"></span></div>`;
+        const row = `<div class="deliv-skel-row"><span class="deliv-skel deliv-skel-mark"></span><span class="deliv-skel deliv-skel-line"></span><span class="deliv-skel deliv-skel-chip"></span></div>`;
+        const navItem = `<span class="deliv-skel deliv-skel-nav"></span>`;
         return `
-            <div class="card deliv-summary" aria-busy="true">
-                <div class="deliv-summary-score">
-                    <span class="deliv-skel deliv-skel-eyebrow"></span>
-                    <span class="deliv-skel deliv-skel-score"></span>
-                    <span class="deliv-skel deliv-skel-meter"></span>
-                </div>
-                <div class="deliv-summary-body">
-                    <span class="deliv-skel deliv-skel-heading"></span>
-                    <span class="deliv-skel deliv-skel-copy"></span>
-                    <span class="deliv-skel deliv-skel-copy short"></span>
+            <div class="card deliv-hero" aria-busy="true">
+                <div class="deliv-hero-main">
+                    <span class="deliv-skel deliv-skel-ring"></span>
+                    <div class="deliv-hero-copy">
+                        <span class="deliv-skel deliv-skel-eyebrow"></span>
+                        <span class="deliv-skel deliv-skel-heading"></span>
+                        <span class="deliv-skel deliv-skel-copy"></span>
+                        <span class="deliv-skel deliv-skel-copy short"></span>
+                    </div>
                 </div>
             </div>
-            <div class="card deliv-audit" aria-busy="true">
-                ${block.repeat(6)}
+            <div class="deliv-layout" aria-busy="true">
+                <div class="deliv-nav"><div class="deliv-nav-inner">${navItem.repeat(6)}</div></div>
+                <div class="card deliv-panel-card deliv-skel-panel">${row.repeat(5)}</div>
             </div>
         `;
     },
 
-    renderPage() {
-        if (this._seq !== undefined && App.stale(this._seq)) return;
+    /** Counts and buckets every view of the page is drawn from. */
+    model() {
         const data = this.checklistData || {};
         const checks = Array.isArray(data.checks) ? data.checks : [];
         const groups = Array.isArray(data.groups) ? data.groups : [];
@@ -103,15 +119,17 @@ const Deliverability = {
         const passing = scored.filter(c => c.status === 'pass').length;
         const failing = scored.filter(c => c.status === 'fail');
         const warning = scored.filter(c => c.status === 'warn');
+        // Failures first: the attention view is a to-do list, worst on top.
         const unresolved = failing.concat(warning);
+        const infoCount = checks.length - scored.length;
         const isOptimal = score === 100 && scored.length > 0;
 
         // Groups arrive with label/blurb; a check whose group id is unknown
         // (older API, new rule) still renders instead of vanishing.
-        const order = groups.length ? groups : [{ id: null, label: 'Checks', blurb: '' }];
+        const order = groups.length ? groups : [{ id: 'checks', label: 'Checks', blurb: '' }];
         const seen = new Set();
         const buckets = order.map(g => {
-            const items = g.id
+            const items = groups.length
                 ? checks.filter(c => (c.group || null) === g.id)
                 : checks;
             items.forEach(c => seen.add(c.id));
@@ -124,41 +142,64 @@ const Deliverability = {
                 items: orphans,
             });
         }
+        const filled = buckets.filter(b => b.items.length);
+        const groupOf = {};
+        filled.forEach(b => b.items.forEach(c => { groupOf[c.id] = b.group; }));
+
+        return {
+            data, checks, score, scored, passing, failing, warning, unresolved,
+            infoCount, isOptimal, buckets: filled, groupOf,
+        };
+    },
+
+    /** The section to show: the requested one if it exists, else a default. */
+    resolveSection(m) {
+        const valid = new Set(['all', 'format', ...m.buckets.map(b => b.group.id)]);
+        if (m.unresolved.length) valid.add('attention');
+        if (this.section && valid.has(this.section)) return this.section;
+        if (m.unresolved.length) return 'attention';
+        return m.buckets.length ? m.buckets[0].group.id : 'all';
+    },
+
+    renderPage() {
+        if (this._seq !== undefined && App.stale(this._seq)) return;
+        const m = this.model();
+        this._model = m;
+        this.section = this.resolveSection(m);
 
         let html = '';
-
-        if (data.error) {
+        if (m.data.error) {
             html += `
                 <div class="notice notice-warning deliv-error-notice">
                     ${_dSvgIcon('alert')}
                     <div>
                         <strong>Listmonk settings could not be read.</strong>
                         The audit below is empty — fix the connection and refresh.
-                        <div class="deliv-error-detail">${App.escapeHtml(data.error)}</div>
+                        <div class="deliv-error-detail">${App.escapeHtml(m.data.error)}</div>
                     </div>
                 </div>
             `;
         }
 
-        html += this.summaryHtml({ score, scored, passing, unresolved, isOptimal, checks });
-        html += this.formatHtml();
-        html += this.auditHtml({ buckets, passing, scored, unresolved });
-        html += this.notesHtml();
-        html += `<div class="deliv-savebar" id="delivSavebar" role="region" aria-label="Unsaved deliverability changes" hidden></div>`;
+        html += this.heroHtml(m);
+        html += `
+            <div class="deliv-layout">
+                <nav class="deliv-nav" aria-label="Deliverability sections">${this.navHtml(m)}</nav>
+                <div class="deliv-panel" id="delivPanel">${this.panelHtml(m)}</div>
+            </div>
+            <div class="deliv-savebar" id="delivSavebar" role="region" aria-label="Unsaved deliverability changes" hidden></div>
+        `;
 
         App.setContent(html);
         this.refreshDirty();
     },
 
-    /* ── Summary ─────────────────────────────────────────────────────────── */
+    /* ── Hero ────────────────────────────────────────────────────────────── */
 
-    summaryHtml({ score, scored, passing, unresolved, isOptimal, checks }) {
-        const infoCount = checks.filter(c => c.status === 'info').length;
-
-        const ticks = scored.map(c => {
-            const meta = _dStatusMeta(c.status);
-            return `<span class="deliv-tick is-${c.status}" title="${App.escapeHtml(c.name)} — ${meta.label}"></span>`;
-        }).join('');
+    heroHtml(m) {
+        const { score, scored, passing, failing, warning, unresolved, infoCount, isOptimal } = m;
+        const newsletter = m.data.mode === 'newsletter';
+        const tone = !scored.length ? 'is-empty' : (isOptimal ? 'is-optimal' : (score >= 70 ? 'is-good' : 'is-poor'));
 
         let verdict;
         let note;
@@ -167,130 +208,310 @@ const Deliverability = {
             note = 'Listmonk returned no readable settings, so no checks could be scored.';
         } else if (isOptimal) {
             verdict = 'Everything scored is in place';
-            note = 'Every setting this audit scores matches the cold-outreach profile: no tracking pixels, a working opt-out in header and footer, and cadence paced by hand.';
+            note = newsletter
+                ? 'Every scored setting is in place for newsletter sending: a working opt-out in header and footer, clean list hygiene and a healthy sending reputation.'
+                : 'Every setting this audit scores matches the cold-outreach profile: no tracking pixels, a working opt-out in header and footer, and cadence paced by hand.';
         } else {
-            verdict = `${unresolved.length} of ${scored.length} scored checks need a decision`;
+            verdict = `${unresolved.length} of ${scored.length} scored ${scored.length === 1 ? 'check needs' : 'checks need'} a decision`;
             note = 'Change any setting with the control on its row, then save once — or apply a preset to set the sending-engine parameters in one step.';
         }
 
-        const unresolvedNames = unresolved.slice(0, 3).map(c => App.escapeHtml(c.name));
-        const more = unresolved.length > 3 ? ` +${unresolved.length - 3} more` : '';
+        const chips = unresolved.slice(0, 4).map(c => `
+            <button type="button" class="deliv-issue-chip is-${c.status}" onclick="Deliverability.focusCheck(${App.escapeHtml(JSON.stringify(String(c.id)))})">
+                <span class="deliv-issue-dot" aria-hidden="true"></span>${App.escapeHtml(c.name)}
+            </button>`).join('');
+        const more = unresolved.length > 4
+            ? `<button type="button" class="deliv-issue-more" onclick="Deliverability.selectSection('attention')">+${unresolved.length - 4} more</button>`
+            : '';
+
+        const profile = newsletter
+            ? `<span class="deliv-profile-pill is-mode"><span class="deliv-profile-dot" aria-hidden="true"></span>Newsletter mode</span>`
+            : `<span class="deliv-profile-pill ${isOptimal ? 'matched' : 'unmatched'}"><span class="deliv-profile-dot" aria-hidden="true"></span>${isOptimal ? 'Cold-email profile matched' : 'Cold-email profile not matched'}</span>`;
+
+        const stat = (cls, n, label) => `
+            <div class="deliv-stat ${cls} ${n ? '' : 'is-zero'}">
+                <span class="deliv-stat-num">${n}</span>
+                <span class="deliv-stat-label">${label}</span>
+            </div>`;
+
+        const checkedAt = this.checkedAt
+            ? this.checkedAt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+            : '';
 
         return `
-            <section class="card deliv-summary ${isOptimal ? 'is-optimal' : 'needs-work'}">
-                <div class="deliv-summary-score">
-                    <div class="deliv-eyebrow">Deliverability score</div>
-                    <div class="deliv-score-line">
-                        <span class="deliv-score-value">${score}</span>
-                        <span class="deliv-score-max">/ 100</span>
+            <section class="card deliv-hero ${tone}" aria-labelledby="delivVerdict">
+                <div class="deliv-hero-main">
+                    ${this.ringHtml(score, scored.length)}
+                    <div class="deliv-hero-copy">
+                        <div class="deliv-hero-top">
+                            <span class="deliv-eyebrow">Deliverability score</span>
+                            ${profile}
+                        </div>
+                        <h2 class="deliv-verdict" id="delivVerdict">${verdict}</h2>
+                        <p class="deliv-verdict-note">${note}</p>
+                        ${chips ? `<div class="deliv-issues" aria-label="Checks that need a decision">${chips}${more}</div>` : ''}
                     </div>
-                    <div class="deliv-meter" aria-hidden="true">${ticks}</div>
-                    <div class="deliv-score-caption">
-                        <strong>${passing}</strong> of ${scored.length} scored checks passing
-                        ${infoCount ? `<span class="deliv-score-note">${infoCount} informational ${infoCount === 1 ? 'check' : 'checks'} reported, not scored</span>` : ''}
-                    </div>
-                </div>
-
-                <div class="deliv-summary-body">
-                    <div class="deliv-profile-pill ${isOptimal ? 'matched' : 'unmatched'}">
-                        <span class="deliv-profile-dot" aria-hidden="true"></span>
-                        ${isOptimal ? 'Cold-email profile matched' : 'Cold-email profile not matched'}
-                    </div>
-                    <h2 class="deliv-verdict">${verdict}</h2>
-                    <p class="deliv-verdict-note">${note}</p>
-                    ${unresolved.length ? `<p class="deliv-verdict-list">${unresolvedNames.join(' · ')}${more}</p>` : ''}
-
-                    <div class="deliv-preset-row">
-                        ${isOptimal
-                            ? `<button type="button" class="btn btn-secondary" disabled>
-                                   ${_dSvgIcon('check')}
-                                   Cold-email preset active
-                               </button>`
-                            : `<button type="button" class="btn btn-success" onclick="Deliverability.applyPreset('cold_email')">
-                                   ${_dSvgIcon('send')}
-                                   Apply cold-email preset
-                               </button>`}
-                        <button type="button" class="btn btn-secondary" onclick="Deliverability.applyPreset('newsletter')">
-                            Switch to newsletter
-                        </button>
-                    </div>
-                    <p class="deliv-preset-hint">Presets change tracking, batching, concurrency and public pages. They never touch the footer link, bounce mailboxes or upload types.</p>
-                </div>
-            </section>
-        `;
-    },
-
-    /* ── Audit ───────────────────────────────────────────────────────────── */
-
-    auditHtml({ buckets, passing, scored, unresolved }) {
-        let html = `
-            <section class="card deliv-audit">
-                <header class="card-header deliv-audit-head">
-                    <div>
-                        <h2 class="card-title">Settings &amp; pre-flight audit</h2>
-                        <p class="deliv-sub">
-                            Read live from Listmonk${this.checkedAt ? ` · checked ${this.checkedAt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}` : ''}
-                        </p>
-                    </div>
-                    <div class="page-actions">
-                        <span class="deliv-tally">
-                            <span><b class="is-pass">${passing}</b> passing</span>
-                            <span><b class="${unresolved.length ? 'is-attention' : ''}">${unresolved.length}</b> attention</span>
-                        </span>
+                    <div class="deliv-hero-meta">
+                        <span class="deliv-live"><span class="deliv-live-dot" aria-hidden="true"></span>Read live from Listmonk</span>
+                        ${checkedAt ? `<span class="deliv-checked">Checked ${App.escapeHtml(checkedAt)}</span>` : ''}
                         <button type="button" class="btn btn-sm btn-secondary" onclick="Deliverability.refresh()" ${this.isLoading ? 'disabled' : ''}>
                             ${_dSvgIcon('refresh')}
                             Refresh
                         </button>
                     </div>
-                </header>
-        `;
+                </div>
 
-        if (!buckets.some(b => b.items.length)) {
-            html += `<div class="empty-state"><h2>No checks reported</h2><p>Listmonk returned an empty audit.</p></div>`;
-        } else {
-            buckets.filter(b => b.items.length).forEach(b => {
-                html += this.groupHtml(b.group, b.items);
-            });
-        }
+                <div class="deliv-stats">
+                    ${stat('is-pass', passing, 'Passing')}
+                    ${stat('is-warn', warning.length, warning.length === 1 ? 'Warning' : 'Warnings')}
+                    ${stat('is-fail', failing.length, 'Failing')}
+                    ${stat('is-info', infoCount, 'Info only')}
+                </div>
 
-        html += `
-                <p class="deliv-legend">
-                    Changes are staged until you press <b>Save changes</b>. Informational rows are context, not verdicts — they never affect the score.
-                </p>
+                ${this.presetsHtml(isOptimal && !newsletter)}
             </section>
         `;
+    },
+
+    /** Circular gauge. The arc is drawn with stroke-dasharray, so 0 and 100 are exact. */
+    ringHtml(score, scoredCount) {
+        const r = 52;
+        const c = 2 * Math.PI * r;
+        const pct = Math.max(0, Math.min(100, score));
+        const dash = (c * pct) / 100;
+        return `
+            <div class="deliv-ring" role="img" aria-label="Score ${pct} out of 100">
+                <svg viewBox="0 0 120 120" aria-hidden="true">
+                    <defs>
+                        <linearGradient id="delivRingGrad" x1="0" y1="0" x2="1" y2="1">
+                            <stop offset="0%" class="deliv-ring-stop-a"/>
+                            <stop offset="100%" class="deliv-ring-stop-b"/>
+                        </linearGradient>
+                    </defs>
+                    <circle class="deliv-ring-track" cx="60" cy="60" r="${r}"/>
+                    ${pct > 0 ? `<circle class="deliv-ring-arc" cx="60" cy="60" r="${r}"
+                        stroke-dasharray="${dash.toFixed(2)} ${c.toFixed(2)}" transform="rotate(-90 60 60)"/>` : ''}
+                </svg>
+                <div class="deliv-ring-value">
+                    <span class="deliv-score-value">${scoredCount ? pct : '—'}</span>
+                    <span class="deliv-score-max">/ 100</span>
+                </div>
+            </div>
+        `;
+    },
+
+    presetsHtml(coldActive) {
+        return `
+            <div class="deliv-presets">
+                <div class="deliv-presets-head">
+                    <span class="deliv-eyebrow">One-click presets</span>
+                    <p class="deliv-preset-hint">Presets set the sending engine and tracking in one step. They never touch the footer link, bounce mailboxes or upload types.</p>
+                </div>
+                <div class="deliv-preset-grid">
+                    <article class="deliv-preset ${coldActive ? 'is-active' : ''}">
+                        <div class="deliv-preset-icon">${_dSvgIcon('send')}</div>
+                        <div class="deliv-preset-body">
+                            <div class="deliv-preset-title">
+                                Cold email
+                                ${coldActive ? `<span class="deliv-preset-badge">${_dSvgIcon('check')}Active</span>` : ''}
+                            </div>
+                            <p>Tracking off, one worker, small batches, public pages off. Reads like a personal email.</p>
+                        </div>
+                        ${coldActive
+                            ? ''
+                            : `<button type="button" class="btn btn-sm btn-primary" onclick="Deliverability.applyPreset('cold_email')">Apply</button>`}
+                    </article>
+                    <article class="deliv-preset">
+                        <div class="deliv-preset-icon">${_dSvgIcon('mail')}</div>
+                        <div class="deliv-preset-body">
+                            <div class="deliv-preset-title">Newsletter</div>
+                            <p>Open &amp; click tracking on, two workers, batches of 1,000 for opted-in lists.</p>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="Deliverability.applyPreset('newsletter')">Apply</button>
+                    </article>
+                </div>
+            </div>
+        `;
+    },
+
+    /* ── Section menu ────────────────────────────────────────────────────── */
+
+    /** Passed/scored tally of a group; a group with no scored rule counts its rows. */
+    groupTally(items) {
+        const scoredItems = items.filter(c => c.status !== 'info');
+        const passed = scoredItems.filter(c => c.status === 'pass').length;
+        const status = scoredItems.some(c => c.status === 'fail') ? 'fail'
+            : (scoredItems.some(c => c.status === 'warn') ? 'warn'
+                : (scoredItems.length ? 'pass' : 'info'));
+        return { scored: scoredItems.length, passed, total: items.length, status };
+    },
+
+    navHtml(m) {
+        const item = (id, icon, label, count, countCls = '') => {
+            const active = this.section === id;
+            return `
+                <button type="button" class="deliv-nav-item ${active ? 'is-active' : ''}" data-section="${App.escapeHtml(id)}"
+                    ${active ? 'aria-current="true"' : ''} onclick="Deliverability.selectSection(${App.escapeHtml(JSON.stringify(id))})">
+                    <span class="deliv-nav-icon" aria-hidden="true">${icon}</span>
+                    <span class="deliv-nav-label">${App.escapeHtml(label)}</span>
+                    <span class="deliv-nav-dirty" title="Unsaved changes" aria-hidden="true"></span>
+                    ${count !== '' ? `<span class="deliv-nav-count ${countCls}">${count}</span>` : ''}
+                </button>`;
+        };
+
+        let html = '<div class="deliv-nav-inner">';
+        if (m.unresolved.length) {
+            html += item('attention', _dSvgIcon('alert'), 'Needs attention', m.unresolved.length,
+                m.failing.length ? 'is-fail' : 'is-warn');
+        }
+        html += item('all', _dSvgIcon('list'), 'All checks', m.checks.length);
+        if (m.buckets.length) html += `<div class="deliv-nav-title">Audit</div>`;
+        m.buckets.forEach(b => {
+            const t = this.groupTally(b.items);
+            const count = t.scored ? `${t.passed}/${t.scored}` : `${t.total}`;
+            html += item(b.group.id, _dGroupIcon(b.group.id), b.group.label, count, `is-${t.status}`);
+        });
+        const campaigns = Array.isArray((this.formats || {}).campaigns) ? this.formats.campaigns.length : '';
+        html += `<div class="deliv-nav-title">Campaigns</div>`;
+        html += item('format', _dSvgIcon('mail'), 'Email format', campaigns);
+        html += `
+            <p class="deliv-nav-help">
+                Edits are staged until you press <b>Save changes</b>. Info rows give context and never affect the score.
+            </p>
+        </div>`;
         return html;
+    },
+
+    selectSection(id) {
+        const m = this._model || this.model();
+        this.section = id;
+        this.section = this.resolveSection(m);
+        App.syncUrl('deliverability', { section: this.section });
+        // An input holding an unparseable value is about to leave the DOM;
+        // its staged value was already dropped, so only the flag remains.
+        this.invalid = new Set();
+
+        document.querySelectorAll('.deliv-nav-item').forEach(btn => {
+            const on = btn.dataset.section === this.section;
+            btn.classList.toggle('is-active', on);
+            if (on) btn.setAttribute('aria-current', 'true');
+            else btn.removeAttribute('aria-current');
+        });
+        const panel = document.getElementById('delivPanel');
+        if (panel) panel.innerHTML = this.panelHtml(m);
+        this.refreshDirty();
+
+        // On narrow screens the menu sits above the panel: bring the panel
+        // into view when its top has scrolled away.
+        if (panel && panel.getBoundingClientRect().top < 0) {
+            panel.scrollIntoView({ block: 'start', behavior: _dMotion() ? 'smooth' : 'auto' });
+        }
+        const activeBtn = document.querySelector('.deliv-nav-item.is-active');
+        if (activeBtn && activeBtn.scrollIntoView && window.matchMedia('(max-width: 1100px)').matches) {
+            activeBtn.scrollIntoView({ block: 'nearest', inline: 'center', behavior: _dMotion() ? 'smooth' : 'auto' });
+        }
+    },
+
+    /** Jump from a hero chip to its row in the attention list and flash it. */
+    focusCheck(id) {
+        this.selectSection('attention');
+        const row = document.querySelector(`.deliv-check[data-check="${CSS.escape(id)}"]`);
+        if (!row) return;
+        row.scrollIntoView({ block: 'center', behavior: _dMotion() ? 'smooth' : 'auto' });
+        row.classList.remove('is-flash');
+        void row.offsetWidth;
+        row.classList.add('is-flash');
+        setTimeout(() => row.classList.remove('is-flash'), 1800);
+    },
+
+    /* ── Panels ──────────────────────────────────────────────────────────── */
+
+    panelHtml(m) {
+        switch (this.section) {
+            case 'format':
+                return this.formatHtml();
+            case 'attention':
+                return this.attentionHtml(m);
+            case 'all':
+                if (!m.buckets.length) return this.emptyAuditHtml();
+                return m.buckets.map(b => this.groupHtml(b.group, b.items)).join('');
+            default: {
+                const bucket = m.buckets.find(b => b.group.id === this.section);
+                return bucket ? this.groupHtml(bucket.group, bucket.items) : this.emptyAuditHtml();
+            }
+        }
+    },
+
+    emptyAuditHtml() {
+        return `<section class="card deliv-panel-card"><div class="empty-state"><h2>No checks reported</h2><p>Listmonk returned an empty audit.</p></div></section>`;
+    },
+
+    panelHeadHtml({ icon, title, blurb, tally, tone = '' }) {
+        return `
+            <header class="deliv-panel-head">
+                <span class="deliv-panel-icon ${tone}" aria-hidden="true">${icon}</span>
+                <div class="deliv-panel-titles">
+                    <h2 class="deliv-panel-title">${App.escapeHtml(title)}</h2>
+                    ${blurb ? `<p class="deliv-panel-blurb">${blurb}</p>` : ''}
+                </div>
+                ${tally || ''}
+            </header>
+        `;
+    },
+
+    attentionHtml(m) {
+        const rows = m.unresolved.map(c => this.checkRowHtml(c, m.groupOf[c.id])).join('');
+        return `
+            <section class="card deliv-panel-card">
+                ${this.panelHeadHtml({
+                    icon: _dSvgIcon('alert'),
+                    title: 'Needs attention',
+                    blurb: 'Failing checks first, then warnings. Change a setting on its row and save once from the bar below.',
+                    tone: m.failing.length ? 'is-fail' : 'is-warn',
+                    tally: `<div class="deliv-panel-tally ${m.failing.length ? 'is-fail' : 'is-warn'}">
+                                <span class="deliv-panel-tally-num">${m.unresolved.length}</span>
+                                <span class="deliv-panel-tally-label">to review</span>
+                            </div>`,
+                })}
+                <ul class="deliv-checks">${rows}</ul>
+            </section>
+        `;
     },
 
     groupHtml(group, items) {
         // Keep the server's order inside a group: related controls (the
         // header and the footer link) must stay next to each other, and rows
         // must not jump around while their toggles are being flipped.
-        const scoredItems = items.filter(c => c.status !== 'info');
-        const needsWork = scoredItems.some(c => c.status === 'fail' || c.status === 'warn');
-        const passed = scoredItems.filter(c => c.status === 'pass').length;
-
-        // The count is rendered "passed / scored". A group with no scored rules
-        // (all informational) shows the raw item count instead of a fake 0/0.
-        const total = scoredItems.length || items.length;
-
+        const t = this.groupTally(items);
+        const pct = t.scored ? Math.round((t.passed / t.scored) * 100) : 0;
+        const tally = t.scored
+            ? `<div class="deliv-panel-tally is-${t.status}">
+                   <span class="deliv-panel-tally-num">${t.passed}<small>/${t.scored}</small></span>
+                   <span class="deliv-panel-tally-label">passing</span>
+                   <span class="deliv-panel-bar" aria-hidden="true"><i style="width:${pct}%"></i></span>
+               </div>`
+            : `<div class="deliv-panel-tally is-info">
+                   <span class="deliv-panel-tally-num">${t.total}</span>
+                   <span class="deliv-panel-tally-label">informational</span>
+               </div>`;
         const rows = items.map(c => this.checkRowHtml(c)).join('');
 
         return `
-            <div class="deliv-group">
-                <div class="deliv-group-rail">
-                    <h3 class="deliv-group-label">${App.escapeHtml(group.label)}</h3>
-                    ${group.blurb ? `<p class="deliv-group-blurb">${App.escapeHtml(group.blurb)}</p>` : ''}
-                    <span class="deliv-group-count ${needsWork ? 'has-attention' : ''}">
-                        ${scoredItems.length ? passed : ''} ${scoredItems.length ? '/' : ''} ${total}
-                    </span>
-                </div>
+            <section class="card deliv-panel-card" data-group="${App.escapeHtml(group.id || '')}">
+                ${this.panelHeadHtml({
+                    icon: _dGroupIcon(group.id),
+                    title: group.label,
+                    blurb: group.blurb ? App.escapeHtml(group.blurb) : '',
+                    tally,
+                    tone: t.status === 'fail' || t.status === 'warn' ? `is-${t.status}` : '',
+                })}
                 <ul class="deliv-checks">${rows}</ul>
-            </div>
+                ${this.notesHtml(group.id)}
+            </section>
         `;
     },
 
-    checkRowHtml(check) {
+    checkRowHtml(check, group = null) {
         const meta = _dStatusMeta(check.status);
         const severity = check.status === 'fail' || check.status === 'warn' ? this.severityLabel(check.impact) : '';
         const target = check.status === 'pass' || check.status === 'info' ? '' : this.targetLabel(check);
@@ -302,6 +523,7 @@ const Deliverability = {
             <li class="deliv-check is-${check.status}" data-check="${App.escapeHtml(check.id)}">
                 <span class="deliv-check-mark" aria-hidden="true">${meta.glyph}</span>
                 <div class="deliv-check-main">
+                    ${group ? `<span class="deliv-check-group">${App.escapeHtml(group.label)}</span>` : ''}
                     <div class="deliv-check-title">
                         <span class="deliv-check-name">${App.escapeHtml(check.name)}</span>
                         ${severity ? `<span class="deliv-check-sev is-${check.status}" title="${App.escapeHtml(check.impact)}">${severity}</span>` : ''}
@@ -319,7 +541,7 @@ const Deliverability = {
                 <div class="deliv-check-controls">
                     ${controls.length
                         ? controls.map(ctl => this.controlHtml(ctl)).join('')
-                        : `<span class="deliv-readonly">Read-only</span>`}
+                        : `<span class="deliv-readonly">${_dSvgIcon('lock')}Read-only</span>`}
                 </div>
             </li>
         `;
@@ -677,6 +899,22 @@ const Deliverability = {
             const dirty = keys.some(k => k in this.pending || this.invalid.has(k));
             row.classList.toggle('is-dirty', dirty);
         });
+        // Staged edits can sit in a section that is not on screen: the menu
+        // marks every section holding one.
+        const m = this._model;
+        if (m) {
+            const sections = new Set();
+            Object.entries(DELIV_CONTROLS).forEach(([checkId, ctls]) => {
+                if (!ctls.some(c => c.key in this.pending || this.invalid.has(c.key))) return;
+                const group = m.groupOf[checkId];
+                if (!group) return;
+                sections.add(group.id).add('all');
+                if (m.unresolved.some(c => c.id === checkId)) sections.add('attention');
+            });
+            document.querySelectorAll('.deliv-nav-item').forEach(btn => {
+                btn.classList.toggle('is-dirty', sections.has(btn.dataset.section));
+            });
+        }
         // Fields that only apply while a parent toggle is on (sliding window).
         Object.values(DELIV_CONTROLS).flat().filter(c => c.dependsOn).forEach(ctl => {
             const el = document.querySelector(`[data-key="${CSS.escape(ctl.key)}"]`);
@@ -736,7 +974,7 @@ const Deliverability = {
         }
         // Also re-run the sending-reputation DNS checks (15-minute cache).
         this._fresh = true;
-        await this.render();
+        await this.render({ keepSection: true });
     },
 
     discard() {
@@ -830,26 +1068,40 @@ const Deliverability = {
         const rows = Array.isArray(data.campaigns) ? data.campaigns : [];
         let body;
         if (data.error) {
-            body = `<p class="deliv-check-note is-warn">${_dSvgIcon('alert')}<span>Campaigns could not be read: ${App.escapeHtml(data.error)}</span></p>`;
+            body = `<p class="deliv-check-note is-warn deliv-format-empty">${_dSvgIcon('alert')}<span>Campaigns could not be read: ${App.escapeHtml(data.error)}</span></p>`;
         } else if (!rows.length) {
             body = `<p class="deliv-format-empty">No draft, scheduled, paused or running campaigns. Finished campaigns keep the format they were sent with.</p>`;
         } else {
             body = `<ul class="deliv-format-list">${rows.map(r => this.formatRowHtml(r)).join('')}</ul>`;
         }
+        const plain = rows.filter(r => r.format === 'plain' || r.format === 'text').length;
+        const tally = rows.length
+            ? `<div class="deliv-panel-tally is-info">
+                   <span class="deliv-panel-tally-num">${plain}<small>/${rows.length}</small></span>
+                   <span class="deliv-panel-tally-label">plain text</span>
+               </div>`
+            : '';
         return `
-            <section class="card deliv-format" id="delivFormat">
-                <header class="deliv-format-head">
-                    <div>
-                        <h2 class="card-title">Email format</h2>
-                        <p class="deliv-sub">
-                            <b>HTML design</b> sends your branded template: logo, layout, colours.
-                            <b>Plain text</b> sends the same message the way a typed email looks, with no images or layout, plus a text-only part. Plain text usually lands better for cold outreach.
-                        </p>
+            <section class="card deliv-panel-card deliv-format" id="delivFormat">
+                ${this.panelHeadHtml({
+                    icon: _dSvgIcon('mail'),
+                    title: 'Email format',
+                    blurb: 'Choose per campaign how the message is built. Applies immediately — no save needed.',
+                    tally,
+                })}
+                <div class="deliv-format-compare">
+                    <div class="deliv-format-option">
+                        <span class="deliv-format-option-icon" aria-hidden="true">${_dSvgIcon('layout')}</span>
+                        <div><b>HTML design</b><p>Your branded template: logo, layout, colours.</p></div>
                     </div>
-                </header>
+                    <div class="deliv-format-option is-recommended">
+                        <span class="deliv-format-option-icon" aria-hidden="true">${_dSvgIcon('type')}</span>
+                        <div><b>Plain text <em>best for cold outreach</em></b><p>The same message the way a typed email looks, plus a text-only part.</p></div>
+                    </div>
+                </div>
                 ${body}
                 <p class="deliv-format-foot">
-                    Switching applies immediately and keeps the list, subject and schedule. The first switch to plain text builds a plain version of the campaign's template (named “… · plain”); each campaign remembers both versions, so you can switch back and forth.
+                    Switching keeps the list, subject and schedule. The first switch to plain text builds a plain version of the campaign's template (named “… · plain”); each campaign remembers both versions, so you can switch back and forth.
                 </p>
             </section>
         `;
@@ -921,28 +1173,21 @@ const Deliverability = {
 
     /* ── Field notes ─────────────────────────────────────────────────────── */
 
-    notesHtml() {
+    /** "Why it matters" notes shown at the foot of the group they explain. */
+    notesHtml(groupId) {
+        const notes = DELIV_NOTES[groupId];
+        if (!notes || !notes.length) return '';
         return `
-            <section class="card deliv-notes">
-                <h2 class="card-title">Why these rules exist</h2>
-                <div class="deliv-notes-grid">
-                    <article class="deliv-note">
-                        <span class="deliv-note-index">01</span>
-                        <h3>Tracking pixels cost more than they return</h3>
-                        <p>Google and Microsoft weigh 1&times;1 pixels and redirect wrappers heavily. In cold outreach the open rate is the wrong prize: removing them makes the message indistinguishable from a personal reply, which is what primary-inbox placement rewards.</p>
-                    </article>
-                    <article class="deliv-note">
-                        <span class="deliv-note-index">02</span>
-                        <h3>Header and footer are two different exits</h3>
-                        <p>The <code>List-Unsubscribe</code> header is what mail clients turn into their own one-click button — Gmail and Yahoo require it from bulk senders. The footer link is the one written into your template. A prospect who finds neither presses <em>Report spam</em>, and complaints are what sink a sending domain.</p>
-                    </article>
-                    <article class="deliv-note">
-                        <span class="deliv-note-index">03</span>
-                        <h3>A steady drip beats a fast burst</h3>
-                        <p>Batches of 100 at a single worker spread sends evenly, so no provider sees a spike. A spike is the most common trigger for temporary throttling, and a throttled domain keeps losing deliverability after the campaign ends.</p>
-                    </article>
+            <div class="deliv-why">
+                <div class="deliv-why-title">${_dSvgIcon('book')}Why it matters</div>
+                <div class="deliv-why-grid">
+                    ${notes.map(n => `
+                        <article class="deliv-note">
+                            <h3>${n.title}</h3>
+                            <p>${n.body}</p>
+                        </article>`).join('')}
                 </div>
-            </section>
+            </div>
         `;
     },
 
@@ -962,7 +1207,7 @@ const Deliverability = {
             await API.post('/api/deliverability/apply-preset', { mode }, API.LONG_TIMEOUT);
             App.closeModal();
             App.toast(`Successfully applied ${modeName} preset!`, 'success');
-            await this.render();
+            await this.render({ keepSection: true });
         } catch (err) {
             App.closeModal();
             // API.request already surfaced the server message.
@@ -1020,6 +1265,26 @@ const DELIV_RAW_FIELDS = {
     'upload.extensions': 'upload_extensions',
 };
 
+/** Background for a group's rules (static, trusted markup). */
+const DELIV_NOTES = {
+    privacy: [
+        {
+            title: 'Tracking pixels cost more than they return',
+            body: 'Google and Microsoft weigh 1&times;1 pixels and redirect wrappers heavily. In cold outreach the open rate is the wrong prize: removing them makes the message indistinguishable from a personal reply, which is what primary-inbox placement rewards.',
+        },
+        {
+            title: 'Header and footer are two different exits',
+            body: 'The <code>List-Unsubscribe</code> header is what mail clients turn into their own one-click button — Gmail and Yahoo require it from bulk senders. The footer link is the one written into your template. A prospect who finds neither presses <em>Report spam</em>, and complaints are what sink a sending domain.',
+        },
+    ],
+    sending: [
+        {
+            title: 'A steady drip beats a fast burst',
+            body: 'Small batches through a single worker spread sends evenly, so no provider sees a spike. A spike is the most common trigger for temporary throttling, and a throttled domain keeps losing deliverability after the campaign ends.',
+        },
+    ],
+};
+
 function _dFindControl(key) {
     for (const list of Object.values(DELIV_CONTROLS)) {
         const hit = list.find(c => c.key === key);
@@ -1038,6 +1303,17 @@ const DELIVERABILITY_GLYPHS = {
 };
 
 const DELIVERABILITY_ICONS = {
+    list: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>',
+    mail: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg>',
+    lock: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
+    layout: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>',
+    type: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>',
+    book: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4h6a4 4 0 0 1 4 4v13a3 3 0 0 0-3-3H2z"/><path d="M22 4h-6a4 4 0 0 0-4 4v13a3 3 0 0 1 3-3h7z"/></svg>',
+    eyeOff: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.4 10.4 0 0 1 12 5c7 0 10 7 10 7a13.2 13.2 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.5 13.5 0 0 0 2 12s3 7 10 7a9.7 9.7 0 0 0 5.39-1.61"/><line x1="2" y1="2" x2="22" y2="22"/></svg>',
+    gauge: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>',
+    sparkle: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.8L20 10.7l-6.1 1.9L12 18.5l-1.9-5.9L4 10.7l6.1-1.9z"/><path d="M19 17v4"/><path d="M17 19h4"/></svg>',
+    shield: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>',
+    globe: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>',
     refresh: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>',
     check: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
     send: '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 2 15 22 11 13 2 9 22 2"/><line x1="22" y1="2" x2="11" y2="13"/></svg>',
@@ -1047,6 +1323,17 @@ const DELIVERABILITY_ICONS = {
 
 function _dSvgIcon(name) {
     return DELIVERABILITY_ICONS[name] || '';
+}
+
+/** Menu / panel icon for an audit group id. */
+function _dGroupIcon(groupId) {
+    const map = { privacy: 'eyeOff', sending: 'gauge', hygiene: 'sparkle', reputation: 'shield', surface: 'globe' };
+    return _dSvgIcon(map[groupId] || 'list');
+}
+
+/** False when the operator asked for reduced motion. */
+function _dMotion() {
+    return !(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 }
 
 function _dStatusMeta(status) {

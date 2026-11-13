@@ -76,8 +76,9 @@ ListMonk-Pro/
 │   │   ├── campaigns.js           # Campaign management (incl. plain-text alt body), status transitions, test sends
 │   │   ├── charts.js              # Mode-aware dashboard overview charts & stat summary cards
 │   │   ├── converter.js           # CSV converter UI, column mapping, live preview & import modal
-│   │   ├── deliverability.js      # Deliverability audit with a control per setting (staged edits + save bar), 1-click presets
-│   │   │                          #   & per-campaign Email format switch (HTML design / Plain text)
+│   │   ├── deliverability.js      # Deliverability audit: score-ring hero + preset cards, sticky section menu (Needs attention /
+│   │   │                          #   All / one per audit group / Email format, deep link ?section=) beside one panel; a control per
+│   │   │                          #   setting (staged edits survive section switches + save bar) & per-campaign Email format switch
 │   │   ├── lists.js               # List management, modal forms, tag pills, subscriber drill-down & exports
 │   │   ├── replies.js             # Replies inbox: sentiment tabs, list + pinned reading pane, hot lead flagging, bulk triage
 │   │   ├── settings.js            # Settings UI: send window scheduler, sending warm-up (plan form, live meter, ramp chart), email cleanup schedule, auto-unblock
