@@ -58,7 +58,7 @@ ListMonk Pro adapts instantly between two distinct marketing disciplines with a 
 ### Dual-Source Unsubscribe Engine
 - **IMAP Reply Monitor** — Scans your inbox hourly for unsubscribe keywords (`"Remove me"`, `"Unsubscribe me"`, `"Exclude me"`).
 - **Quote-Stripping Filter** — Strips quoted reply history and template headers so footer text (e.g. *"Reply with 'Remove me'"*) never triggers false positives.
-- **Link Unsubscribe Scanner** — Polls ListMonk lists for subscribers who clicked the direct unsubscribe link.
+- **Link Unsubscribe Scanner** — Polls ListMonk lists for subscribers who clicked the direct unsubscribe link. It remembers which lists it already handled, so an unblocked contact (whose lists the blocklisting left unsubscribed), a restored contact after Undo, or unsubscribes made by this app are never mistaken for a click, while a re-subscribed contact's next click still counts.
 - **List-Aware Campaign Attribution** — Attributes unsubscribes to campaigns that actually targeted the subscriber's lists.
 - **Automated Actions** — Automatically removes the contact from all lists and optionally blocklists them (toggleable in Settings).
 - **Undo / Reset Flow** — Restore unsubscribed contacts back to their original lists, re-enable their status, and clear restored log entries in one click.

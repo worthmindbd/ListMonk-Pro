@@ -6,7 +6,7 @@ from app.services.export_service import aiter_dicts_to_csv
 from app.services.bulk_ops import parse_ids
 from app.services.search_query import build_ilike_search
 from app.services import blocklist_registry, email_cleanup
-from app.services.unsubscribe_log import add_link_seen
+from app.services.unsubscribe_log import add_link_seen, forget_link_seen_lists
 
 router = APIRouter()
 
@@ -197,10 +197,14 @@ async def modify_list_memberships(data: dict):
         # bare API call gets the same mailable default the importer uses.
         payload["status"] = "confirmed"
     result = await listmonk.modify_list_memberships(payload)
-    if action == "unsubscribe":
+    if action == "unsubscribe" or payload.get("status") == "unsubscribed":
         # Made here, not by a link click: tell the link scanner so it does not
         # log these as link unsubscribes and cascade them over every list.
         await add_link_seen({sid: target_list_ids for sid in ids})
+    else:
+        # Subscribed again (or the membership is gone): a later unsubscribe
+        # from these lists is a new click the link scanner must act on.
+        await forget_link_seen_lists({sid: target_list_ids for sid in ids})
     return result
 
 
@@ -220,16 +224,46 @@ async def blocklist_subscribers(data: dict):
     return result
 
 
+def _unsubscribed_list_ids(subscriber: dict) -> list[int]:
+    """Lists the subscriber is ``unsubscribed`` from (blocklisting sets all)."""
+    return [
+        lst["id"] for lst in (subscriber.get("lists") or [])
+        if isinstance(lst, dict) and isinstance(lst.get("id"), int)
+        and lst.get("subscription_status") == "unsubscribed"
+    ]
+
+
+async def _before_unblock(subscriber_id: int, current: dict) -> None:
+    """Re-enabling keeps the subscriptions ListMonk's blocklisting marked
+    ``unsubscribed``. Those are leftovers, not link clicks: registered first,
+    or the next link scan logged a fake unsubscribe (and, with the blocklist
+    toggle on, blocklisted the person the user had just unblocked)."""
+    leftovers = _unsubscribed_list_ids(current)
+    if leftovers:
+        await add_link_seen({subscriber_id: leftovers})
+
+
 @router.put("/{subscriber_id}")
 async def update_subscriber(subscriber_id: int, data: dict):
-    result = await listmonk.update_subscriber(subscriber_id, data)
     status = data.get("status") if isinstance(data, dict) else None
-    if status == "blocklisted":
+    # The Edit form always sends the status, so only a CHANGE is a decision:
+    # saving a renamed lead used to stamp a "manual unblock" (hiding their
+    # hard bounces from the cleanup) or mark a bounce-blocklisted lead as
+    # deliberately blocklisted (out of auto-unblock's reach for good).
+    current = {}
+    if status in ("blocklisted", "enabled"):
+        current = (await listmonk.get_subscriber(subscriber_id)).get("data") or {}
+    was_blocklisted = current.get("status") == "blocklisted"
+    if status == "enabled" and was_blocklisted:
+        await _before_unblock(subscriber_id, current)
+    result = await listmonk.update_subscriber(subscriber_id, data)
+    if status == "blocklisted" and current and not was_blocklisted:
         blocklist_registry.mark([subscriber_id])
-    elif status == "enabled":
+    elif status == "enabled" and was_blocklisted:
         # Re-enabled by hand: the earlier deliberate blocklisting is over, and
         # bounces from before this decision must not re-blocklist them.
-        blocklist_registry.record_unblock([subscriber_id], [data.get("email")])
+        blocklist_registry.record_unblock(
+            [subscriber_id], [data.get("email"), current.get("email")])
     return result
 
 
@@ -248,7 +282,8 @@ async def unblock_subscriber(subscriber_id: int):
     attributes and list memberships are echoed back unchanged (omitting
     ``lists`` would drop every membership). Subscriptions that the blocklisting
     marked ``unsubscribed`` stay that way: re-subscribing is a separate,
-    deliberate choice made from the Edit form or the list actions.
+    deliberate choice made from the Edit form or the list actions — and are
+    registered with the link scanner first (see ``_before_unblock``).
     """
     current = (await listmonk.get_subscriber(subscriber_id)).get("data") or {}
     if not current:
@@ -265,6 +300,7 @@ async def unblock_subscriber(subscriber_id: int):
             if isinstance(lst, dict) and isinstance(lst.get("id"), int)
         ],
     }
+    await _before_unblock(subscriber_id, current)
     result = await listmonk.update_subscriber(subscriber_id, payload)
     # The deliberate blocklisting is over; auto-unblock rules no longer apply,
     # and the scheduled cleanup must not blocklist them again over a hard

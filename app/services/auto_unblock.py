@@ -16,7 +16,7 @@ import logging
 from datetime import datetime, timezone
 from app.services.listmonk_client import ListMonkClient, listmonk as listmonk_singleton
 from app.services import blocklist_registry
-from app.services.unsubscribe_log import load_log, _load_processed_list
+from app.services.unsubscribe_log import load_log, _load_processed_list, add_link_seen
 
 logger = logging.getLogger("auto_unblock")
 
@@ -45,6 +45,10 @@ QUERY_BLOCKLISTED_CLICKERS = QUERY_BLOCKLISTED_ENGAGED
 # engaged-blocklisted set take minutes (and hold the manual-run request open).
 UNBLOCK_CONCURRENCY = 10
 BOUNCE_DELETE_CONCURRENCY = 10
+
+# One run at a time: "Run now" and the six-hourly loop used to overlap, both
+# re-enabling the same contacts and the second one failing every bounce delete.
+_RUN_LOCK = asyncio.Lock()
 
 
 def _suppressed_emails() -> set[str]:
@@ -168,6 +172,20 @@ async def unblock_subscribers(client: ListMonkClient, subscribers: list[dict]) -
     """
     sem = asyncio.Semaphore(UNBLOCK_CONCURRENCY)
 
+    # ListMonk's blocklisting marked every subscription "unsubscribed", and
+    # re-enabling leaves them so. Registered with the link scanner first:
+    # otherwise its next run logged each re-enabled contact as a link
+    # unsubscribe (and, with the blocklist toggle on, blocklisted it again).
+    leftovers = {
+        s["id"]: [
+            l["id"] for l in (s.get("lists") or [])
+            if isinstance(l, dict) and isinstance(l.get("id"), int)
+            and l.get("subscription_status") == "unsubscribed"
+        ]
+        for s in subscribers if isinstance(s.get("id"), int)
+    }
+    await add_link_seen({sid: lists for sid, lists in leftovers.items() if lists})
+
     # Step 1: Re-enable all subscribers
     async def _unblock(s: dict) -> tuple[str, int, bool]:
         """Returns (email, subscriber_id, success)."""
@@ -211,27 +229,38 @@ async def unblock_subscribers(client: ListMonkClient, subscribers: list[dict]) -
     }
 
 
+def _empty_result() -> dict:
+    return {"success": 0, "failed": 0, "bounces_deleted": 0, "unblocked": [],
+            "message": "No blocklisted engaged subscribers found",
+            "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+async def run_once(client: ListMonkClient) -> dict:
+    """Find and unblock the candidates, one run at a time (``_RUN_LOCK``).
+
+    A run that waited for another one re-reads the candidates, so it never
+    acts on contacts the first run already re-enabled.
+    """
+    async with _RUN_LOCK:
+        subs = await find_blocklisted_engaged(client)
+        if not subs:
+            logger.info("No blocklisted engaged subscribers found")
+            return _empty_result()
+        logger.info(f"Found {len(subs)} blocklisted engaged subscriber(s) to unblock")
+        return await unblock_subscribers(client, subs)
+
+
 async def run_auto_unblock() -> dict:
     """Main entry point: find and unblock all blocklisted engaged subscribers.
     Uses the singleton client when available, falls back to creating one."""
     try:
-        subs = await find_blocklisted_engaged(listmonk_singleton)
-        if not subs:
-            logger.info("No blocklisted engaged subscribers found")
-            return {"success": 0, "failed": 0, "bounces_deleted": 0,
-                    "unblocked": [], "timestamp": datetime.now(timezone.utc).isoformat()}
-        logger.info(f"Found {len(subs)} blocklisted engaged subscriber(s) to unblock")
-        return await unblock_subscribers(listmonk_singleton, subs)
+        return await run_once(listmonk_singleton)
     except RuntimeError:
         # Singleton not started (CLI usage) — create standalone client
         client = ListMonkClient()
         await client.start()
         try:
-            subs = await find_blocklisted_engaged(client)
-            if not subs:
-                return {"success": 0, "failed": 0, "bounces_deleted": 0,
-                        "unblocked": [], "timestamp": datetime.now(timezone.utc).isoformat()}
-            return await unblock_subscribers(client, subs)
+            return await run_once(client)
         finally:
             await client.close()
 

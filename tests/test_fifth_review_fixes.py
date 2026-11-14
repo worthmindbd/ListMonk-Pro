@@ -224,7 +224,9 @@ def test_blocklisting_through_the_api_is_registered(client):
             patch.object(subs_router.listmonk, "blocklist_subscriber",
                          AsyncMock(return_value={"data": True})), \
             patch.object(subs_router.listmonk, "update_subscriber",
-                         AsyncMock(return_value={"data": {}})):
+                         AsyncMock(return_value={"data": {}})), \
+            patch.object(subs_router.listmonk, "get_subscriber",
+                         AsyncMock(return_value={"data": {"id": 4, "status": "blocklisted"}})):
         assert client.put("/api/subscribers/blocklist", json={"ids": [3, 4]}).status_code == 200
         assert client.put("/api/subscribers/8/blocklist").status_code == 200
         assert blocklist_registry.load() == {3, 4, 8}

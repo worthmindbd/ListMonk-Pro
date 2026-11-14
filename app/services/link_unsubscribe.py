@@ -14,7 +14,7 @@ from app.services.imap_helpers import campaign_has_sent, campaign_send_dt
 from app.services.listmonk_client import ListMonkClient
 from app.services.unsubscribe_log import (
     append_log, load_settings, load_processed_emails, mark_processed,
-    load_link_seen, add_link_seen,
+    load_link_seen, update_link_seen,
 )
 
 logger = logging.getLogger("link_unsubscribe")
@@ -57,6 +57,47 @@ async def _bounce_rules_unsubscribe(client: ListMonkClient) -> bool:
         isinstance(rule, dict) and rule.get("action") == "unsubscribe"
         for rule in actions.values()
     )
+
+# Remembered subscribers the scan did not meet (no unsubscribed list left)
+# are looked up by id, this many per ListMonk query.
+SEEN_LOOKUP_CHUNK = 500  # ~3.5 KB of ids per URL
+
+
+async def _resubscribed_lists(client: ListMonkClient, sids: list[int]) -> dict[int, set[int]]:
+    """Subscriber id -> list ids subscribed (not ``unsubscribed``) right now.
+
+    Only non-blocklisted subscribers with at least one active subscription
+    come back, so the answer stays small. A failed lookup only postpones the
+    correction to the next scan.
+    """
+    out: dict[int, set[int]] = {}
+    for i in range(0, len(sids), SEEN_LOOKUP_CHUNK):
+        chunk = [sid for sid in sids[i:i + SEEN_LOOKUP_CHUNK] if isinstance(sid, int)]
+        if not chunk:
+            continue
+        query = (
+            f"subscribers.id IN ({','.join(str(sid) for sid in chunk)}) "
+            "AND subscribers.status != 'blocklisted' AND EXISTS (SELECT 1 FROM "
+            "subscriber_lists sl WHERE sl.subscriber_id = subscribers.id "
+            "AND sl.status != 'unsubscribed')"
+        )
+        try:
+            res = await client.get_subscribers(1, len(chunk), query)
+        except Exception as e:
+            logger.warning(f"[LINK] Could not check remembered subscribers: {e}")
+            continue
+        data = res.get("data") if isinstance(res, dict) else None
+        rows = data.get("results") if isinstance(data, dict) else None
+        for sub in rows if isinstance(rows, list) else []:
+            if not isinstance(sub, dict) or not isinstance(sub.get("id"), int):
+                continue
+            out[sub["id"]] = {
+                l["id"] for l in sub.get("lists") or []
+                if isinstance(l, dict) and isinstance(l.get("id"), int)
+                and (l.get("subscription_status") or "") != "unsubscribed"
+            }
+    return out
+
 
 _link_scan_lock = asyncio.Lock()
 _link_scan_running = False
@@ -341,6 +382,7 @@ async def _scan_link_unsubscribes_impl(client: ListMonkClient) -> dict:
     processed = 0
     link_seen = load_link_seen()
     seen_updates: dict[int, set] = {}
+    seen_forget: dict[int, set] = {}
 
     for sid, entry in sub_map.items():
         sub = entry["sub"]
@@ -348,7 +390,21 @@ async def _scan_link_unsubscribes_impl(client: ListMonkClient) -> dict:
         email = (sub.get("email") or "").lower()
         if not email:
             continue
+        sub_list_objs = [l for l in (sub.get("lists") or []) if isinstance(l, dict) and l.get("id")]
+        sub_lists = [l["id"] for l in sub_list_objs]
+        active_lists = [
+            l["id"] for l in sub_list_objs
+            if (l.get("subscription_status") or "") != "unsubscribed"
+        ]
         seen = link_seen.get(sid)
+        if seen is not None:
+            # A remembered list that is subscribed again (re-import, a manual
+            # re-add in ListMonk) is no longer handled: the next click on it
+            # is a new unsubscribe, which the memory used to hide for good.
+            resubscribed = seen & set(active_lists)
+            if resubscribed:
+                seen_forget[sid] = resubscribed
+                seen = seen - resubscribed
         if seen is None and email in processed_emails:
             # Handled before this memory existed (or by the IMAP scanner):
             # what is unsubscribed now is the baseline, not a new click.
@@ -359,14 +415,8 @@ async def _scan_link_unsubscribes_impl(client: ListMonkClient) -> dict:
             continue
 
         new_found += 1
-        sub_list_objs = [l for l in (sub.get("lists") or []) if isinstance(l, dict) and l.get("id")]
-        sub_lists = [l["id"] for l in sub_list_objs]
         # Lists still active get the cascade. Undo restores those plus the
         # lists this click unsubscribed, never ones the person left earlier.
-        active_lists = [
-            l["id"] for l in sub_list_objs
-            if (l.get("subscription_status") or "") != "unsubscribed"
-        ]
         lists_removed = [lid for lid in sub_lists if lid in active_lists or lid in fresh_lists]
 
         try:
@@ -423,8 +473,18 @@ async def _scan_link_unsubscribes_impl(client: ListMonkClient) -> dict:
     if new_records:
         await append_log(new_records)
         await mark_processed(r["email"] for r in new_records)
-    if seen_updates:
-        await add_link_seen(seen_updates)
+    # Remembered subscribers this scan did not meet have no unsubscribed list
+    # left (or are blocklisted / bounced): those re-subscribed to a remembered
+    # list are found by id, so their next click on it counts.
+    absent = [sid for sid, lists in link_seen.items() if lists and sid not in sub_map]
+    if absent:
+        for sid, active in (await _resubscribed_lists(client, absent)).items():
+            resubscribed = link_seen.get(sid, set()) & active
+            if resubscribed:
+                seen_forget[sid] = resubscribed
+
+    if seen_updates or seen_forget:
+        await update_link_seen(add=seen_updates, remove=seen_forget)
 
     return {
         "scanned_lists": scanned_lists,

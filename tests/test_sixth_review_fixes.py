@@ -286,7 +286,7 @@ async def test_link_scan_filters_bounced_subscribers_when_settings_are_unreadabl
     assert lm.queries and all(q == lu.QUERY_NOT_BOUNCED for q in lm.queries)
 
 
-def test_undo_all_forgets_the_link_scanner_memory(client):
+def test_undo_all_forgets_the_restored_lists_in_the_link_scanner_memory(client):
     from app.routers import unsubscribes as unsub_router
     from app.services import unsubscribe_log
 
@@ -303,7 +303,9 @@ def test_undo_all_forgets_the_link_scanner_memory(client):
             patch.object(lm, "update_subscriber", AsyncMock(return_value={})), \
             patch.object(lm, "modify_list_memberships", AsyncMock(return_value={})):
         assert client.post("/api/unsubscribes/reset").json()["restored"] == 1
-    assert unsubscribe_log.load_link_seen() == {}
+    # The restored list is forgotten; the (now empty) entry is kept so the
+    # next click counts instead of being baselined.
+    assert unsubscribe_log.load_link_seen() == {2: set()}
 
 
 def test_undo_all_keeps_the_registry_mark_when_reenabling_fails(client):

@@ -26,7 +26,7 @@ from app.services.listmonk_client import ListMonkClient
 from app.services.unsubscribe_log import (
     load_log, save_log, append_log, load_settings,
     load_processed_emails, mark_processed,
-    load_examined_ids, mark_examined_ids, examined_state_exists,
+    load_examined_ids, mark_examined_ids, examined_state_exists, add_link_seen,
     _log_lock,
 )
 from app.services.imap_helpers import (
@@ -953,13 +953,26 @@ async def scan_and_unsubscribe(client: ListMonkClient) -> dict:
                                 "target_list_ids": active_lists,
                                 "status": "unsubscribed",
                             })
+                            # Made by this engine, not a link click: the link
+                            # scanner logged a second ("link") record for the
+                            # same opt-out when it remembered the subscriber.
+                            await add_link_seen({sub_id: active_lists})
 
-                        # Conditionally blocklist based on user setting
+                        # Conditionally blocklist based on user setting. The
+                        # opt-out itself is done: a failed blocklist is a
+                        # partial success, as in the link scanner. Raising
+                        # here logged nothing, the link scan then recorded the
+                        # request as a link unsubscribe and the retry skipped
+                        # it as handled.
                         scan_settings = load_settings()
-                        blocklisted_now = bool(scan_settings.get("blocklist_enabled", False))
-                        if blocklisted_now:
-                            await client.blocklist_subscriber(sub_id)
-                            logger.info(f"[IMAP] Blocklisted: {sender_email}")
+                        blocklisted_now = False
+                        if scan_settings.get("blocklist_enabled", False):
+                            try:
+                                await client.blocklist_subscriber(sub_id)
+                                blocklisted_now = True
+                                logger.info(f"[IMAP] Blocklisted: {sender_email}")
+                            except Exception as e:
+                                logger.error(f"[IMAP] Failed to blocklist {sender_email}: {e}")
 
                         if campaign is None:
                             logger.info(

@@ -287,31 +287,55 @@ def _save_link_seen(seen: dict[int, set[int]]) -> None:
     )
 
 
-async def add_link_seen(updates: dict) -> None:
-    """Union list ids into the handled set of each subscriber."""
-    clean = {
+def _clean_link_updates(updates) -> dict[int, set[int]]:
+    return {
         sid: {lid for lid in (lists or []) if _valid_id(lid)}
         for sid, lists in (updates or {}).items() if _valid_id(sid)
     }
-    if not clean:
+
+
+async def update_link_seen(add: dict | None = None, remove: dict | None = None) -> None:
+    """Change the handled set of each subscriber: ``(old - remove) | add``.
+
+    ``add`` marks lists as already handled (an unsubscribe this app made, or
+    one that is a leftover of a blocklisting), ``remove`` forgets lists that
+    are subscribed again, so a later click on them is a new unsubscribe. The
+    change is applied to the file as it is now (under the log lock), so a
+    concurrent writer's entries for the same subscriber are never lost.
+
+    A subscriber left with nothing handled keeps an EMPTY entry: "known,
+    nothing handled" differs from "never seen", which the link scanner
+    baselines for an already processed address — dropping the entry would
+    make it swallow the next click. A removal for a subscriber with no entry
+    creates nothing.
+    """
+    add_c = _clean_link_updates(add)
+    remove_c = _clean_link_updates(remove)
+    if not add_c and not remove_c:
         return
     async with _log_lock:
         seen = load_link_seen()
-        for sid, lists in clean.items():
-            merged = seen.pop(sid, set()) | lists
-            seen[sid] = merged  # re-inserted: most recent last
-        _save_link_seen(seen)
+        changed = False
+        for sid in dict.fromkeys([*remove_c, *add_c]):
+            old = seen.get(sid)
+            new = ((old or set()) - remove_c.get(sid, set())) | add_c.get(sid, set())
+            if new == old or (old is None and not new):
+                continue
+            changed = True
+            seen.pop(sid, None)
+            seen[sid] = new  # re-inserted: most recent last
+        if changed:
+            _save_link_seen(seen)
 
 
-async def forget_link_seen(subscriber_ids) -> None:
-    """Drop subscribers from the handled set (after "Undo All" restored them)."""
-    drop = {sid for sid in (subscriber_ids or []) if _valid_id(sid)}
-    if not drop:
-        return
-    async with _log_lock:
-        seen = load_link_seen()
-        if drop & seen.keys():
-            _save_link_seen({sid: v for sid, v in seen.items() if sid not in drop})
+async def add_link_seen(updates: dict) -> None:
+    """Union list ids into the handled set of each subscriber."""
+    await update_link_seen(add=updates)
+
+
+async def forget_link_seen_lists(updates: dict) -> None:
+    """Forget list ids of each subscriber (they are subscribed again)."""
+    await update_link_seen(remove=updates)
 
 
 def load_settings() -> dict:

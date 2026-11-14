@@ -18,6 +18,7 @@ from app.services import auto_unblock_state
 from app.services.auto_unblock import (
     find_blocklisted_engaged,
     unblock_subscribers,
+    _RUN_LOCK as _AUTO_UNBLOCK_LOCK,
 )
 from app.services.campaign_scheduler import (
     load_schedule, is_within_send_window,
@@ -200,11 +201,14 @@ async def auto_unblock_loop():
             # Switched off in Settings → Auto-Unblock: skip the run (the
             # interval keeps ticking so turning it back on needs no restart).
             if auto_unblock_state.load_state()["enabled"]:
-                subs = await find_blocklisted_engaged(listmonk)
-                result = {"success": 0, "failed": 0, "bounces_deleted": 0, "unblocked": []}
-                if subs:
-                    result = await unblock_subscribers(listmonk, subs)
-                    logger.info(f"Auto-unblock: {result['success']} unblocked, {result['failed']} failed")
+                # One run at a time with "Run now" (shared lock): overlapping
+                # runs re-enabled the same contacts twice.
+                async with _AUTO_UNBLOCK_LOCK:
+                    subs = await find_blocklisted_engaged(listmonk)
+                    result = {"success": 0, "failed": 0, "bounces_deleted": 0, "unblocked": []}
+                    if subs:
+                        result = await unblock_subscribers(listmonk, subs)
+                        logger.info(f"Auto-unblock: {result['success']} unblocked, {result['failed']} failed")
                 await auto_unblock_state.record_run(result, "schedule")
             failures = 0
         except Exception as e:
@@ -584,12 +588,13 @@ async def auto_unblock_settings(data: dict):
 @app.post("/api/auto-unblock/run")
 async def auto_unblock_run_now():
     try:
-        subs = await find_blocklisted_engaged(listmonk)
-        if not subs:
-            result = {"success": 0, "failed": 0, "bounces_deleted": 0, "unblocked": [],
-                      "message": "No blocklisted engaged subscribers found"}
-        else:
-            result = await unblock_subscribers(listmonk, subs)
+        async with _AUTO_UNBLOCK_LOCK:
+            subs = await find_blocklisted_engaged(listmonk)
+            if not subs:
+                result = {"success": 0, "failed": 0, "bounces_deleted": 0, "unblocked": [],
+                          "message": "No blocklisted engaged subscribers found"}
+            else:
+                result = await unblock_subscribers(listmonk, subs)
         await auto_unblock_state.record_run(result, "manual")
         return result
     except Exception as e:

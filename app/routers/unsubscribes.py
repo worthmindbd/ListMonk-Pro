@@ -9,7 +9,7 @@ from app.services.imap_unsubscribe import (
 )
 from app.services.unsubscribe_log import (
     load_log, save_log, load_settings, save_settings,
-    unmark_processed, forget_link_seen, _log_lock,
+    unmark_processed, update_link_seen, _log_lock,
 )
 from app.services.link_unsubscribe import scan_link_unsubscribes
 from app.services import blocklist_registry
@@ -455,6 +455,19 @@ async def reset_all_unsubscribes():
                         }
                         return
 
+                # Lists the person had left before this opt-out stay
+                # unsubscribed after the restore. The link scanner must keep
+                # treating them as handled: forgetting them made the next
+                # scan read them as a fresh click and unsubscribe the
+                # restored lists all over again.
+                restored_set = {lid for lid in lists_removed if isinstance(lid, int)}
+                left_before = {
+                    lst["id"] for lst in subscriber.get("lists") or []
+                    if isinstance(lst, dict) and isinstance(lst.get("id"), int)
+                    and lst.get("subscription_status") == "unsubscribed"
+                    and lst["id"] not in restored_set
+                }
+
                 # Step 2: Re-enable subscriber (remove blocklist)
                 current_lists = [lst["id"] for lst in subscriber.get("lists", [])]
                 await listmonk.update_subscriber(sub_id, {
@@ -481,6 +494,8 @@ async def reset_all_unsubscribes():
                 results[idx] = {
                     "ok": True,
                     "detail": f"OK {email_addr}: enabled + re-added to lists {lists_removed}",
+                    "seen_add": left_before,
+                    "seen_remove": restored_set,
                 }
 
             except Exception as e:
@@ -531,9 +546,20 @@ async def reset_all_unsubscribes():
     restored_emails = [records[i].get("email", "") for i in ok_indices]
     if restored_emails:
         await unmark_processed(restored_emails)
-        # Their lists are confirmed again, so a later click on one of them is
-        # a new unsubscribe the link scanner must see.
-        await forget_link_seen(records[i].get("subscriber_id") for i in ok_indices)
+        # The restored lists are confirmed again, so a later click on one of
+        # them is a new unsubscribe the link scanner must see; the lists left
+        # earlier stay "handled".
+        seen_add: dict = {}
+        seen_remove: dict = {}
+        for i in ok_indices:
+            sid = records[i].get("subscriber_id")
+            seen_add.setdefault(sid, set()).update(results[i]["seen_add"])
+            seen_remove.setdefault(sid, set()).update(results[i]["seen_remove"])
+        # A subscriber restored by several records: a list one record
+        # restored is not "left before" because another one did not.
+        for sid, removed in seen_remove.items():
+            seen_add[sid] -= removed
+        await update_link_seen(add=seen_add, remove=seen_remove)
 
     return {
         "message": f"Reset complete: {restored_count} restored, {failed} failed (kept in log for retry)",
