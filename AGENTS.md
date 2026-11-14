@@ -569,8 +569,11 @@ next to an IP whose PTR named another domain and an IP on Barracuda. Rules:
   spam-policy only → warn, fail at ≥ 5 % of the period's sends (min 3).
 - DNS goes through the single seam `sending_reputation._query` (on top of
   `email_validation._resolve`); `tests/conftest.py` makes it time out for every test and
-  calls `invalidate()` (15-min report cache). Rows carry `chips` / `links` that the
-  Deliverability page renders generically.
+  calls `invalidate()` (15-min report cache). Rows carry `chips` / `links` / `steps` (next
+  steps, "What to do") that the Deliverability page renders generically; a row without chips
+  shows its `current_value`. `sender_rejections` leads with the count and its share of sends,
+  targets "0 rejections" and gives steps per reason plus the provider's reputation tool
+  (`PROVIDER_TOOLS`: Google Postmaster, Microsoft SNDS, Yahoo Sender Hub).
 
 **ListMonk's sending engine, as it really behaves (v6, `internal/manager/pipe.go`)** — the
 audit and the cold preset are built on these facts, verified on a live incident:

@@ -586,9 +586,23 @@ const Deliverability = {
                 // requests, manual lookups). External, so a new tab.
                 const links = Array.isArray(check.links) ? check.links : [];
                 const safe = links.filter(l => /^https:\/\//.test(String(l.url || '')));
-                if (!safe.length) return '';
-                return `<p class="deliv-check-note is-warn">${_dSvgIcon('info')}<span>${safe.map(l =>
-                    `<a href="${App.escapeHtml(l.url)}" target="_blank" rel="noopener noreferrer">${App.escapeHtml(l.label)} ↗</a>`).join(' · ')}</span></p>`;
+                const steps = (Array.isArray(check.steps) ? check.steps : [])
+                    .map(t => String(t ?? '').trim()).filter(Boolean);
+                if (!safe.length && !steps.length) return '';
+                const linkHtml = safe.map(l =>
+                    `<a href="${App.escapeHtml(l.url)}" target="_blank" rel="noopener noreferrer">${App.escapeHtml(l.label)} ↗</a>`).join(' · ');
+                if (!steps.length) {
+                    return `<p class="deliv-check-note is-warn">${_dSvgIcon('info')}<span>${linkHtml}</span></p>`;
+                }
+                return `
+                    <div class="deliv-check-note is-warn deliv-check-steps">
+                        ${_dSvgIcon('info')}
+                        <div>
+                            <strong>What to do</strong>
+                            <ol>${steps.map(t => `<li>${App.escapeHtml(t)}</li>`).join('')}</ol>
+                            ${linkHtml ? `<p>${linkHtml}</p>` : ''}
+                        </div>
+                    </div>`;
             }
         }
     },
@@ -666,11 +680,18 @@ const Deliverability = {
                 const ext = Array.isArray(raw.upload_extensions) ? raw.upload_extensions : [];
                 return ext.includes('*') ? [{ label: '* wildcard allowed', tone: 'bad' }] : [];
             }
-            default:
+            default: {
                 // Checks that describe their own facts (sending reputation).
-                return Array.isArray(check.chips)
-                    ? check.chips.map(c => ({ label: String(c.label ?? ''), tone: c.tone || undefined, wide: !!c.wide, title: String(c.label ?? '') }))
-                    : [];
+                const own = Array.isArray(check.chips) ? check.chips : [];
+                if (own.length) {
+                    return own.map(c => ({ label: String(c.label ?? ''), tone: c.tone || undefined, wide: !!c.wide, title: String(c.label ?? '') }));
+                }
+                // No itemised facts (DKIM selector, DMARC policy …): the
+                // measured value is the fact, so never leave the row bare.
+                const value = check.group === 'reputation' && typeof check.current_value === 'string'
+                    ? check.current_value.trim() : '';
+                return value ? [{ label: value, wide: value.length > 24, title: value }] : [];
+            }
         }
     },
 

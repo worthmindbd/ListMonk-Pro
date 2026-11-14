@@ -342,3 +342,38 @@ def test_reputation_endpoint(fake_dns):
     assert body["report"]["from_domain"] == "example.org"
     assert {c["id"] for c in body["checks"]} >= {"reverse_dns", "ip_blocklists", "spf", "dmarc"}
     assert body["alerts"] == []
+
+
+# ── Row display: value, target and next steps ───────────────────────────────
+
+async def test_rejection_row_shows_count_target_and_steps(fake_dns):
+    fake_dns.table.update(healthy_table())
+    lm = lm_with_bounces([_bounce(f"{c}@gmail.com", "soft: reputation_policy") for c in "abc"])
+    row = by_id(await sr.get_report(lm, SETTINGS))["sender_rejections"]
+    # The count leads the chips, the target is not the ambiguous word "none".
+    assert row["chips"][0]["label"].startswith("3 in 7 days")
+    assert row["recommended"] == "0 rejections"
+    assert any("Gmail" in s and "hold back" in s for s in row["steps"])
+    assert any("postmaster.google.com" in link["url"] for link in row["links"])
+    # Only the reasons that occurred get a step.
+    assert not any(s.startswith(("Blocklist", "Reverse DNS", "Authentication")) for s in row["steps"])
+
+
+async def test_config_rejection_steps_follow_the_reason(fake_dns):
+    fake_dns.table.update(healthy_table())
+    lm = lm_with_bounces([_bounce("c@yahoo.co.uk", "soft: reverse_dns", code="5.7.25")])
+    row = by_id(await sr.get_report(lm, SETTINGS))["sender_rejections"]
+    assert [s.split(":")[0] for s in row["steps"]] == ["Reverse DNS"]
+    assert [link["url"] for link in row["links"]] == ["https://senders.yahooinc.com/"]
+
+
+async def test_clean_rejection_row_has_no_steps(fake_dns):
+    fake_dns.table.update(healthy_table())
+    row = by_id(await sr.get_report(lm_with_bounces(), SETTINGS))["sender_rejections"]
+    assert row["status"] == "pass" and row["steps"] == [] and row["links"] == [] and row["chips"] == []
+
+
+def test_reputation_rows_render_value_and_steps():
+    js = open("static/js/deliverability.js", encoding="utf-8").read()
+    assert "check.current_value" in js          # chip-less rows (DKIM, DMARC) show their value
+    assert "check.steps" in js and "What to do" in js

@@ -573,10 +573,48 @@ async def get_report(listmonk, raw_settings: Optional[dict] = None, refresh: boo
 
 # ── Audit checks ────────────────────────────────────────────────────────────
 
-def _check(cid, name, description, status, value, recommended, impact, chips=None, links=None):
+def _check(cid, name, description, status, value, recommended, impact, chips=None, links=None,
+           steps=None):
     return {"id": cid, "group": "reputation", "name": name, "description": description,
             "status": status, "current_value": value, "recommended": recommended,
-            "impact": impact, "chips": chips or [], "links": links or []}
+            "impact": impact, "chips": chips or [], "links": links or [], "steps": steps or []}
+
+
+# Where each big mailbox provider shows a sender its own reputation.
+PROVIDER_TOOLS = {
+    "Gmail": ("Google Postmaster Tools (domain & IP reputation)", "https://postmaster.google.com/"),
+    "Microsoft": ("Microsoft SNDS (IP reputation)", "https://sendersupport.olc.protection.outlook.com/snds/"),
+    "Yahoo / AOL": ("Yahoo Sender Hub", "https://senders.yahooinc.com/"),
+}
+
+
+def _rejection_steps(rej: dict, domain: Optional[str]) -> tuple[list[str], list[dict]]:
+    """What to do about sender-blamed rejections, by reason and provider."""
+    reasons = rej.get("by_reason") or {}
+    providers = [p for p in sorted(rej.get("by_provider") or {}) if p != "Other"]
+    steps: list[str] = []
+    if reasons.get(SENDER_REASONS["soft: blacklist"]):
+        steps.append("Blocklist: find the listing in the \"Sending IPs Not on Blocklists\" row and "
+                     "request removal before sending more.")
+    if reasons.get(SENDER_REASONS["soft: reverse_dns"]):
+        steps.append("Reverse DNS: set the sending IP's PTR at the VPS provider to a name that "
+                     "resolves back to the IP (see the Reverse DNS row).")
+    if reasons.get(SENDER_REASONS["soft: auth_failed"]):
+        steps.append("Authentication: send a test to an inbox you own and open the raw message — "
+                     "SPF, DKIM and DMARC must all say pass"
+                     + (f", with DKIM d= on {domain}." if domain else "."))
+    if reasons.get(SENDER_REASONS["soft: reputation_policy"]):
+        who = ", ".join(providers) if providers else "the rejecting receivers"
+        steps += [
+            f"Spam / reputation: hold back the {who} addresses for now; every further "
+            "rejection lowers the domain's standing.",
+            "Lower the daily volume (Settings → Warm-up) and send to contacts who open and "
+            "reply before going back to cold addresses.",
+            "Keep the mail plain and personal: plain text, one link at most, no images or tracking.",
+        ]
+    links = [{"label": PROVIDER_TOOLS[p][0], "url": PROVIDER_TOOLS[p][1]}
+             for p in providers if p in PROVIDER_TOOLS]
+    return steps, links
 
 
 def build_checks(report: dict) -> list[dict]:
@@ -714,6 +752,7 @@ def build_checks(report: dict) -> list[dict]:
 
     # Rejections over the last days.
     rej = report["rejections"]
+    steps, links = [], []
     if rej.get("error"):
         status, value = "info", "bounce history unavailable"
     else:
@@ -729,14 +768,18 @@ def build_checks(report: dict) -> list[dict]:
         value = (f"{rej['total']} in {rej['days']} days"
                  + (f" ({rate:.0%} of {rej['sent']} sent)" if rate is not None else "")) if rej["total"] \
             else f"none in {rej['days']} days"
-    chips = [{"label": f"{p}: {n}", "tone": "bad"} for p, n in sorted(rej.get("by_provider", {}).items())]
+        if rej["total"]:
+            steps, links = _rejection_steps(rej, domain)
+    # The count (and its share of the period's sends) leads: it is what the status is judged on.
+    chips = [{"label": value, "wide": True}] if rej.get("total") and not rej.get("error") else []
+    chips += [{"label": f"{p}: {n}", "tone": "bad"} for p, n in sorted(rej.get("by_provider", {}).items())]
     chips += [{"label": f"{label}: {n}", "tone": "warn"} for label, n in sorted(rej.get("by_reason", {}).items())]
     checks.append(_check(
         "sender_rejections", "Receivers Accepting Your Mail",
         f"Bounces of the last {rej['days']} days where the receiver blamed the sender, not the "
         "address: flagged as spam or low reputation, a blocklist, reverse DNS or failed "
         "authentication. They count as soft bounces, but they mean the mail never arrived.",
-        status, value, "none", "Critical", chips,
+        status, value, "0 rejections", "Critical", chips, links, steps,
     ))
     return checks
 

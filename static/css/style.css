@@ -5294,6 +5294,25 @@ td .tag {
     font-weight: 600;
 }
 
+.deliv-check-steps strong {
+    display: block;
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.deliv-check-steps ol {
+    margin: 4px 0 0;
+    padding-left: 1.2em;
+}
+
+.deliv-check-steps li + li {
+    margin-top: 3px;
+}
+
+.deliv-check-steps p {
+    margin: 6px 0 0;
+}
+
 /* ── Row controls ──────────────────────────────────────────── */
 .deliv-check-controls {
     display: flex;
